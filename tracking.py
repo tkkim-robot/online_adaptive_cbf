@@ -31,19 +31,16 @@ class QPError(Exception):
 
 class LocalTrackingController:
     def __init__(self, X0, type='DynamicUnicycle2D', robot_id=0, dt=0.05,
-                  show_animation=False, save_animation=False, ax=None, fig=None, env=None):
+                  show_animation=False, save_animation=False, ax=None, fig=None, env=None, data_generation=True):
         self.type = type
         self.robot_id = robot_id # robot id = 1 has the plot handler
         self.dt = dt
+        self.data_generation = data_generation
 
         self.current_goal_index = 0  # Index of the current goal in the path
         self.reached_threshold = 1.0
 
-        if self.type == 'Unicycle2D':
-            self.alpha = 1.0
-            self.v_max = 1.0
-            self.w_max = 0.5
-        elif self.type == 'DynamicUnicycle2D':
+        if self.type == 'DynamicUnicycle2D':
             self.alpha1 = 1.5
             self.alpha2 = 1.5
             # v_max is set to 1.0 inside the robot class
@@ -84,9 +81,12 @@ class LocalTrackingController:
 
     def setup_robot(self, X0):
         from robots.robot import BaseRobot
-        self.robot = BaseRobot(X0.reshape(-1, 1), self.dt, self.ax, self.type, self.robot_id)
+        self.robot = BaseRobot(X0.reshape(-1, 1), self.dt, self.ax, self.type, self.robot_id, self.data_generation)
 
-    def setup_control_problem(self):
+
+
+    '''change to mpc formulation'''
+    def setup_control_problem(self): 
         self.u = cp.Variable((2, 1))
         self.u_ref = cp.Parameter((2, 1), value=np.zeros((2, 1)))
         self.A1 = cp.Parameter((1, 2), value=np.zeros((1, 2)))
@@ -102,6 +102,9 @@ class LocalTrackingController:
                             cp.abs(self.u[0]) <= self.a_max,
                             cp.abs(self.u[1]) <= self.w_max]
         self.cbf_controller = cp.Problem(objective, constraints)
+
+
+
 
     def set_waypoints(self, waypoints):
         self.waypoints = waypoints
@@ -127,6 +130,7 @@ class LocalTrackingController:
             )
         self.robot.test_type = 'cbf_qp'
 
+
     def get_nearest_obs(self, detected_obs):
         # if there was new obstacle detected, update the obs
         if len(detected_obs) != 0:
@@ -144,6 +148,7 @@ class LocalTrackingController:
         nearest_obstacle = all_obs[min_distance_index]
         return nearest_obstacle.reshape(-1, 1)
     
+    
     def is_collide_unknown(self):
         if self.unknown_obs is None:
             return False
@@ -152,6 +157,7 @@ class LocalTrackingController:
             robot_radius = self.robot.robot_radius
             distance = np.linalg.norm(self.robot.X[:2] - obs[:2])
             return distance < obs[2] + robot_radius
+
 
     def update_goal(self):
         '''
@@ -170,6 +176,7 @@ class LocalTrackingController:
 
         goal = np.array(self.waypoints[self.current_goal_index][0:2]) # set goal to next waypoint's (x,y)
         return goal
+
 
     def control_step(self):
         '''
@@ -192,14 +199,21 @@ class LocalTrackingController:
             # deactivate the CBF constraints
             self.A1.value = np.zeros_like(self.A1.value)
             self.b1.value = np.zeros_like(self.b1.value)
-        elif self.type == 'Unicycle2D':
-            h, dh_dx = self.robot.agent_barrier(nearest_obs)
-            self.A1.value[0,:] = dh_dx @ self.robot.g()
-            self.b1.value[0,:] = dh_dx @ self.robot.f() + self.alpha * h
         elif self.type == 'DynamicUnicycle2D':
             h, h_dot, dh_dot_dx = self.robot.agent_barrier(nearest_obs)
             self.A1.value[0,:] = dh_dot_dx @ self.robot.g()
             self.b1.value[0,:] = dh_dot_dx @ self.robot.f() + (self.alpha1+self.alpha2) * h_dot + self.alpha1*self.alpha2*h
+
+
+        # # 2. Update the CBF constraints
+        # if nearest_obs is None:
+        #     # deactivate the CBF constraints
+        #     self.A1.value = np.zeros_like(cbf_2nd_order)
+        # elif self.type == 'DynamicUnicycle2D':
+        #     h, h_dot, h_ddot = self.robot.agent_barrier(nearest_obs)
+        #     cbf_2nd_order = h_ddot + (self.alpha1+self.alpha2) * h_dot + self.alpha1*self.alpha2*h
+
+
 
         # 3. Compuite nominal control input, pre-defined in the robot class
         if goal is None:
@@ -226,18 +240,24 @@ class LocalTrackingController:
                                     "/output/animations/" + "t_step_" + str(self.ani_idx) + ".png")
             raise QPError
 
+
+
+
         # 6. Step the robot
         self.robot.step(self.u.value)
         if self.show_animation:
             self.robot.render_plot()
 
-        # 7. Update sensing information
-        self.robot.update_sensing_footprints()
-        self.robot.update_safety_area()
+        # 7. Update sensing information / Skipped while data generation
+        if self.data_generation == False:
+            self.robot.update_sensing_footprints()
+            self.robot.update_safety_area()
 
-        beyond_flag = self.robot.is_beyond_sensing_footprints()
-        if beyond_flag and self.show_animation:
-            print("Visibility Violation")
+            beyond_flag = self.robot.is_beyond_sensing_footprints()
+            if beyond_flag and self.show_animation:
+                print("Visibility Violation")
+        else: 
+            beyond_flag = False
 
         if self.show_animation:
             if self.robot_id == 0:
@@ -251,6 +271,7 @@ class LocalTrackingController:
         if goal is None:
             return -1 # all waypoints reached
         return beyond_flag
+    
     
     def run_all_steps(self, tf=30):
         print("===================================")
@@ -285,6 +306,7 @@ class LocalTrackingController:
 
         return unexpected_beh
 
+
 def single_agent_main():
     dt = 0.05
 
@@ -305,7 +327,6 @@ def single_agent_main():
     ax, fig = plot_handler.plot_grid("Local Tracking Controller")
     env_handler = env.Env()
 
-    #type = 'Unicycle2D'
     type = 'DynamicUnicycle2D'
     tracking_controller = LocalTrackingController(x_init, type=type, dt=dt,
                                          show_animation=True,
@@ -317,6 +338,7 @@ def single_agent_main():
     # tracking_controller.set_unknown_obs(unknown_obs)
     tracking_controller.set_waypoints(waypoints)
     unexpected_beh = tracking_controller.run_all_steps(tf=30)
+
 
 def multi_agent_main():
     dt = 0.05
