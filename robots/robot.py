@@ -14,7 +14,7 @@ Created on June 21st, 2024
 This code implements a BaseRobot class for 2D robot simulation with unicycle dynamics.
 It includes functionalities for robot movement, FoV visualization, obstacle detection, and safety area calculation (maximum braking distance).
 The class supports both kinematic (Unicycle2D) and dynamic (DynamicUnicycle2D) unicycle models.
-It incorporates Control Barrier Function (CBF) constraints for obstacle avoidance, which can be used as within a CBF-QP formulation.
+It incorporates Control Barrier Function (CBF) constraints for obstacle avoidance, which can be used as within a CBF-MPC formulation.
 The main function demonstrates the robot's movement towards a goal while avoiding an obstacle, visualizing the process in real-time.
 
 @required-scripts: robots/unicycle2D.py, robots/dynamic_unicycle2D.py

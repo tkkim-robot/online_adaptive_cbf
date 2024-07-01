@@ -14,7 +14,7 @@ Created on June 20th, 2024
 @author: Taekyung Kim
 
 @description: 
-This code implements a local tracking controller for 2D robot navigation using Control Barrier Functions (CBF) and Quadratic Programming (QP).
+This code implements a local tracking controller for 2D robot navigation using Control Barrier Functions (CBF) and Model Predictive Control (MPC).
 It supports both kinematic (Unicycle2D) and dynamic (DynamicUnicycle2D) unicycle models, with functionality for obstacle avoidance and waypoint following.
 The controller includes real-time visualization capabilities and can handle both known and unknown obstacles.
 The main functions demonstrate single and multi-agent scenarios, showcasing the controller's ability to navigate complex environments.
@@ -24,7 +24,7 @@ The main functions demonstrate single and multi-agent scenarios, showcasing the 
 
 class CollisionError(Exception):
     '''
-    Exception raised for errors when QP is infeasible or 
+    Exception raised for errors when  
     the robot collides with the obstacle
     '''
     def __init__(self, message="ERROR in Collision"):
@@ -45,8 +45,8 @@ class LocalTrackingController:
         self.reached_threshold = 1.0
 
         if self.type == 'DynamicUnicycle2D':
-            self.alpha1 = 1.5
-            self.alpha2 = 1.5
+            self.gamma1 = 0.1
+            self.gamma2 = 0.1
             # v_max is set to 1.0 inside the robot class
             self.v_max = 1.0
             self.a_max = 0.5
@@ -80,14 +80,12 @@ class LocalTrackingController:
         else:
             self.ax = plt.axes() # dummy placeholder
 
-        # Setup control problem MPC 
+        # Setup MPC problem  
         self.goal = np.array(self.waypoints[self.current_goal_index]).reshape(-1, 1)
-        self.near_obs = np.array([10.0,10.0,0.1]).reshape(-1, 1)
-        self.horizon = 30
-        self.gamma1 = 0.1
-        self.gamma2 = 0.1
+        self.near_obs = np.array([10.0,10.0,0.1]).reshape(-1, 1) # Set initial obs far away
+        self.horizon = 10
         self.Q = np.diag([50, 50, 0.01, 30]) # State cost matrix
-        self.R = np.array([0.5, 0.5]) # Controls cost matrix
+        self.R = np.array([0.5, 0.5]) # Input cost matrix
         self.setup_robot(X0)
         self.model = self.create_model()
         self.mpc = self.create_mpc(self.model)
@@ -95,32 +93,10 @@ class LocalTrackingController:
         self.estimator = do_mpc.estimator.StateFeedback(self.model)
         self.set_init_state()
         
-        
-        # self.setup_control_problem()
 
     def setup_robot(self, X0):
         from robots.robot import BaseRobot
         self.robot = BaseRobot(X0.reshape(-1, 1), self.dt, self.ax, self.type, self.robot_id, self.data_generation, goal=self.goal, obs=self.unknown_obs)
-
-
-    def setup_control_problem(self): 
-        self.u = cp.Variable((2, 1))
-        self.u_ref = cp.Parameter((2, 1), value=np.zeros((2, 1)))
-        self.A1 = cp.Parameter((1, 2), value=np.zeros((1, 2)))
-        self.b1 = cp.Parameter((1, 1), value=np.zeros((1, 1)))
-        objective = cp.Minimize(cp.sum_squares(self.u - self.u_ref))
-
-        if self.type == 'Unicycle2D':
-            constraints = [self.A1 @ self.u + self.b1 >= 0,
-                           cp.abs(self.u[0]) <= self.v_max,
-                           cp.abs(self.u[1]) <= self.w_max]
-        elif self.type == 'DynamicUnicycle2D':
-            constraints = [self.A1 @ self.u + self.b1 >= 0,
-                            cp.abs(self.u[0]) <= self.a_max,
-                            cp.abs(self.u[1]) <= self.w_max]
-        self.cbf_controller = cp.Problem(objective, constraints)
-
-
 
     def create_model(self):
         """Creates a model for the MPC controller"""
@@ -206,7 +182,7 @@ class LocalTrackingController:
         return mpc
 
     def get_cbf_constraints(self, mpc):
-        """Compute HOCBF constraints for the MPC controller"""
+        """Compute DT-HOCBF constraints for the MPC controller"""
         x_k = self.model.x['x']  # Current state [0] xpos, [1] ypos, [2] orien, [3] velocity
         u_k = self.model.u['u']  # Current control input [0] acc, [1] omega
 
@@ -231,6 +207,7 @@ class LocalTrackingController:
         return mpc        
     
     def set_tvp_for_mpc(self, mpc):
+        """Set Time Varying Parameters for MPC controller"""
         tvp_struct_mpc = mpc.get_tvp_template()
         def tvp_fun_mpc(t_now):
             tvp_struct_mpc['_tvp', :, "gamma1"] = self.gamma1
@@ -242,6 +219,7 @@ class LocalTrackingController:
         return mpc
       
     def define_simulator(self):
+        """Set MPC simulator"""
         simulator = do_mpc.simulator.Simulator(self.model)
         simulator.set_param(t_step=self.dt)
         tvp_template = simulator.get_tvp_template()
@@ -255,7 +233,7 @@ class LocalTrackingController:
         return simulator
 
     def set_init_state(self):
-        """Sets the initial state in all components."""
+        """Sets the initial state in MPC for all components."""
         self.mpc.x0 = self.robot.X.flatten()
         self.simulator.x0 = self.robot.X.flatten()
         self.estimator.x0 = self.robot.X.flatten()
@@ -306,15 +284,6 @@ class LocalTrackingController:
         nearest_obstacle = all_obs[min_distance_index]
         return nearest_obstacle.reshape(-1, 1)
 
-    # def is_collide_unknown(self):
-    #     if self.unknown_obs is None:
-    #         return False
-    #     for obs in self.unknown_obs:
-    #         # check if the robot collides with the obstacle
-    #         robot_radius = self.robot.robot_radius
-    #         distance = np.linalg.norm(self.robot.X[:2] - obs[:2])
-    #         return distance < obs[2] + robot_radius
-
     def is_collide_unknown(self):
         if self.unknown_obs is None:
             return False
@@ -347,12 +316,12 @@ class LocalTrackingController:
 
     def control_step(self):
         '''
-        Simulate one step of tracking control with CBF-QP with the given waypoints.
+        Simulate one step of tracking control with CBF-MPC with the given waypoints.
         Output: 
             - -1: all waypoints reached
             - 0: normal
             - 1: visibility violation
-            - raise QPError: if the QP is infeasible or the robot collides with the obstacle
+            - raise CollisionError: if the robot collides with the obstacle
         '''
 
         goal = self.update_goal()
@@ -369,12 +338,11 @@ class LocalTrackingController:
             self.near_obs = nearest_obs.reshape(-1, 1)
         else:
             self.near_obs = np.array([[10.0, 10.0, 0.1]]).reshape(-1, 1)  # A default far away obstacle
-        # self.mpc.set_tvp_fun(self.set_tvp_for_mpc(self.mpc).tvp_fun)
 
          # 3. Compute control input
         u0 = self.mpc.make_step(self.robot.X.flatten())
 
-        # 4. Raise an error if the QP is infeasible, or the robot collides with the obstacle
+        # 4. Raise an error if the robot collides with the obstacle
         collide = self.is_collide_unknown()
         if collide:
             if self.show_animation:
@@ -397,7 +365,7 @@ class LocalTrackingController:
         if self.show_animation:
             self.robot.render_plot()
 
-        # 6. Update sensing information / Skipped while data generation
+        # 6. Update sensing information (Skipped while data generation)
         if self.data_generation == False:
             self.robot.update_sensing_footprints()
             self.robot.update_safety_area()
@@ -434,7 +402,6 @@ class LocalTrackingController:
             if ret == -1: # all waypoints reached
                 break
 
-                        
         # convert the image sequence to a video
         if self.show_animation and self.save_animation:
             subprocess.call(['ffmpeg',
