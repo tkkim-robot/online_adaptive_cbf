@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import do_mpc
+import casadi
 from casadi import *
 
 from shapely.geometry import Polygon, Point, LineString
@@ -52,20 +53,6 @@ class BaseRobot:
         self.robot_radius = 0.25 # including padding
         self.max_decel = 0.5 # [m/s^2]
         self.max_ang_decel = 0.5  # [rad/s^2]
-
-        # MPC 
-        self.goal = goal
-        self.obs = obs
-        self.horizon = 30
-        self.gamma1 = 0.2
-        self.gamma2 = 0.2
-        self.Q = np.diag([50, 50, 0.01, 30]) # State cost matrix
-        self.R = np.array([0.5, 0.5]) # Controls cost matrix
-        self.model = self.create_model()
-        self.mpc = self.create_mpc(self.model)
-        self.simulator = self.define_simulator()
-        self.estimator = do_mpc.estimator.StateFeedback(self.model)
-        self.set_init_state()
       
         # FOV parameters
         self.fov_angle = np.deg2rad(70)  # [rad]
@@ -112,9 +99,9 @@ class BaseRobot:
     
     def stop(self):
         return self.robot.stop()
-    
-    def agent_barrier(self, obs):
-        return self.robot.agent_barrier(self.X, obs, self.robot_radius)
+
+    def agent_barrier(self, x_k, u_k, gamma1, gamma2, dt, robot_radius, obs):
+        return self.robot.agent_barrier_casadi(x_k, u_k, gamma1, gamma2, dt, robot_radius, obs)
 
     def step(self, U):
         # wrap step function
@@ -302,175 +289,6 @@ class BaseRobot:
 
         return fov_left, fov_right
       
-
-    def create_model(self):
-        model_type = 'discrete'
-        model = do_mpc.model.Model(model_type)
-
-        # States (_x[0] = x pos, _x[1] = y pos, _x[2] = theta _x[3] = velocity)
-        n_states = 4
-        _x = model.set_variable(var_type='_x', var_name='x', shape=(n_states, 1)) 
-        
-        # Inputs (u1 = linear acceleration, u2 = angular velocity)
-        n_controls = 2
-        _u = model.set_variable(var_type='_u', var_name='u', shape=(n_controls, 1))
-
-        _p1 = model.set_variable(var_type='_tvp', var_name='gamma1')
-        _p2 = model.set_variable(var_type='_tvp', var_name='gamma2')
-
-        # State Space equations for Dynamic unicycle model
-        x_next = _x[0] + _x[3] * cos(_x[2]) * self.dt
-        y_next = _x[1] + _x[3] * sin(_x[2]) * self.dt
-        theta_next = _x[2] + _u[1] * self.dt
-        v_next = _x[3] + _u[0] * self.dt
-
-        # Update model RHS
-        model.set_rhs('x', vertcat(x_next, y_next, theta_next, v_next))
-
-        # stage and terminal cost of the control problem
-        model, cost_expr = self.get_cost_expression(model)
-        model.set_expression(expr_name='cost', expr=cost_expr)
-        
-        model.setup()
-        return model
-
-    def create_mpc(self, model):
-        mpc = do_mpc.controller.MPC(model)
-        mpc.settings.supress_ipopt_output()
-
-        setup_mpc = {'n_robust': 0,  # Robust horizon
-                     'n_horizon': self.horizon,
-                     't_step': self.dt,
-                     'state_discretization': 'discrete',
-                     'store_full_solution': True,
-                     }
-        mpc.set_param(**setup_mpc)
-
-        # Configure objective function
-        mterm = self.model.aux['cost'] # Terminal cost
-        lterm = self.model.aux['cost'] # Stage cost
-        mpc.set_objective(mterm=mterm, lterm=lterm)
-        mpc.set_rterm(u=self.R) # Input penalty (R diagonal matrix in objective fun)
-
-        # Bounds
-        max_u = np.array([self.max_decel, self.max_ang_decel])
-        mpc.bounds['lower', '_u', 'u'] = -max_u
-        mpc.bounds['upper', '_u', 'u'] = max_u
-
-        # Set gamma1 and gamma2 as TVP
-        mpc = self.set_tvp_for_mpc(mpc)
-        
-        # Add CBF constraints
-        if self.obs is not None:
-            mpc = self.get_cbf_constraints(mpc) 
-
-        mpc.setup()
-        mpc.settings.supress_ipopt_output()
-        return mpc
-
-    def get_cost_expression(self, model):
-        """Defines the objective function wrt the state cost"""
-        X = SX.zeros(4, 1)
-        X[0] = model.x['x'][0] - self.goal[0]  # x position error
-        X[1] = model.x['x'][1] - self.goal[1]  # y position error
-        X[2] = model.x['x'][2] - self.goal[2]  # theta orientation error
-        X[3] = model.x['x'][3] - self.goal[3]  # v (velocity) error
-
-        cost_expression = transpose(X) @ self.Q @ X
-        
-        return model, cost_expression
-    
-    def get_cbf_constraints(self, mpc):
-        # Get state vector x_{t+k+1}
-        x_k = self.model.x['x']  # Current state [0] xpos, [1] ypos, [2] orien, [3] velocity
-        u_k = self.model.u['u']  # Current control input [0] acc, [1] omega
-
-        #p_template = self.simulator.get_p_template()
-        gamma1 = self.model.tvp['gamma1']
-        gamma2 = self.model.tvp['gamma2']
-        
-        # Dynamics equations for the next states
-        x_next = x_k[0] + x_k[3] * cos(x_k[2]) * self.dt
-        y_next = x_k[1] + x_k[3] * sin(x_k[2]) * self.dt
-        theta_next = x_k[2] + u_k[1] * self.dt
-        v_next = x_k[3] + u_k[0] * self.dt
-
-        x_next2 = x_next + v_next * cos(theta_next) * self.dt
-        y_next2 = y_next + v_next * sin(theta_next) * self.dt
-        theta_next2 = theta_next + u_k[1] * self.dt
-        v_next2 = v_next + u_k[0] * self.dt
-        
-        # Next states
-        x_k1 = vertcat(x_next, y_next, theta_next, v_next)
-        x_k2 = vertcat(x_next2, y_next2, theta_next2, v_next2)
-        
-        cbf_constraints = []
-        
-        h_k2 = self.h(x_k2, self.obs)
-        h_k1 = self.h(x_k1, self.obs)
-        h_k = self.h(self.model.x['x'], self.obs)
-        h_ddot = h_k2 - 2 * h_k1 + h_k
-        h_dot = h_k1 - h_k
-        cbf_2nd_order = h_ddot + (gamma1 + gamma2) * h_dot + (gamma1 * gamma2) * h_k
-        cbf_constraints.append(-cbf_2nd_order)
-            
-        i = 0
-        for cbc in cbf_constraints:
-            mpc.set_nl_cons('cbf_constraint'+str(i), cbc, ub=0)
-            i += 1
-        
-        return mpc        
-    
-    def h(self, x, obstacle):
-        """Computes the Control Barrier Function"""
-        x_obs, y_obs, r_obs = obstacle
-        h = (x[0] - x_obs)**2 + (x[1] - y_obs)**2 - (self.robot_radius + r_obs)**2
-        return h
-    
-    def set_tvp_for_mpc(self, mpc):
-        tvp_struct_mpc = mpc.get_tvp_template()
-        def tvp_fun_mpc(t_now):
-            tvp_struct_mpc['_tvp', :, "gamma1"] = self.gamma1
-            tvp_struct_mpc['_tvp', :, "gamma2"] = self.gamma2
-            return tvp_struct_mpc
-        mpc.set_tvp_fun(tvp_fun_mpc)
-        return mpc
-      
-    def define_simulator(self):
-        simulator = do_mpc.simulator.Simulator(self.model)
-        simulator.set_param(t_step=self.dt)
-        tvp_template = simulator.get_tvp_template()
-
-        def tvp_fun(t_now):
-            return tvp_template
-        simulator.set_tvp_fun(tvp_fun)
-
-        simulator.setup()
-
-        return simulator
-
-    def set_init_state(self):
-        """Sets the initial state in all components."""
-        self.mpc.x0 = self.X
-        self.simulator.x0 = self.X
-        self.estimator.x0 = self.X
-        self.mpc.set_initial_guess()
-      
-    # def run_simulation(self):
-    #     for k in range(self.sim_time):
-    #         u0 = self.mpc.make_step(x0)
-    #         y_next = self.simulator.make_step(u0)
-    #         x0 = self.estimator.make_step(y_next)
-    #         self.X = x0.reshape(-1, 1)
-    #         self.render_plot()
-
-    #         fig.canvas.draw()
-    #         plt.pause(0.01)
-      
-    def nominal_input(self, goal, d_min=0.05):
-        return self.robot.nominal_input(self.X, goal, d_min)
-
-    
         
 if __name__ == "__main__":
 
@@ -498,33 +316,44 @@ if __name__ == "__main__":
     
     robot = BaseRobot(np.array([-1, -1, np.pi / 4, 0.0]).reshape(-1, 1), dt, ax, type=type, data_generation=True, goal=goal, obs=obs)
 
-    mpc = robot.mpc
-    simulator = do_mpc.simulator.Simulator(robot.model)
-    simulator.set_param(t_step=dt)
-    tvp_template = simulator.get_tvp_template()
 
-    def tvp_fun(t_now):
-        return tvp_template
-    simulator.set_tvp_fun(tvp_fun)
+
+
+    # mpc = robot.mpc
+    # simulator = do_mpc.simulator.Simulator(robot.model)
+    # simulator.set_param(t_step=dt)
+    # tvp_template = simulator.get_tvp_template()
+
+    # def tvp_fun(t_now):
+    #     return tvp_template
+    # simulator.set_tvp_fun(tvp_fun)
     
-    simulator.setup()
+    # simulator.setup()
 
-    estimator = do_mpc.estimator.StateFeedback(robot.model)
+    # estimator = do_mpc.estimator.StateFeedback(robot.model)
 
-    x0 = robot.X.flatten()
-    mpc.x0 = x0
-    simulator.x0 = x0
-    estimator.x0 = x0
-    mpc.set_initial_guess()
+    # x0 = robot.X.flatten()
+    # mpc.x0 = x0
+    # simulator.x0 = x0
+    # estimator.x0 = x0
+    # mpc.set_initial_guess()
 
-    for i in range(num_steps):
-        u0 = mpc.make_step(x0)
-        y_next = simulator.make_step(u0)
-        x0 = estimator.make_step(y_next)
+    # for i in range(num_steps):
+    #     u0 = mpc.make_step(x0)
+    #     y_next = simulator.make_step(u0)
+    #     x0 = estimator.make_step(y_next)
         
-        robot.X = x0.reshape(-1, 1)
-        robot.render_plot()
+    #     robot.X = x0.reshape(-1, 1)
+    #     robot.render_plot()
 
-        fig.canvas.draw()
-        plt.pause(0.01)
+    #     if i == 10:
+    #         new_goal = np.array([2, 0.0, 0, 0])
+    #         robot.goal = new_goal.reshape(-1, 1)
+    #         print("d")
+    #         new_obs = np.array([1.5, -0.5, 0.03]).reshape(-1, 1)  # Example new obstacle
+    #         robot.obs = new_obs
+
+
+    #     fig.canvas.draw()
+    #     plt.pause(0.01)
         
