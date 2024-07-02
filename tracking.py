@@ -42,11 +42,11 @@ class LocalTrackingController:
         self.waypoints = waypoints
 
         self.current_goal_index = 0  # Index of the current goal in the path
-        self.reached_threshold = 1.0
+        self.reached_threshold = 0.5
 
         if self.type == 'DynamicUnicycle2D':
-            self.gamma1 = 0.1
-            self.gamma2 = 0.1
+            self.gamma1 = 0.05
+            self.gamma2 = 0.05
             # v_max is set to 1.0 inside the robot class
             self.v_max = 1.0
             self.a_max = 0.5
@@ -80,7 +80,7 @@ class LocalTrackingController:
         else:
             self.ax = plt.axes() # dummy placeholder
 
-        # Setup MPC problem  
+        # Setup DT-MPC problem  
         self.goal = np.array(self.waypoints[self.current_goal_index]).reshape(-1, 1)
         self.near_obs = np.array([10.0,10.0,0.1]).reshape(-1, 1) # Set initial obs far away
         self.horizon = 10
@@ -122,8 +122,8 @@ class LocalTrackingController:
         _obs = model.set_variable(var_type='_tvp', var_name='obs', shape=(3, 1)) 
 
         # State Space equations in one line
-        f_x = self.robot.robot.f_casadi(_x) # FIXME: in BaseRobot class, define f_casadi as self.f_casadi, then, you can call the funtion as self.robot.f_casadi, not as self.robot.robot.f_casadi. (goes same for every otehr functions as well)
-        g_x = self.robot.robot.g_casadi(_x)
+        f_x = self.robot.f_casadi(_x) 
+        g_x = self.robot.g_casadi(_x)
         X_next = _x + (f_x + casadi.mtimes(g_x, _u)) * self.dt
         
         # Update model RHS
@@ -194,7 +194,7 @@ class LocalTrackingController:
         cbf_constraints = []
         
         if obs != None:
-            hocbf_2nd_order = self.robot.robot.agent_barrier_casadi(x_k, u_k, gamma1, gamma2, self.dt, self.robot.robot_radius, obs)
+            hocbf_2nd_order = self.robot.agent_barrier(x_k, u_k, gamma1, gamma2, self.dt, self.robot.robot_radius, obs)
             cbf_constraints.append(-hocbf_2nd_order)
         else:
             pass
@@ -263,7 +263,7 @@ class LocalTrackingController:
                     alpha=0.4
                 )
             )
-        self.robot.test_type = 'cbf_qp' # FIXME:change it to mpc-cbf
+        self.robot.test_type = 'mpc-cbf'
 
     def get_nearest_obs(self, detected_obs):
         # If there are new obstacles detected, update the obs

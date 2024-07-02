@@ -97,11 +97,17 @@ class BaseRobot:
     def g(self):
         return self.robot.g(self.X)
     
+    def f_casadi(self, X):
+        return self.robot.f_casadi(X)
+    
+    def g_casadi(self, X):
+        return self.robot.g_casadi(X)
+    
     def stop(self):
         return self.robot.stop()
 
     def agent_barrier(self, x_k, u_k, gamma1, gamma2, dt, robot_radius, obs):
-        return self.robot.agent_barrier_casadi(x_k, u_k, gamma1, gamma2, dt, robot_radius, obs)
+        return self.robot.agent_barrier(x_k, u_k, gamma1, gamma2, dt, robot_radius, obs)
 
     def step(self, U):
         # wrap step function
