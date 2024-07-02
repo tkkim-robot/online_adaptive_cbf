@@ -54,10 +54,13 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
         # Run simulation
         unexpected_beh = 0
         deadlock_time = 0.0
+        sim_time = 0.0
 
         for _ in range(int(max_sim_time / dt)):
             ret = tracking_controller.control_step()
             unexpected_beh += ret
+
+            sim_time += dt
 
             # Check for deadlock
             if np.abs(tracking_controller.robot.X[3]) < deadlock_threshold:
@@ -67,14 +70,14 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
             try:
                 tracking_controller.control_step()
             except CollisionError:
-                return distance, velocity, theta, gamma1, gamma2, False, deadlock_time
+                return distance, velocity, theta, gamma1, gamma2, False, deadlock_time, sim_time
 
         # If no collision occurs within max_sim_time, consider it a success
         success = unexpected_beh in (-1, 0)
-        return distance, velocity, theta, gamma1, gamma2, success, deadlock_time
+        return distance, velocity, theta, gamma1, gamma2, success, deadlock_time, sim_time
 
     except CollisionError:
-        return distance, velocity, theta, gamma1, gamma2, False, 0.0
+        return distance, velocity, theta, gamma1, gamma2, False, 0.0, 0.0
 
 def worker(params):
     distance, velocity, theta, gamma1, gamma2 = params
@@ -104,14 +107,13 @@ def generate_data(samples_per_dimension=5, num_processes=8):
 
     return results
 
-
 if __name__ == "__main__":
     from utils import plotting
     from utils import env
 
-    datapoint = 3
+    datapoint = 2
     num_processes = 14
     results = generate_data(datapoint, num_processes)
-    df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Deadlock Time'])
+    df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Deadlock Time', 'Simulation Time'])
     df.to_csv(f'data_generation_results.csv', index=False)
     print("Data generation complete. Results saved to 'data_generation_results.csv'.")
