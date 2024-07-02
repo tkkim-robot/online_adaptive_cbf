@@ -122,7 +122,7 @@ class LocalTrackingController:
         _obs = model.set_variable(var_type='_tvp', var_name='obs', shape=(3, 1)) 
 
         # State Space equations in one line
-        f_x = self.robot.robot.f_casadi(_x)
+        f_x = self.robot.robot.f_casadi(_x) # FIXME: in BaseRobot class, define f_casadi as self.f_casadi, then, you can call the funtion as self.robot.f_casadi, not as self.robot.robot.f_casadi. (goes same for every otehr functions as well)
         g_x = self.robot.robot.g_casadi(_x)
         X_next = _x + (f_x + casadi.mtimes(g_x, _u)) * self.dt
         
@@ -263,7 +263,7 @@ class LocalTrackingController:
                     alpha=0.4
                 )
             )
-        self.robot.test_type = 'cbf_qp'
+        self.robot.test_type = 'cbf_qp' # FIXME:change it to mpc-cbf
 
     def get_nearest_obs(self, detected_obs):
         # If there are new obstacles detected, update the obs
@@ -438,10 +438,9 @@ def single_agent_main():
     x_init = waypoints[0]
     x_goal = waypoints[-1]
 
-    plot_handler = plotting.Plotting()
-    plot_handler = plotting.Plotting()
+    env_handler = env.Env(width=6.0, height=6.0)
+    plot_handler = plotting.Plotting(env_handler)
     ax, fig = plot_handler.plot_grid("Local Tracking Controller")
-    env_handler = env.Env()
 
     type = 'DynamicUnicycle2D'
     tracking_controller = LocalTrackingController(x_init, type=type, dt=dt,
@@ -462,54 +461,8 @@ def single_agent_main():
 
 
 def multi_agent_main():
-    dt = 0.05
-
-    # temporal
-    waypoints = [
-        [2, 2, math.pi/2],
-        [2, 12, 0],
-        [10, 12, 0],
-        [10, 2, 0]
-    ]
-    waypoints = np.array(waypoints, dtype=np.float64)
-
-    x_init = waypoints[0]
-    x_goal = waypoints[-1]
-
-    plot_handler = plotting.Plotting()
-    ax, fig = plot_handler.plot_grid("Local Tracking Controller")
-    env_handler = env.Env()
-
-    #type = 'Unicycle2D'
-    type = 'DynamicUnicycle2D'
-    controller_0 = LocalTrackingController(x_init, type=type, 
-                                         robot_id=0,
-                                         dt=dt,
-                                         show_animation=True,
-                                         save_animation=False,
-                                         ax=ax, fig=fig,
-                                         env=env_handler)
-    
-    controller_1 = LocalTrackingController(x_goal, type=type,
-                                         robot_id=1,
-                                         dt=dt,
-                                         show_animation=True,
-                                         save_animation=False,
-                                         ax=ax, fig=fig,
-                                         env=env_handler)
-
-    # unknown_obs = np.array([[9.0, 8.8, 0.3]]) 
-    # tracking_controller.set_unknown_obs(unknown_obs)
-    controller_0.set_waypoints(waypoints)
-    controller_1.set_waypoints(waypoints[::-1])
-    tf = 50
-    for _ in range(int(tf / dt)):
-        ret_list = []
-        ret_list.append(controller_0.control_step())
-        ret_list.append(controller_1.control_step())
-        # if all elements of ret_list are -1, break
-        if all([ret == -1 for ret in ret_list]):
-            break
+    # not implemented yet
+    pass
             
 
 if __name__ == "__main__":
