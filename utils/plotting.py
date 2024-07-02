@@ -8,8 +8,8 @@ import math
 import numpy as np
 
 class Plotting:
-    def __init__(self):
-        self.env = env.Env()
+    def __init__(self, env):
+        self.env = env
         self.obs_bound = self.env.obs_boundary
         self.obs_circle = self.env.obs_circle
         self.obs_rectangle = self.env.obs_rectangle
