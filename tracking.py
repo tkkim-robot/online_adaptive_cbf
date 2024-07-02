@@ -331,6 +331,7 @@ class LocalTrackingController:
             detected_obs = self.robot.detect_unknown_obs(self.unknown_obs)
             nearest_obs = self.get_nearest_obs(detected_obs)
         else:
+            # while generating data, we assume every unknown obstacles can be timely detected
             nearest_obs = self.get_nearest_obs(self.unknown_obs)
 
         # 2. Update obstacle to nearest_obs
