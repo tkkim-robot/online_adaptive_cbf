@@ -22,6 +22,23 @@ The main functions demonstrate single and multi-agent scenarios, showcasing the 
 @required-scripts: robots/robot.py
 """
 
+def angle_normalize(x):
+    return (((x + np.pi) % (2 * np.pi)) - np.pi)
+
+def compute_alpha_k(h_k, alpha_obs, gamma):
+    return alpha_obs * np.exp(-gamma * h_k)
+
+def compute_beta_k(delta_theta, beta_obs, lambda_):
+    return beta_obs * np.exp(-lambda_ * (cos(delta_theta)+1))
+
+def compute_safety_loss_function(obs, alpha_obs, beta_obs, gamma, lambda_, z):
+    z_k, h_k, delta_theta = obs['z'], obs['h'], obs['d']
+    alpha_k = compute_alpha_k(h_k, alpha_obs, gamma)
+    beta_k = compute_beta_k(delta_theta, beta_obs, lambda_)
+    phi = alpha_k / (beta_k * np.linalg.norm(z - z_k)**2 + 1)
+    return phi
+
+
 class CollisionError(Exception):
     '''
     Exception raised for errors when  
@@ -79,6 +96,13 @@ class LocalTrackingController:
             self.ax.set_aspect(1)
         else:
             self.ax = plt.axes() # dummy placeholder
+
+        if data_generation:
+            # Parameters for the safety loss function
+            self.alpha_obs = 1.0
+            self.beta_obs = 1.0
+            self.gamma_loss = 0.1
+            self.lambda_loss = 1.0
 
         # Setup DT-MPC problem  
         self.goal = np.array(self.waypoints[self.current_goal_index]).reshape(-1, 1)
@@ -366,6 +390,18 @@ class LocalTrackingController:
         if self.show_animation:
             self.robot.render_plot()
 
+        # *. Compute the spatial density function Φ(z) (Only while data generation)
+        if self.data_generation:
+            z = self.robot.X[:2].flatten()  # Current position of the robot
+            relative_angle = np.arctan2(self.near_obs[1] - self.robot.X[1], self.near_obs[0] - self.robot.X[0]) - self.robot.X[2]
+            obs = {
+                'z': self.near_obs[:2].flatten(),
+                'h': self.robot.agent_barrier(self.robot.X, u0, self.gamma1, self.gamma2, self.dt, self.robot.robot_radius, self.near_obs),
+                'd': angle_normalize(relative_angle)
+            }
+            phi = compute_safety_loss_function(obs, self.alpha_obs, self.beta_obs, self.gamma_loss, self.lambda_loss, z)
+            print(f"Safety Loss Function Value: {phi}, Normalized Relative angle: {angle_normalize(relative_angle)}, Relative angle: {relative_angle}")
+
         # 6. Update sensing information (Skipped while data generation)
         if self.data_generation == False:
             self.robot.update_sensing_footprints()
@@ -423,6 +459,112 @@ class LocalTrackingController:
 
         return unexpected_beh
 
+    def plot_safety_loss_function(self):
+        if not self.data_generation:
+            return
+
+        # Create a grid of points to evaluate the safety loss function
+        x_range = np.linspace(self.robot.X[0] - 10, self.robot.X[0] + 5, 100)
+        y_range = np.linspace(self.robot.X[1] - 5, self.robot.X[1] + 5, 100)
+        X, Y = np.meshgrid(x_range, y_range)
+        Z = np.zeros_like(X)
+
+        # Compute the safety loss function for each point in the grid
+        for i in range(X.shape[0]):
+            for j in range(X.shape[1]):
+                z = np.array([X[i, j], Y[i, j]])
+                obs = {
+                    'z': self.near_obs[:2].flatten(),
+                    'h': self.robot.agent_barrier(self.robot.X, np.array([0, 0]), self.gamma1, self.gamma2, self.dt, self.robot.robot_radius, self.near_obs),
+                    'd': angle_normalize(self.robot.X[2])
+                }
+                Z[i, j] = compute_safety_loss_function(obs, self.alpha_obs, self.beta_obs, self.gamma_loss, self.lambda_loss, z)
+
+        # Plot the safety loss function
+        plt.figure()
+        cp = plt.contourf(X, Y, Z, levels=50, cmap='viridis')
+        plt.colorbar(cp)
+        plt.xlabel('X')
+        plt.ylabel('Y')
+        plt.title('Safety Loss Function')
+        plt.scatter(self.near_obs[0], self.near_obs[1], color='red', label='Obstacle')
+        plt.legend()
+        plt.show()
+
+    def plot_safety_loss_function_grid(self):
+        if not self.data_generation:
+            return
+
+        alpha_obs_values = [1.5, 1.0, 0.5]
+        delta_theta_values = [-0.1, -0.7, -1.4, -2.1]
+        beta_obs = 0.5
+        fig, axs = plt.subplots(3, 4, figsize=(15, 15), subplot_kw={'projection': '3d'})
+        plt.subplots_adjust(hspace=0.4, wspace=0.4)
+
+        x_range = np.linspace(self.robot.X[0] - 10, self.robot.X[0] + 5, 30)
+        y_range = np.linspace(self.robot.X[1] - 5, self.robot.X[1] + 5, 30)
+        X, Y = np.meshgrid(x_range, y_range)
+
+        for j, delta_theta in enumerate(delta_theta_values):
+            for i, alpha_obs in enumerate(alpha_obs_values):
+                Z = np.zeros_like(X)
+                for m in range(X.shape[0]):
+                    for n in range(X.shape[1]):
+                        z = np.array([X[m, n], Y[m, n]])
+                        obs = {
+                            'z': self.near_obs[:2].flatten(),
+                            'h': self.robot.agent_barrier(self.robot.X, np.array([0, 0]), self.gamma1, self.gamma2, self.dt, self.robot.robot_radius, self.near_obs),
+                            'd': delta_theta
+                        }
+                        Z[m, n] = compute_safety_loss_function(obs, alpha_obs, beta_obs, self.gamma_loss, self.lambda_loss, z)
+
+                ax = axs[i, j]
+                ax.plot_surface(X, Y, Z, cmap='viridis')
+                ax.set_title(f'alpha_obs = {alpha_obs}, delta_theta = {delta_theta}')
+                ax.set_xlabel('X')
+                ax.set_ylabel('Y')
+                ax.set_zlabel('Safety Loss Function')
+
+        plt.show()
+
+    def plot_safety_loss_function_grid_contour(self):
+        if not self.data_generation:
+            return
+
+        alpha_obs_values = [1.5, 1.0, 0.5]
+        delta_theta_values = [-0.1, -0.7, -1.4, -2.1]
+        beta_obs = 0.5
+        fig, axs = plt.subplots(3, 4, figsize=(15, 15))
+        plt.subplots_adjust(hspace=0.4, wspace=0.4)
+
+        x_range = np.linspace(self.robot.X[0] - 10, self.robot.X[0] + 5, 30)
+        y_range = np.linspace(self.robot.X[1] - 5, self.robot.X[1] + 5, 30)
+        X, Y = np.meshgrid(x_range, y_range)
+
+        for j, delta_theta in enumerate(delta_theta_values):
+            for i, alpha_obs in enumerate(alpha_obs_values):
+                Z = np.zeros_like(X)
+                for m in range(X.shape[0]):
+                    for n in range(X.shape[1]):
+                        z = np.array([X[m, n], Y[m, n]])
+                        obs = {
+                            'z': self.near_obs[:2].flatten(),
+                            'h': self.robot.agent_barrier(self.robot.X, np.array([0, 0]), self.gamma1, self.gamma2, self.dt, self.robot.robot_radius, self.near_obs),
+                            'd': delta_theta
+                        }
+                        Z[m, n] = compute_safety_loss_function(obs, alpha_obs, beta_obs, self.gamma_loss, self.lambda_loss, z)
+
+                ax = axs[i, j]
+                cp = ax.contourf(X, Y, Z, levels=50, cmap='viridis')
+                fig.colorbar(cp, ax=ax)
+                ax.set_title(f'alpha_obs = {alpha_obs}, delta_theta = {delta_theta}')
+                ax.set_xlabel('X')
+                ax.set_ylabel('Y')
+
+        plt.show()
+
+
+
 
 def single_agent_main():
     dt = 0.05
@@ -470,5 +612,5 @@ if __name__ == "__main__":
     from utils import plotting
     from utils import env
     import math
-
+    
     single_agent_main()

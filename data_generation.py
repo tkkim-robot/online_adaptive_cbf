@@ -5,6 +5,9 @@ import os
 import sys
 from multiprocessing import Pool
 import tqdm
+from utils import plotting
+from utils import env
+
 
 # Suppress print statements
 class SuppressPrints:
@@ -16,13 +19,13 @@ class SuppressPrints:
         sys.stdout.close()
         sys.stdout = self._original_stdout
 
-def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.05, max_sim_time=10):
+def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.05, max_sim_time=5):
     try:
         dt = 0.05
 
         # Define waypoints and unknown obstacles based on sampled parameters
         waypoints = np.array([
-            [1, 3, theta, velocity],
+            [1, 3, theta+0.01, velocity],
             [11, 3, 0, 0]
         ], dtype=np.float64)
 
@@ -72,12 +75,10 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
             except CollisionError:
                 return distance, velocity, theta, gamma1, gamma2, False, deadlock_time, sim_time
 
-        # If no collision occurs within max_sim_time, consider it a success
-        success = unexpected_beh in (-1, 0)
-        return distance, velocity, theta, gamma1, gamma2, success, deadlock_time, sim_time
+        return distance, velocity, theta, gamma1, gamma2, True, deadlock_time, sim_time
 
     except CollisionError:
-        return distance, velocity, theta, gamma1, gamma2, False, 0.0, 0.0
+        return distance, velocity, theta, gamma1, gamma2, False, deadlock_time, sim_time
 
 def worker(params):
     distance, velocity, theta, gamma1, gamma2 = params
@@ -108,12 +109,9 @@ def generate_data(samples_per_dimension=5, num_processes=8):
     return results
 
 if __name__ == "__main__":
-    from utils import plotting
-    from utils import env
-
-    datapoint = 2
-    num_processes = 14
+    datapoint = 4
+    num_processes = 1 # Change based on the number of cores available
     results = generate_data(datapoint, num_processes)
     df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Deadlock Time', 'Simulation Time'])
-    df.to_csv(f'data_generation_results.csv', index=False)
+    df.to_csv(f'data_generation_results_{datapoint}datapoint.csv', index=False)
     print("Data generation complete. Results saved to 'data_generation_results.csv'.")
