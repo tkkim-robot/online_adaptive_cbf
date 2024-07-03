@@ -107,6 +107,15 @@ class BaseRobot:
         return self.robot.stop()
 
     def agent_barrier(self, x_k, u_k, gamma1, gamma2, dt, robot_radius, obs):
+        # FIXME: there is too many arguments passed to this function
+        # FIXME: define a function that set the cbf parameters of a robot
+        # in this function, like 
+        # def set_cbf_params(params):
+        #     self.cbf_params['gamma1'] = params['gamma1']
+        #     self.cbf_params['gamma2'] = params['gamma2']
+        #     and so on
+        # then, pass the self.cbf_params dict to the agent_barrier.
+        # by doing this, it's also compatible with unicycle (where only one gamma exist)
         return self.robot.agent_barrier(x_k, u_k, gamma1, gamma2, dt, robot_radius, obs)
 
     def step(self, U):

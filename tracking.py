@@ -102,7 +102,7 @@ class LocalTrackingController:
             self.alpha_obs = 1.0
             self.beta_obs = 1.0
             self.gamma_loss = 0.1
-            self.lambda_loss = 1.0
+            self.lambda_loss = 1.7
 
         # Setup DT-MPC problem  
         self.goal = np.array(self.waypoints[self.current_goal_index]).reshape(-1, 1)
@@ -362,7 +362,7 @@ class LocalTrackingController:
         if nearest_obs is not None:
             self.near_obs = nearest_obs.reshape(-1, 1)
         else:
-            self.near_obs = np.array([[10.0, 10.0, 0.1]]).reshape(-1, 1)  # A default far away obstacle
+            self.near_obs = np.array([[10.0, 10.0, 0.1]]).reshape(-1, 1)  # FIXME: should not be like this, robot might goes this position in some cases. if there is no obstacle, then just set is as None (already implemented in get_nearest_obs function), and make a if statement for this case (i.e., deactivate the cbf constraint in thsi case, or etc.)
 
          # 3. Compute control input
         u0 = self.mpc.make_step(self.robot.X.flatten())
@@ -399,7 +399,7 @@ class LocalTrackingController:
                 'h': self.robot.agent_barrier(self.robot.X, u0, self.gamma1, self.gamma2, self.dt, self.robot.robot_radius, self.near_obs),
                 'd': angle_normalize(relative_angle)
             }
-            phi = compute_safety_loss_function(obs, self.alpha_obs, self.beta_obs, self.gamma_loss, self.lambda_loss, z)
+            phi = compute_safety_loss_function(obs, self.alpha_obs, self.beta_obs, self.gamma_loss, self.lambda_loss, z) # FIXME: do not pass over some arguments in a elaborate way. those parameters are actually the properties of the safety_loss function, so it should be defined in that function. I suggest to define a class of safety_density_loss, then define those varaibles in the init function of that class.
             print(f"Safety Loss Function Value: {phi}, Normalized Relative angle: {angle_normalize(relative_angle)}, Relative angle: {relative_angle}")
 
         # 6. Update sensing information (Skipped while data generation)
