@@ -12,7 +12,9 @@ setup(
         'gurobipy',
         'shapely',
         'scikit-fmm',
-        'do-mpc[full]'
+        'do-mpc[full]',
+        'pandas',
+        'tqdm'
     ],
     include_package_data=True,
     zip_safe=False,
