@@ -91,7 +91,7 @@ class LocalTrackingController:
             self.beta_1 = 7.0 # 1.0 If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
             self.beta_2 = 2.5 # 1.7 If bigger, makes whole surface higher if delta_theta is smaller
             self.epsilon = 0.07 # 0.25 If smaller, makes the peak higher
-            self.safety_loss = SafetyLossFunction(self.alpha_1, self.alpha_2, self.beta_1, self.beta_2, self.epsilon)
+            self.safety_metric = SafetyLossFunction(self.alpha_1, self.alpha_2, self.beta_1, self.beta_2, self.epsilon)
 
         # Setup DT-MPC problem  
         self.goal = np.array(self.waypoints[self.current_goal_index]).reshape(-1, 1)
@@ -386,8 +386,8 @@ class LocalTrackingController:
             relative_angle = np.arctan2(self.near_obs[1] - self.robot.X[1], self.near_obs[0] - self.robot.X[0]) - self.robot.X[2]
             delta_theta = angle_normalize(relative_angle)
             cbf_constraint_value = self.robot.agent_barrier(self.robot.X, u0, self.robot.robot_radius, self.near_obs)
-            phi = self.safety_loss.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
-            print(f"Safety Loss Function Value: {phi}, Normalized Relative angle: {delta_theta}")
+            self.safety_loss = self.safety_metric.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
+            print(f"Safety Loss Function Value: {self.safety_loss}, Normalized Relative angle: {delta_theta}")
 
         # 6. Update sensing information (Skipped while data generation)
         if self.data_generation == False:

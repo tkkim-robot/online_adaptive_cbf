@@ -85,7 +85,7 @@ if __name__ == "__main__":
     beta_1 = 1.0
     beta_2 = 1.7 
     epsilon = 0.25
-    safety_loss = SafetyLossFunction(alpha_1, alpha_2, beta_1, beta_2, epsilon)
+    safety_metric = SafetyLossFunction(alpha_1, alpha_2, beta_1, beta_2, epsilon)
     
     robot_state = np.array([1.0, 3.0, 0.3, 0.0]).reshape(-1,1)
     robot_pos = robot_state[:2]
@@ -104,8 +104,8 @@ if __name__ == "__main__":
     gamma2 = 0.05
     robot.set_cbf_params(gamma1=gamma1, gamma2=gamma2)
     cbf_constraint_value = robot.agent_barrier(x_k=robot_state, u_k=control_input, robot_radius=robot.robot_radius, obs=obs)
-    phi = safety_loss.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
-    print(f"Safety Loss Function Value: {phi}")
+    safety_loss = safety_metric.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
+    print(f"Safety Loss Function Value: {safety_loss}")
 
 
 
@@ -148,5 +148,5 @@ if __name__ == "__main__":
     
     tracking_controller.near_obs = unknown_obs.reshape(-1, 1)
     # Plot the safety loss function
-    tracking_controller.safety_loss.plot_safety_loss_function_grid(tracking_controller)
+    tracking_controller.safety_metric.plot_safety_loss_function_grid(tracking_controller)
 

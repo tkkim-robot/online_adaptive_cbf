@@ -58,27 +58,31 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
         unexpected_beh = 0
         deadlock_time = 0.0
         sim_time = 0.0
+        safety_loss = 0.0
 
         for _ in range(int(max_sim_time / dt)):
             ret = tracking_controller.control_step()
             unexpected_beh += ret
-
             sim_time += dt
 
             # Check for deadlock
             if np.abs(tracking_controller.robot.X[3]) < deadlock_threshold:
                 deadlock_time += dt
 
+            # Store max safety metric
+            if tracking_controller.safety_loss > safety_loss:
+                safety_loss = tracking_controller.safety_loss[0]
+
             # If collision occurs, handle the exception
             try:
                 tracking_controller.control_step()
             except CollisionError:
-                return distance, velocity, theta, gamma1, gamma2, False, deadlock_time, sim_time
+                return distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time
 
-        return distance, velocity, theta, gamma1, gamma2, True, deadlock_time, sim_time
+        return distance, velocity, theta, gamma1, gamma2, True, safety_loss, deadlock_time, sim_time
 
     except CollisionError:
-        return distance, velocity, theta, gamma1, gamma2, False, deadlock_time, sim_time
+        return distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time
 
 def worker(params):
     distance, velocity, theta, gamma1, gamma2 = params
@@ -108,10 +112,11 @@ def generate_data(samples_per_dimension=5, num_processes=8):
 
     return results
 
+
 if __name__ == "__main__":
-    datapoint = 4
+    datapoint = 1
     num_processes = 1 # Change based on the number of cores available
     results = generate_data(datapoint, num_processes)
-    df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Deadlock Time', 'Simulation Time'])
+    df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time'])
     df.to_csv(f'data_generation_results_{datapoint}datapoint.csv', index=False)
     print("Data generation complete. Results saved to 'data_generation_results.csv'.")
