@@ -53,8 +53,7 @@ class DynamicUnicycle2D:
     def stop(self):
         return np.array([0,0]).reshape(-1,1)
 
-    def agent_barrier(self, x_k, u_k, gamma1, gamma2, dt, robot_radius, obs):
-        # FIXME: why you are not using dt?
+    def agent_barrier(self, x_k, u_k, gamma1, gamma2, robot_radius, obs):
         """Computes the Discrete Time High Order CBF"""
         # Dynamics equations for the next states
         x_k1 = self.step(x_k, u_k)

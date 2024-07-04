@@ -37,7 +37,7 @@ class BaseRobot:
         colors = plt.get_cmap('Pastel1').colors # color palette
         color = colors[robot_id % len(colors) + 1]
 
-        self.test_type = 'cbf_qp' # or 'gatekeeper'
+        self.test_type = 'cbf_mpc' # or 'gatekeeper'
         if type == 'DynamicUnicycle2D':
             try:
                 from dynamic_unicycle2D import DynamicUnicycle2D
@@ -53,6 +53,9 @@ class BaseRobot:
         self.robot_radius = 0.25 # including padding
         self.max_decel = 0.5 # [m/s^2]
         self.max_ang_decel = 0.5  # [rad/s^2]
+        
+        # Initialize CBF parameters
+        self.cbf_params = {}
       
         # FOV parameters
         self.fov_angle = np.deg2rad(70)  # [rad]
@@ -106,17 +109,19 @@ class BaseRobot:
     def stop(self):
         return self.robot.stop()
 
-    def agent_barrier(self, x_k, u_k, gamma1, gamma2, dt, robot_radius, obs):
-        # FIXME: there is too many arguments passed to this function
-        # FIXME: define a function that set the cbf parameters of a robot
-        # in this function, like 
-        # def set_cbf_params(params):
-        #     self.cbf_params['gamma1'] = params['gamma1']
-        #     self.cbf_params['gamma2'] = params['gamma2']
-        #     and so on
-        # then, pass the self.cbf_params dict to the agent_barrier.
-        # by doing this, it's also compatible with unicycle (where only one gamma exist)
-        return self.robot.agent_barrier(x_k, u_k, gamma1, gamma2, dt, robot_radius, obs)
+    def set_cbf_params(self, **params):
+        self.cbf_params.update(params)
+
+    def agent_barrier(self, x_k, u_k, robot_radius, obs):
+        # Default to 0 and None if not provided
+        gamma1 = self.cbf_params.get('gamma1', 0)
+        gamma2 = self.cbf_params.get('gamma2', None)
+        if gamma2 is None:
+            # Handle case for kinematic unicycle with only gamma1
+            return self.robot.agent_barrier(x_k, u_k, gamma1, robot_radius, obs)
+        else:
+            # Handle case for Dynamic unicycle with gamma1 and gamma2
+            return self.robot.agent_barrier(x_k, u_k, gamma1, gamma2, robot_radius, obs)
 
     def step(self, U):
         # wrap step function
@@ -331,44 +336,7 @@ if __name__ == "__main__":
     
     robot = BaseRobot(np.array([-1, -1, np.pi / 4, 0.0]).reshape(-1, 1), dt, ax, type=type, data_generation=True, goal=goal, obs=obs)
 
-
-
-
-    # mpc = robot.mpc
-    # simulator = do_mpc.simulator.Simulator(robot.model)
-    # simulator.set_param(t_step=dt)
-    # tvp_template = simulator.get_tvp_template()
-
-    # def tvp_fun(t_now):
-    #     return tvp_template
-    # simulator.set_tvp_fun(tvp_fun)
-    
-    # simulator.setup()
-
-    # estimator = do_mpc.estimator.StateFeedback(robot.model)
-
-    # x0 = robot.X.flatten()
-    # mpc.x0 = x0
-    # simulator.x0 = x0
-    # estimator.x0 = x0
-    # mpc.set_initial_guess()
-
-    # for i in range(num_steps):
-    #     u0 = mpc.make_step(x0)
-    #     y_next = simulator.make_step(u0)
-    #     x0 = estimator.make_step(y_next)
-        
-    #     robot.X = x0.reshape(-1, 1)
-    #     robot.render_plot()
-
-    #     if i == 10:
-    #         new_goal = np.array([2, 0.0, 0, 0])
-    #         robot.goal = new_goal.reshape(-1, 1)
-    #         print("d")
-    #         new_obs = np.array([1.5, -0.5, 0.03]).reshape(-1, 1)  # Example new obstacle
-    #         robot.obs = new_obs
-
-
-    #     fig.canvas.draw()
-    #     plt.pause(0.01)
-        
+    robot.set_cbf_params(gamma1=0.1, gamma2=0.1)
+    control_input = np.array([0.1, 0.1]).reshape(-1, 1)
+    hocbf_value = robot.agent_barrier(robot.X, control_input, robot.robot_radius, obs)
+    print(hocbf_value)

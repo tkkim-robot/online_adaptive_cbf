@@ -25,20 +25,6 @@ The main functions demonstrate single and multi-agent scenarios, showcasing the 
 def angle_normalize(x):
     return (((x + np.pi) % (2 * np.pi)) - np.pi)
 
-def compute_alpha_k(h_k, alpha_obs, gamma):
-    return alpha_obs * np.exp(-gamma * h_k)
-
-def compute_beta_k(delta_theta, beta_obs, lambda_):
-    return beta_obs * np.exp(-lambda_ * (cos(delta_theta)+1))
-
-def compute_safety_loss_function(obs, alpha_obs, beta_obs, gamma, lambda_, z):
-    z_k, h_k, delta_theta = obs['z'], obs['h'], obs['d']
-    alpha_k = compute_alpha_k(h_k, alpha_obs, gamma)
-    beta_k = compute_beta_k(delta_theta, beta_obs, lambda_)
-    phi = alpha_k / (beta_k * np.linalg.norm(z - z_k)**2 + 1)
-    return phi
-
-
 class CollisionError(Exception):
     '''
     Exception raised for errors when  
@@ -98,19 +84,23 @@ class LocalTrackingController:
             self.ax = plt.axes() # dummy placeholder
 
         if data_generation:
-            # Parameters for the safety loss function
-            self.alpha_obs = 1.0
-            self.beta_obs = 1.0
-            self.gamma_loss = 0.1
-            self.lambda_loss = 1.7
+            from safety_loss_function import SafetyLossFunction
+            # Setup safety loss function
+            self.alpha_1 = 0.2
+            self.alpha_2 = 0.1
+            self.beta_1 = 7.0 # 1.0 If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
+            self.beta_2 = 2.5 # 1.7 If bigger, makes whole surface higher if delta_theta is smaller
+            self.epsilon = 0.07 # 0.25 If smaller, makes the peak higher
+            self.safety_loss = SafetyLossFunction(self.alpha_1, self.alpha_2, self.beta_1, self.beta_2, self.epsilon)
 
         # Setup DT-MPC problem  
         self.goal = np.array(self.waypoints[self.current_goal_index]).reshape(-1, 1)
-        self.near_obs = np.array([10.0,10.0,0.1]).reshape(-1, 1) # Set initial obs far away
+        self.near_obs = np.zeros((3, 1)).reshape(-1,1)
         self.horizon = 10
         self.Q = np.diag([50, 50, 0.01, 30]) # State cost matrix
         self.R = np.array([0.5, 0.5]) # Input cost matrix
         self.setup_robot(X0)
+        self.robot.set_cbf_params(gamma1=self.gamma1, gamma2=self.gamma2)
         self.model = self.create_model()
         self.mpc = self.create_mpc(self.model)
         self.simulator = self.define_simulator()
@@ -198,8 +188,7 @@ class LocalTrackingController:
         mpc = self.set_tvp_for_mpc(mpc)
         
         # Add CBF constraints
-        if self.near_obs is not None:
-            mpc = self.get_cbf_constraints(mpc) 
+        mpc = self.get_cbf_constraints(mpc) 
 
         mpc.setup()
         mpc.settings.supress_ipopt_output()
@@ -217,8 +206,8 @@ class LocalTrackingController:
 
         cbf_constraints = []
         
-        if obs != None:
-            hocbf_2nd_order = self.robot.agent_barrier(x_k, u_k, gamma1, gamma2, self.dt, self.robot.robot_radius, obs)
+        if obs != None or obs[2] != 0:
+            hocbf_2nd_order = self.robot.agent_barrier(x_k, u_k, self.robot.robot_radius, obs)
             cbf_constraints.append(-hocbf_2nd_order)
         else:
             pass
@@ -237,7 +226,7 @@ class LocalTrackingController:
             tvp_struct_mpc['_tvp', :, "gamma1"] = self.gamma1
             tvp_struct_mpc['_tvp', :, "gamma2"] = self.gamma2
             tvp_struct_mpc['_tvp', :, "goal"] = self.goal.flatten()
-            tvp_struct_mpc['_tvp', :, "obs"] = self.near_obs.flatten()
+            tvp_struct_mpc['_tvp', :, "obs"] = self.near_obs
             return tvp_struct_mpc
         mpc.set_tvp_fun(tvp_fun_mpc)
         return mpc
@@ -362,9 +351,9 @@ class LocalTrackingController:
         if nearest_obs is not None:
             self.near_obs = nearest_obs.reshape(-1, 1)
         else:
-            self.near_obs = np.array([[10.0, 10.0, 0.1]]).reshape(-1, 1)  # FIXME: should not be like this, robot might goes this position in some cases. if there is no obstacle, then just set is as None (already implemented in get_nearest_obs function), and make a if statement for this case (i.e., deactivate the cbf constraint in thsi case, or etc.)
+            self.near_obs = nearest_obs
 
-         # 3. Compute control input
+        # 3. Compute control input
         u0 = self.mpc.make_step(self.robot.X.flatten())
 
         # 4. Raise an error if the robot collides with the obstacle
@@ -390,17 +379,15 @@ class LocalTrackingController:
         if self.show_animation:
             self.robot.render_plot()
 
-        # *. Compute the spatial density function Φ(z) (Only while data generation)
+        # *. Compute the spatial density function Φ (Only while data generation)
         if self.data_generation:
-            z = self.robot.X[:2].flatten()  # Current position of the robot
+            robot_pos = self.robot.X[:2].flatten()
+            obs_pos = self.near_obs[:2].flatten()
             relative_angle = np.arctan2(self.near_obs[1] - self.robot.X[1], self.near_obs[0] - self.robot.X[0]) - self.robot.X[2]
-            obs = {
-                'z': self.near_obs[:2].flatten(),
-                'h': self.robot.agent_barrier(self.robot.X, u0, self.gamma1, self.gamma2, self.dt, self.robot.robot_radius, self.near_obs),
-                'd': angle_normalize(relative_angle)
-            }
-            phi = compute_safety_loss_function(obs, self.alpha_obs, self.beta_obs, self.gamma_loss, self.lambda_loss, z) # FIXME: do not pass over some arguments in a elaborate way. those parameters are actually the properties of the safety_loss function, so it should be defined in that function. I suggest to define a class of safety_density_loss, then define those varaibles in the init function of that class.
-            print(f"Safety Loss Function Value: {phi}, Normalized Relative angle: {angle_normalize(relative_angle)}, Relative angle: {relative_angle}")
+            delta_theta = angle_normalize(relative_angle)
+            cbf_constraint_value = self.robot.agent_barrier(self.robot.X, u0, self.robot.robot_radius, self.near_obs)
+            phi = self.safety_loss.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
+            print(f"Safety Loss Function Value: {phi}, Normalized Relative angle: {delta_theta}")
 
         # 6. Update sensing information (Skipped while data generation)
         if self.data_generation == False:
@@ -459,112 +446,6 @@ class LocalTrackingController:
 
         return unexpected_beh
 
-    def plot_safety_loss_function(self):
-        if not self.data_generation:
-            return
-
-        # Create a grid of points to evaluate the safety loss function
-        x_range = np.linspace(self.robot.X[0] - 10, self.robot.X[0] + 5, 100)
-        y_range = np.linspace(self.robot.X[1] - 5, self.robot.X[1] + 5, 100)
-        X, Y = np.meshgrid(x_range, y_range)
-        Z = np.zeros_like(X)
-
-        # Compute the safety loss function for each point in the grid
-        for i in range(X.shape[0]):
-            for j in range(X.shape[1]):
-                z = np.array([X[i, j], Y[i, j]])
-                obs = {
-                    'z': self.near_obs[:2].flatten(),
-                    'h': self.robot.agent_barrier(self.robot.X, np.array([0, 0]), self.gamma1, self.gamma2, self.dt, self.robot.robot_radius, self.near_obs),
-                    'd': angle_normalize(self.robot.X[2])
-                }
-                Z[i, j] = compute_safety_loss_function(obs, self.alpha_obs, self.beta_obs, self.gamma_loss, self.lambda_loss, z)
-
-        # Plot the safety loss function
-        plt.figure()
-        cp = plt.contourf(X, Y, Z, levels=50, cmap='viridis')
-        plt.colorbar(cp)
-        plt.xlabel('X')
-        plt.ylabel('Y')
-        plt.title('Safety Loss Function')
-        plt.scatter(self.near_obs[0], self.near_obs[1], color='red', label='Obstacle')
-        plt.legend()
-        plt.show()
-
-    def plot_safety_loss_function_grid(self):
-        if not self.data_generation:
-            return
-
-        alpha_obs_values = [1.5, 1.0, 0.5]
-        delta_theta_values = [-0.1, -0.7, -1.4, -2.1]
-        beta_obs = 0.5
-        fig, axs = plt.subplots(3, 4, figsize=(15, 15), subplot_kw={'projection': '3d'})
-        plt.subplots_adjust(hspace=0.4, wspace=0.4)
-
-        x_range = np.linspace(self.robot.X[0] - 10, self.robot.X[0] + 5, 30)
-        y_range = np.linspace(self.robot.X[1] - 5, self.robot.X[1] + 5, 30)
-        X, Y = np.meshgrid(x_range, y_range)
-
-        for j, delta_theta in enumerate(delta_theta_values):
-            for i, alpha_obs in enumerate(alpha_obs_values):
-                Z = np.zeros_like(X)
-                for m in range(X.shape[0]):
-                    for n in range(X.shape[1]):
-                        z = np.array([X[m, n], Y[m, n]])
-                        obs = {
-                            'z': self.near_obs[:2].flatten(),
-                            'h': self.robot.agent_barrier(self.robot.X, np.array([0, 0]), self.gamma1, self.gamma2, self.dt, self.robot.robot_radius, self.near_obs),
-                            'd': delta_theta
-                        }
-                        Z[m, n] = compute_safety_loss_function(obs, alpha_obs, beta_obs, self.gamma_loss, self.lambda_loss, z)
-
-                ax = axs[i, j]
-                ax.plot_surface(X, Y, Z, cmap='viridis')
-                ax.set_title(f'alpha_obs = {alpha_obs}, delta_theta = {delta_theta}')
-                ax.set_xlabel('X')
-                ax.set_ylabel('Y')
-                ax.set_zlabel('Safety Loss Function')
-
-        plt.show()
-
-    def plot_safety_loss_function_grid_contour(self):
-        if not self.data_generation:
-            return
-
-        alpha_obs_values = [1.5, 1.0, 0.5]
-        delta_theta_values = [-0.1, -0.7, -1.4, -2.1]
-        beta_obs = 0.5
-        fig, axs = plt.subplots(3, 4, figsize=(15, 15))
-        plt.subplots_adjust(hspace=0.4, wspace=0.4)
-
-        x_range = np.linspace(self.robot.X[0] - 10, self.robot.X[0] + 5, 30)
-        y_range = np.linspace(self.robot.X[1] - 5, self.robot.X[1] + 5, 30)
-        X, Y = np.meshgrid(x_range, y_range)
-
-        for j, delta_theta in enumerate(delta_theta_values):
-            for i, alpha_obs in enumerate(alpha_obs_values):
-                Z = np.zeros_like(X)
-                for m in range(X.shape[0]):
-                    for n in range(X.shape[1]):
-                        z = np.array([X[m, n], Y[m, n]])
-                        obs = {
-                            'z': self.near_obs[:2].flatten(),
-                            'h': self.robot.agent_barrier(self.robot.X, np.array([0, 0]), self.gamma1, self.gamma2, self.dt, self.robot.robot_radius, self.near_obs),
-                            'd': delta_theta
-                        }
-                        Z[m, n] = compute_safety_loss_function(obs, alpha_obs, beta_obs, self.gamma_loss, self.lambda_loss, z)
-
-                ax = axs[i, j]
-                cp = ax.contourf(X, Y, Z, levels=50, cmap='viridis')
-                fig.colorbar(cp, ax=ax)
-                ax.set_title(f'alpha_obs = {alpha_obs}, delta_theta = {delta_theta}')
-                ax.set_xlabel('X')
-                ax.set_ylabel('Y')
-
-        plt.show()
-
-
-
 
 def single_agent_main():
     dt = 0.05
@@ -599,7 +480,6 @@ def single_agent_main():
                             ]) 
     tracking_controller.set_unknown_obs(unknown_obs)
     tracking_controller.set_waypoints(waypoints)
-    tracking_controller.set_init_state()
     unexpected_beh = tracking_controller.run_all_steps(tf=30)
 
 
@@ -614,3 +494,4 @@ if __name__ == "__main__":
     import math
     
     single_agent_main()
+    
