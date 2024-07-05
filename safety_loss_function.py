@@ -3,7 +3,8 @@ import matplotlib.pyplot as plt
 from tracking import LocalTrackingController, angle_normalize
 from utils import plotting
 from utils import env
-
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 class SafetyLossFunction:
     def __init__(self, alpha_1=0.2, alpha_2=0.1, beta_1=7.0, beta_2=2.5, epsilon=0.07):
@@ -13,8 +14,8 @@ class SafetyLossFunction:
         self.beta_2 = beta_2
         self.epsilon = epsilon
 
-    def compute_alpha_k(self, h_k):
-        return self.alpha_1 * np.exp(-self.alpha_2 * h_k)
+    def compute_alpha_k(self, zeta_k): # FIXME: I already fixed it, but don't use cbf constraint value as h, let's call it zeta
+        return self.alpha_1 * np.exp(-self.alpha_2 * zeta_k)
 
     def compute_beta_k(self, delta_theta):
         return self.beta_1 * np.exp(-self.beta_2 * (np.cos(delta_theta) + 1))
@@ -25,19 +26,24 @@ class SafetyLossFunction:
         phi = alpha_k / (beta_k * np.linalg.norm(robot_pos - obs_pos) ** 2 + self.epsilon)
         return phi
 
-    def plot_safety_loss_function_grid(self, tracking_controller):
+    def plot_safety_loss_function_grid(self, tracking_controller):  #FIXME: this function is more like an example visualization, and it's not a re-usable member of SafetyLossFunction, so it should be under __main__ in this script, and not in this class.
         # We assume a zero control input in this plot
         if not tracking_controller.data_generation:
             return
 
+
         alpha_1_values = [0.4, 0.2, 0.1]
         delta_theta_values = [-0.1, -0.7, -1.4, -2.1]
-        fig, axs = plt.subplots(3, 4, figsize=(8, 6), subplot_kw={'projection': '3d'})
-        plt.subplots_adjust(hspace=0.4, wspace=0.4)
+        
+        fig = make_subplots(rows=3, cols=4, specs=[[{'type': 'surface'}]*4]*3, 
+                            subplot_titles=[f'alpha_1 = {alpha_1}, delta_theta = {delta_theta}' 
+                                            for delta_theta in delta_theta_values for alpha_1 in alpha_1_values])
 
-        x_range = np.linspace(0, 6, 20)
-        y_range = np.linspace(0, 6, 20)
+        x_range = np.linspace(0, 6, 50)
+        y_range = np.linspace(0, 6, 50)
         X, Y = np.meshgrid(x_range, y_range)
+
+        obs_x, obs_y, obs_r = tracking_controller.near_obs.flatten()
 
         for j, delta_theta in enumerate(delta_theta_values):
             for i, alpha_1 in enumerate(alpha_1_values):
@@ -55,31 +61,19 @@ class SafetyLossFunction:
                         self.alpha_1 = alpha_1
                         Z[m, n] = self.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
 
-                ax = axs[i, j]
-                ax.plot_surface(X, Y, Z, cmap='viridis')
-                ax.set_title(f'alpha_1 = {alpha_1}, delta_theta = {delta_theta}', fontsize=10)
-                ax.set_xlabel('X', fontsize=8)
-                ax.set_ylabel('Y', fontsize=8)
-                ax.set_zlabel('Safety Loss Function', fontsize=8)
-                ax.set_zlim([0, 5])
-                ax.tick_params(axis='both', which='major', labelsize=6)
+                Z_obs = np.where((X - obs_x) ** 2 + (Y - obs_y) ** 2 <= obs_r ** 2, Z, np.nan)
 
-                # Plotting the circle
-                obs_x, obs_y, obs_r = tracking_controller.near_obs.flatten()
-                robot_r = tracking_controller.robot.robot_radius
-                angle = np.linspace(0, 2 * np.pi, 100)
-                circle_x = obs_x + (obs_r + robot_r) * np.cos(angle)
-                circle_y = obs_y + (obs_r + robot_r) * np.sin(angle)
-                circle_z = np.full_like(circle_x, np.max(Z) + 0.2)  # Set height slightly above max Z value
-                
-                ax.plot(circle_x, circle_y, circle_z, 'r--')  # Plot the circle
-                ax.scatter(obs_x, obs_y, np.max(Z) + 0.2, color='red')  # Mark the obstacle center at the same height
+                fig.add_trace(go.Surface(z=Z, x=X, y=Y, colorscale='Viridis', showscale=False, opacity=0.8), row=i+1, col=j+1)
+                fig.add_trace(go.Surface(z=Z_obs, x=X, y=Y, colorscale='Reds', showscale=False), row=i+1, col=j+1) # FIXME: plot_surface has a bug for overwriting the surface color, so I changed it to plotly 
 
-        plt.show()
-
+        fig.update_layout(height=1080, width=1920, title_text="Safety Loss Function Visualization")
+        fig.show()
+    
 
 
 if __name__ == "__main__":
+
+    # FIXME: I think this top part is not necessary. Just bring the plot_safety_loss_function_grid function to __main__ .
     alpha_1 = 1.0
     alpha_2 = 0.1
     beta_1 = 1.0
@@ -136,15 +130,11 @@ if __name__ == "__main__":
                                          waypoints=waypoints,
                                          data_generation=True)
 
-    unknown_obs = np.array([[3, 3, 0.1]])
+    unknown_obs = np.array([[3, 3, 0.5]])
 
     tracking_controller.set_unknown_obs(unknown_obs)
     tracking_controller.set_waypoints(waypoints)
-    # unexpected_beh = tracking_controller.run_all_steps(tf=30)
-    
-    plt.show()
-    plt.ioff()
-    plt.close()
+    # unexpected_beh = tracking_controller.run_all_steps(tf=30) # FIXME: remove unnecessary function call after cross check
     
     tracking_controller.near_obs = unknown_obs.reshape(-1, 1)
     # Plot the safety loss function

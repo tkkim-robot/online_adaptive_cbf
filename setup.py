@@ -14,7 +14,8 @@ setup(
         'scikit-fmm',
         'do-mpc[full]',
         'pandas',
-        'tqdm'
+        'tqdm',
+        'plotly'
     ],
     include_package_data=True,
     zip_safe=False,
