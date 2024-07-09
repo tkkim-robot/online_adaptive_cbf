@@ -5,6 +5,8 @@ from casadi import *
 def angle_normalize(x):
     return (((x + np.pi) % (2 * np.pi)) - np.pi)
 
+def angle_normalize_casadi(x):
+    return casadi.fmod(x + casadi.pi, 2 * casadi.pi) - casadi.pi
 
 class DynamicUnicycle2D:
     
@@ -45,13 +47,13 @@ class DynamicUnicycle2D:
 
     def step(self, X, U): #Just holonomic X,T acceleration
         X = X + ( self.f(X) + self.g(X) @ U )*self.dt
-        # X[2,0] = angle_normalize(X[2,0])
+        X[2,0] = angle_normalize_casadi(X[2,0])
         return X
     
     def stop(self):
         return np.array([0,0]).reshape(-1,1)
 
-    def agent_barrier(self, x_k, u_k, gamma1, gamma2, dt, robot_radius, obs):
+    def agent_barrier(self, x_k, u_k, gamma1, gamma2, robot_radius, obs):
         """Computes the Discrete Time High Order CBF"""
         # Dynamics equations for the next states
         x_k1 = self.step(x_k, u_k)

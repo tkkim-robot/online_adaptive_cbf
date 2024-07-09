@@ -22,6 +22,9 @@ The main functions demonstrate single and multi-agent scenarios, showcasing the 
 @required-scripts: robots/robot.py
 """
 
+def angle_normalize(x):
+    return (((x + np.pi) % (2 * np.pi)) - np.pi)
+
 class CollisionError(Exception):
     '''
     Exception raised for errors when  
@@ -51,7 +54,7 @@ class LocalTrackingController:
             self.v_max = 1.0
             self.a_max = 0.5
             self.w_max = 0.5
-            X0 = np.array([X0[0], X0[1], X0[2], 0.0]).reshape(-1, 1)
+            X0 = np.array([X0[0], X0[1], X0[2], X0[3]]).reshape(-1, 1)
 
         self.show_animation = show_animation
         self.save_animation = save_animation
@@ -80,13 +83,24 @@ class LocalTrackingController:
         else:
             self.ax = plt.axes() # dummy placeholder
 
+        if data_generation:
+            from safety_loss_function import SafetyLossFunction
+            # Setup safety loss function
+            self.alpha_1 = 0.2
+            self.alpha_2 = 0.1
+            self.beta_1 = 7.0 # If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
+            self.beta_2 = 2.5 # If bigger, makes whole surface higher if delta_theta is smaller
+            self.epsilon = 0.07 # If smaller, makes the peak higher
+            self.safety_metric = SafetyLossFunction(self.alpha_1, self.alpha_2, self.beta_1, self.beta_2, self.epsilon)
+
         # Setup DT-MPC problem  
         self.goal = np.array(self.waypoints[self.current_goal_index]).reshape(-1, 1)
-        self.near_obs = np.array([10.0,10.0,0.1]).reshape(-1, 1) # Set initial obs far away
+        self.near_obs = np.zeros((3, 1)).reshape(-1,1)
         self.horizon = 10
         self.Q = np.diag([50, 50, 0.01, 30]) # State cost matrix
         self.R = np.array([0.5, 0.5]) # Input cost matrix
         self.setup_robot(X0)
+        self.robot.set_cbf_params(gamma1=self.gamma1, gamma2=self.gamma2)
         self.model = self.create_model()
         self.mpc = self.create_mpc(self.model)
         self.simulator = self.define_simulator()
@@ -174,8 +188,7 @@ class LocalTrackingController:
         mpc = self.set_tvp_for_mpc(mpc)
         
         # Add CBF constraints
-        if self.near_obs is not None:
-            mpc = self.get_cbf_constraints(mpc) 
+        mpc = self.get_cbf_constraints(mpc) 
 
         mpc.setup()
         mpc.settings.supress_ipopt_output()
@@ -188,13 +201,13 @@ class LocalTrackingController:
 
         gamma1 = self.model.tvp['gamma1']
         gamma2 = self.model.tvp['gamma2']
+        self.robot.set_cbf_params(gamma1=gamma1, gamma2=gamma2)
         
         obs = self.model.tvp['obs']
 
         cbf_constraints = []
-        
-        if obs != None:
-            hocbf_2nd_order = self.robot.agent_barrier(x_k, u_k, gamma1, gamma2, self.dt, self.robot.robot_radius, obs)
+        if obs != None or obs[2] != 0:
+            hocbf_2nd_order = self.robot.agent_barrier(x_k, u_k, self.robot.robot_radius, obs)
             cbf_constraints.append(-hocbf_2nd_order)
         else:
             pass
@@ -213,7 +226,7 @@ class LocalTrackingController:
             tvp_struct_mpc['_tvp', :, "gamma1"] = self.gamma1
             tvp_struct_mpc['_tvp', :, "gamma2"] = self.gamma2
             tvp_struct_mpc['_tvp', :, "goal"] = self.goal.flatten()
-            tvp_struct_mpc['_tvp', :, "obs"] = self.near_obs.flatten()
+            tvp_struct_mpc['_tvp', :, "obs"] = self.near_obs
             return tvp_struct_mpc
         mpc.set_tvp_fun(tvp_fun_mpc)
         return mpc
@@ -338,9 +351,9 @@ class LocalTrackingController:
         if nearest_obs is not None:
             self.near_obs = nearest_obs.reshape(-1, 1)
         else:
-            self.near_obs = np.array([[10.0, 10.0, 0.1]]).reshape(-1, 1)  # A default far away obstacle
+            self.near_obs = nearest_obs
 
-         # 3. Compute control input
+        # 3. Compute control input
         u0 = self.mpc.make_step(self.robot.X.flatten())
 
         # 4. Raise an error if the robot collides with the obstacle
@@ -365,6 +378,16 @@ class LocalTrackingController:
         self.robot.X = x0.reshape(-1, 1)
         if self.show_animation:
             self.robot.render_plot()
+
+        # *. Compute the spatial density function Φ (Only while data generation)
+        if self.data_generation:
+            robot_pos = self.robot.X[:2].flatten()
+            obs_pos = self.near_obs[:2].flatten()
+            relative_angle = np.arctan2(self.near_obs[1] - self.robot.X[1], self.near_obs[0] - self.robot.X[0]) - self.robot.X[2]
+            delta_theta = angle_normalize(relative_angle)
+            self.robot.set_cbf_params(gamma1=self.gamma1, gamma2=self.gamma2)
+            cbf_constraint_value = self.robot.agent_barrier(self.robot.X, u0, self.robot.robot_radius, self.near_obs)
+            self.safety_loss = self.safety_metric.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
 
         # 6. Update sensing information (Skipped while data generation)
         if self.data_generation == False:
@@ -457,7 +480,6 @@ def single_agent_main():
                             ]) 
     tracking_controller.set_unknown_obs(unknown_obs)
     tracking_controller.set_waypoints(waypoints)
-    tracking_controller.set_init_state()
     unexpected_beh = tracking_controller.run_all_steps(tf=30)
 
 
@@ -470,5 +492,6 @@ if __name__ == "__main__":
     from utils import plotting
     from utils import env
     import math
-
+    
     single_agent_main()
+    
