@@ -7,7 +7,11 @@ from multiprocessing import Pool
 import tqdm
 from utils import plotting
 from utils import env
+import matplotlib
 import matplotlib.pyplot as plt
+
+# Use a non-interactive backend
+matplotlib.use('Agg')
 
 # Suppress print statements
 class SuppressPrints:
@@ -18,7 +22,6 @@ class SuppressPrints:
     def __exit__(self, exc_type, exc_val, exc_tb):
         sys.stdout.close()
         sys.stdout = self._original_stdout
-
 
 def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.1, max_sim_time=5):
     try:
@@ -72,9 +75,8 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
                     deadlock_time += dt
 
                 # Store max safety metric
-                current_safety_loss = float(tracking_controller.safety_loss)
-                if current_safety_loss > safety_loss:
-                    safety_loss = current_safety_loss
+                if tracking_controller.safety_loss > safety_loss:
+                    safety_loss = tracking_controller.safety_loss[0]
 
             # If collision occurs, handle the exception
             except CollisionError:
@@ -88,16 +90,14 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
         plt.close(fig)
         return distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time
 
-
 def worker(params):
     distance, velocity, theta, gamma1, gamma2 = params
     with SuppressPrints():
         result = single_agent_simulation(distance, velocity, theta, gamma1, gamma2)
     return result
 
-
 def generate_data(samples_per_dimension=5, num_processes=8):
-    distance_range = np.linspace(0.3, 3.0, samples_per_dimension)
+    distance_range = np.linspace(0.35, 3.0, samples_per_dimension)
     velocity_range = np.linspace(0.01, 1.0, samples_per_dimension)
     theta_range = np.linspace(0.001, np.pi / 2, samples_per_dimension)
     gamma1_range = np.linspace(0.005, 0.99, samples_per_dimension)
@@ -118,10 +118,9 @@ def generate_data(samples_per_dimension=5, num_processes=8):
 
     return results
 
-
 if __name__ == "__main__":
-    datapoint = 5
-    num_processes = 9 # Change based on the number of cores available
+    datapoint = 7
+    num_processes = 8 # Change based on the number of cores available
     results = generate_data(datapoint, num_processes)
     df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time'])
     df.to_csv(f'data_generation_results_{datapoint}datapoint.csv', index=False)

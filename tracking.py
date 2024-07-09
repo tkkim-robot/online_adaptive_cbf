@@ -385,9 +385,9 @@ class LocalTrackingController:
             obs_pos = self.near_obs[:2].flatten()
             relative_angle = np.arctan2(self.near_obs[1] - self.robot.X[1], self.near_obs[0] - self.robot.X[0]) - self.robot.X[2]
             delta_theta = angle_normalize(relative_angle)
+            self.robot.set_cbf_params(gamma1=self.gamma1, gamma2=self.gamma2)
             cbf_constraint_value = self.robot.agent_barrier(self.robot.X, u0, self.robot.robot_radius, self.near_obs)
             self.safety_loss = self.safety_metric.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
-            # print(f"Safety Loss Function Value: {self.safety_loss}, Normalized Relative angle: {delta_theta}")
 
         # 6. Update sensing information (Skipped while data generation)
         if self.data_generation == False:
