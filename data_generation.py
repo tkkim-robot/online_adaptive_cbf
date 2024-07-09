@@ -20,7 +20,7 @@ class SuppressPrints:
         sys.stdout = self._original_stdout
 
 
-def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.05, max_sim_time=5):
+def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.1, max_sim_time=5):
     try:
         dt = 0.05
 
@@ -97,7 +97,7 @@ def worker(params):
 
 
 def generate_data(samples_per_dimension=5, num_processes=8):
-    distance_range = np.linspace(0.3, 1.0, samples_per_dimension)
+    distance_range = np.linspace(0.3, 3.0, samples_per_dimension)
     velocity_range = np.linspace(0.01, 1.0, samples_per_dimension)
     theta_range = np.linspace(0.001, np.pi / 2, samples_per_dimension)
     gamma1_range = np.linspace(0.005, 0.99, samples_per_dimension)
@@ -120,7 +120,7 @@ def generate_data(samples_per_dimension=5, num_processes=8):
 
 
 if __name__ == "__main__":
-    datapoint = 3
+    datapoint = 5
     num_processes = 9 # Change based on the number of cores available
     results = generate_data(datapoint, num_processes)
     df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time'])
