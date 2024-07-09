@@ -1,26 +1,12 @@
 import numpy as np
-import pandas as pd
 from tracking import LocalTrackingController, CollisionError
-import os
-import sys
-from multiprocessing import Pool
-import tqdm
 from utils import plotting
 from utils import env
 import matplotlib.pyplot as plt
 
-# Suppress print statements
-class SuppressPrints:
-    def __enter__(self):
-        self._original_stdout = sys.stdout
-        sys.stdout = open(os.devnull, 'w')
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        sys.stdout.close()
-        sys.stdout = self._original_stdout
 
 
-def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.05, max_sim_time=5):
+def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.1, max_sim_time=5):
     try:
         dt = 0.05
 
@@ -39,7 +25,7 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
 
         tracking_controller = LocalTrackingController(
             x_init, type='DynamicUnicycle2D', dt=dt,
-            show_animation=False, save_animation=False,
+            show_animation=True, save_animation=False,
             ax=ax, fig=fig, env=env_handler,
             waypoints=waypoints, data_generation=True
         )
@@ -76,53 +62,26 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
                 if current_safety_loss > safety_loss:
                     safety_loss = current_safety_loss
 
+                print(f"Current Velocity: {tracking_controller.robot.X[3]} | Deadlock Threshold: {deadlock_threshold} | Deadlock time: {deadlock_time}")
+                
             # If collision occurs, handle the exception
             except CollisionError:
-                plt.close(fig)
+                plt.close(fig)  
                 return distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time
 
-        plt.close(fig)
+        plt.close(fig)  
         return distance, velocity, theta, gamma1, gamma2, True, safety_loss, deadlock_time, sim_time
 
     except CollisionError:
-        plt.close(fig)
+        plt.close(fig) 
         return distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time
 
 
-def worker(params):
-    distance, velocity, theta, gamma1, gamma2 = params
-    with SuppressPrints():
-        result = single_agent_simulation(distance, velocity, theta, gamma1, gamma2)
-    return result
-
-
-def generate_data(samples_per_dimension=5, num_processes=8):
-    distance_range = np.linspace(0.3, 1.0, samples_per_dimension)
-    velocity_range = np.linspace(0.01, 1.0, samples_per_dimension)
-    theta_range = np.linspace(0.001, np.pi / 2, samples_per_dimension)
-    gamma1_range = np.linspace(0.005, 0.99, samples_per_dimension)
-    gamma2_range = np.linspace(0.005, 0.99, samples_per_dimension)
-
-    parameter_space = [(d, v, theta, g1, g2) for d in distance_range
-                       for v in velocity_range
-                       for theta in theta_range
-                       for g1 in gamma1_range
-                       for g2 in gamma2_range]
-
-    pool = Pool(processes=num_processes)
-    results = []
-    for result in tqdm.tqdm(pool.imap(worker, parameter_space), total=len(parameter_space)):
-        results.append(result)
-    pool.close()
-    pool.join()
-
-    return results
-
-
 if __name__ == "__main__":
-    datapoint = 3
-    num_processes = 9 # Change based on the number of cores available
-    results = generate_data(datapoint, num_processes)
-    df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time'])
-    df.to_csv(f'data_generation_results_{datapoint}datapoint.csv', index=False)
-    print("Data generation complete. Results saved to 'data_generation_results.csv'.")
+    distance = 1.0
+    velocity = 0.0
+    theta = 0.001
+    gamma1 = 0.99
+    gamma2 = 0.99
+    result = single_agent_simulation(distance, velocity, theta, gamma1, gamma2)
+    print(result)

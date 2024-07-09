@@ -54,7 +54,7 @@ class LocalTrackingController:
             self.v_max = 1.0
             self.a_max = 0.5
             self.w_max = 0.5
-            X0 = np.array([X0[0], X0[1], X0[2], 0.0]).reshape(-1, 1)
+            X0 = np.array([X0[0], X0[1], X0[2], X0[3]]).reshape(-1, 1)
 
         self.show_animation = show_animation
         self.save_animation = save_animation
@@ -88,9 +88,9 @@ class LocalTrackingController:
             # Setup safety loss function
             self.alpha_1 = 0.2
             self.alpha_2 = 0.1
-            self.beta_1 = 7.0 # 1.0 If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
-            self.beta_2 = 2.5 # 1.7 If bigger, makes whole surface higher if delta_theta is smaller
-            self.epsilon = 0.07 # 0.25 If smaller, makes the peak higher
+            self.beta_1 = 7.0 # If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
+            self.beta_2 = 2.5 # If bigger, makes whole surface higher if delta_theta is smaller
+            self.epsilon = 0.07 # If smaller, makes the peak higher
             self.safety_metric = SafetyLossFunction(self.alpha_1, self.alpha_2, self.beta_1, self.beta_2, self.epsilon)
 
         # Setup DT-MPC problem  
@@ -201,11 +201,11 @@ class LocalTrackingController:
 
         gamma1 = self.model.tvp['gamma1']
         gamma2 = self.model.tvp['gamma2']
+        self.robot.set_cbf_params(gamma1=gamma1, gamma2=gamma2)
         
         obs = self.model.tvp['obs']
 
         cbf_constraints = []
-        
         if obs != None or obs[2] != 0:
             hocbf_2nd_order = self.robot.agent_barrier(x_k, u_k, self.robot.robot_radius, obs)
             cbf_constraints.append(-hocbf_2nd_order)
@@ -387,7 +387,7 @@ class LocalTrackingController:
             delta_theta = angle_normalize(relative_angle)
             cbf_constraint_value = self.robot.agent_barrier(self.robot.X, u0, self.robot.robot_radius, self.near_obs)
             self.safety_loss = self.safety_metric.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
-            print(f"Safety Loss Function Value: {self.safety_loss}, Normalized Relative angle: {delta_theta}")
+            # print(f"Safety Loss Function Value: {self.safety_loss}, Normalized Relative angle: {delta_theta}")
 
         # 6. Update sensing information (Skipped while data generation)
         if self.data_generation == False:
