@@ -119,7 +119,7 @@ def generate_data(samples_per_dimension=5, num_processes=8):
     return results
 
 if __name__ == "__main__":
-    datapoint = 7
+    datapoint = 9
     num_processes = 8 # Change based on the number of cores available
     results = generate_data(datapoint, num_processes)
     df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time'])
