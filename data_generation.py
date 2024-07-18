@@ -1,14 +1,14 @@
-import numpy as np
-import pandas as pd
-from tracking import LocalTrackingController, CollisionError
 import os
 import sys
-from multiprocessing import Pool
+import numpy as np
+import pandas as pd
 import tqdm
-from utils import plotting
-from utils import env
+from multiprocessing import Pool
 import matplotlib
 import matplotlib.pyplot as plt
+from utils import plotting
+from utils import env
+from tracking import LocalTrackingController, CollisionError
 
 # Use a non-interactive backend
 matplotlib.use('Agg')
@@ -96,7 +96,7 @@ def worker(params):
         result = single_agent_simulation(distance, velocity, theta, gamma1, gamma2)
     return result
 
-def generate_data(samples_per_dimension=5, num_processes=8):
+def generate_data(samples_per_dimension=5, num_processes=8, batch_size=6):
     distance_range = np.linspace(0.35, 3.0, samples_per_dimension)
     velocity_range = np.linspace(0.01, 1.0, samples_per_dimension)
     theta_range = np.linspace(0.001, np.pi / 2, samples_per_dimension)
@@ -109,19 +109,45 @@ def generate_data(samples_per_dimension=5, num_processes=8):
                        for g1 in gamma1_range
                        for g2 in gamma2_range]
 
-    pool = Pool(processes=num_processes)
-    results = []
-    for result in tqdm.tqdm(pool.imap(worker, parameter_space), total=len(parameter_space)):
-        results.append(result)
-    pool.close()
-    pool.join()
+    total_batches = len(parameter_space) // batch_size + (1 if len(parameter_space) % batch_size != 0 else 0)
 
-    return results
+    for batch_index in range(total_batches):
+        batch_parameters = parameter_space[batch_index * batch_size:(batch_index + 1) * batch_size]
+
+        pool = Pool(processes=num_processes)
+        results = []
+        for result in tqdm.tqdm(pool.imap(worker, batch_parameters), total=len(batch_parameters)):
+            results.append(result)
+        pool.close()
+        pool.join()
+
+        df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time'])
+        df.to_csv(f'data_generation_results_batch_{batch_index + 1}.csv', index=False)
+
+def concatenate_csv_files(output_filename, total_batches):
+    all_data = []
+
+    for batch_index in range(total_batches):
+        batch_file = f'data_generation_results_batch_{batch_index + 1}.csv'
+        batch_data = pd.read_csv(batch_file)
+        all_data.append(batch_data)
+
+    final_df = pd.concat(all_data, ignore_index=True)
+    final_df.to_csv(output_filename, index=False)
+    print(f"All batch files have been concatenated into {output_filename}")
+
+
+
 
 if __name__ == "__main__":
-    datapoint = 9
-    num_processes = 8 # Change based on the number of cores available
-    results = generate_data(datapoint, num_processes)
-    df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time'])
-    df.to_csv(f'data_generation_results_{datapoint}datapoint.csv', index=False)
-    print("Data generation complete. Results saved to 'data_generation_results.csv'.")
+    samples_per_dimension = 10  # Number of samples per dimension
+    batch_size = 7**5           # Specify the batch size
+    num_processes = 8           # Change based on the number of cores available
+
+    total_datapoints = samples_per_dimension ** 5
+    total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size != 0 else 0)
+    
+    generate_data(samples_per_dimension, num_processes, batch_size)
+    concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint.csv', total_batches)
+
+    print("Data generation complete.")
