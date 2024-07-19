@@ -10,8 +10,6 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-
-
 class EvidentialDeepRegression:
     def __init__(self, data_file, epochs=1000, batch_size=32):
         self.data_file = data_file
@@ -32,13 +30,15 @@ class EvidentialDeepRegression:
 
         # Transform Theta into sine and cosine components
         Theta = X[:, 2]
-        X_sin_cos = np.column_stack((X[:, :2], np.sin(Theta), np.cos(Theta), X[:, 3:]))
+        # angle wrapping, refers to this paper: "Learning with 3D rotations, a hitchhiker's guide to SO(3)", https://arxiv.org/abs/2404.11735
+        X_sin_cos = np.column_stack(
+            (X[:, :2], np.sin(Theta), np.cos(Theta), X[:, 3:]))
 
         # Normalize the inputs
         X_scaled = self.scaler.fit_transform(X_sin_cos)
-        
+
         return X_scaled, y_safety_loss, y_deadlock_time
-    
+
     def EvidentialRegressionLoss(self, true, pred):
         '''Custom loss function to handle the custom regularizer coefficient'''
         return edl.losses.EvidentialRegression(true, pred, coeff=1e-2)
@@ -51,6 +51,7 @@ class EvidentialDeepRegression:
         dropout_1 = tf.keras.layers.Dropout(0.2)(dense_2)
         dense_3 = tf.keras.layers.Dense(64, activation="relu")(dropout_1)
         dropout_2 = tf.keras.layers.Dropout(0.2)(dense_3)
+        # FIXME: check the dropout and last layer activation
         dense_4 = tf.keras.layers.Dense(64, activation="relu")(dropout_2)
 
         # Output layer for safety loss
@@ -60,10 +61,12 @@ class EvidentialDeepRegression:
         output_deadlock_time = edl.layers.DenseNormalGamma(1)(dense_4)
 
         # Define the model with two outputs
-        self.model = tf.keras.models.Model(inputs=input_layer, outputs=[output_safety_loss, output_deadlock_time])
+        self.model = tf.keras.models.Model(inputs=input_layer, outputs=[
+                                           output_safety_loss, output_deadlock_time])
 
         # Compile the model with multiple losses
         self.model.compile(
+            # FIXME: learning rate should be tunable outside, so make it as a argument parameter
             optimizer=tf.keras.optimizers.Adam(2e-6),
             loss={
                 'dense_normal_gamma': self.EvidentialRegressionLoss,
@@ -73,8 +76,8 @@ class EvidentialDeepRegression:
 
     def train_model(self, X_scaled, y_safety_loss, y_deadlock_time):
         early_stopping = tf.keras.callbacks.EarlyStopping(
-            monitor='val_loss', 
-            patience=20, 
+            monitor='val_loss',
+            patience=20,
             restore_best_weights=True
         )
 
@@ -90,11 +93,11 @@ class EvidentialDeepRegression:
             monitor='val_loss',
             save_best_only=True
         )
-        
+
         self.history = self.model.fit(
             X_scaled, [y_safety_loss, y_deadlock_time],
-            epochs=self.epochs, 
-            batch_size=self.batch_size, 
+            epochs=self.epochs,
+            batch_size=self.batch_size,
             validation_split=0.2,
             callbacks=[early_stopping, reduce_lr_on_plateau, model_checkpoint]
         )
@@ -104,9 +107,9 @@ class EvidentialDeepRegression:
 
     def load_saved_model(self, model_name):
         self.model = tf.keras.models.load_model(
-            model_name, 
+            model_name,
             custom_objects={
-                'DenseNormalGamma': edl.layers.DenseNormalGamma, 
+                'DenseNormalGamma': edl.layers.DenseNormalGamma,
                 'EvidentialRegression': EvidentialDeepRegression.EvidentialRegressionLoss
             }
         )
@@ -121,14 +124,15 @@ class EvidentialDeepRegression:
         aleatoric_uncertainty = beta / (alpha - 1)
         epistemic_uncertainty = beta / (v * (alpha - 1))
         return gamma, aleatoric_uncertainty, epistemic_uncertainty
-    
+
     def get_gaussian_distributions(self, gamma, v, alpha, beta):
         '''Get Gaussian distribution for the mean and Inverse-Gamma distribution for the variance.'''
-        gaussians = [norm(loc=g, scale=np.sqrt(b / v)) for g, v, b in zip(gamma, v, beta)]
+        gaussians = [norm(loc=g, scale=np.sqrt(b / v))
+                     for g, v, b in zip(gamma, v, beta)]
         inv_gammas = [invgamma(a=a, scale=b) for a, b in zip(alpha, beta)]
-        
+
         return gaussians, inv_gammas
-    
+
     def create_gmm(self, y_pred, num_samples=3):
         '''Sample 3 pairs of (mean, variance) and create a Gaussian Mixture Model (GMM)'''
         gamma, v, alpha, beta = tf.split(y_pred, 4, axis=-1)
@@ -136,35 +140,38 @@ class EvidentialDeepRegression:
         v = v.numpy()
         alpha = alpha.numpy()
         beta = beta.numpy()
-        
-        gaussians, inv_gammas = self.get_gaussian_distributions(gamma, v, alpha, beta)
+
+        gaussians, inv_gammas = self.get_gaussian_distributions(
+            gamma, v, alpha, beta)
         means = []
         variances = []
-        
+
         for _ in range(num_samples):
             for gaussian, inv_gamma in zip(gaussians, inv_gammas):
                 variance = inv_gamma.rvs()
                 variances.append(variance)
                 mean = gaussian.rvs()
                 means.append(mean)
-        
+
         gmm = GaussianMixture(n_components=num_samples)
         gmm.means_ = np.array(means).reshape(-1, 1)
         gmm.covariances_ = np.array(variances).reshape(-1, 1, 1)
         gmm.weights_ = np.ones(num_samples) / num_samples
-        gmm.precisions_cholesky_ = np.array([np.linalg.cholesky(np.linalg.inv(cov)) for cov in gmm.covariances_]) # For efficient computation
-        
+        gmm.precisions_cholesky_ = np.array([np.linalg.cholesky(np.linalg.inv(
+            cov)) for cov in gmm.covariances_])  # For efficient computation
+
         return gmm
 
-    
-    
+
 def plot_training_history(history):
     plt.figure(figsize=(12, 6))
 
     # Safety Loss Model Training History
     plt.subplot(1, 2, 1)
-    plt.plot(history.history['dense_normal_gamma_loss'], label='Training Loss - Safety Loss')
-    plt.plot(history.history['val_dense_normal_gamma_loss'], label='Validation Loss - Safety Loss')
+    plt.plot(history.history['dense_normal_gamma_loss'],
+             label='Training Loss - Safety Loss')
+    plt.plot(history.history['val_dense_normal_gamma_loss'],
+             label='Validation Loss - Safety Loss')
     plt.title('Safety Loss Model Training History')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
@@ -172,14 +179,17 @@ def plot_training_history(history):
 
     # Deadlock Time Model Training History
     plt.subplot(1, 2, 2)
-    plt.plot(history.history['dense_normal_gamma_1_loss'], label='Training Loss - Deadlock Time')
-    plt.plot(history.history['val_dense_normal_gamma_1_loss'], label='Validation Loss - Deadlock Time')
+    plt.plot(history.history['dense_normal_gamma_1_loss'],
+             label='Training Loss - Deadlock Time')
+    plt.plot(history.history['val_dense_normal_gamma_1_loss'],
+             label='Validation Loss - Deadlock Time')
     plt.title('Deadlock Time Model Training History')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
 
     plt.show()
+
 
 def evaluate_predictions(y_true, y_pred, name):
     gamma, v, alpha, beta = tf.split(y_pred, 4, axis=-1)
@@ -195,8 +205,10 @@ def evaluate_predictions(y_true, y_pred, name):
     print(f"MAE: {mae}")
     print()
 
-def plot_gmm(gmm, y_pred):
-    x = np.linspace(gmm.means_.min() - 3, gmm.means_.max() + 3, 1000).reshape(-1, 1)
+
+def plot_gmm(gmm, y_pred):  # FIXME: check y_pred, it is not using
+    x = np.linspace(gmm.means_.min() - 3, gmm.means_.max() +
+                    3, 1000).reshape(-1, 1)
     logprob = gmm.score_samples(x)
     responsibilities = gmm.predict_proba(x)
     pdf = np.exp(logprob)
@@ -204,7 +216,7 @@ def plot_gmm(gmm, y_pred):
 
     plt.figure(figsize=(10, 6))
     plt.plot(x, pdf, '-k', label='GMM')
-    
+
     for i in range(pdf_individual.shape[1]):
         plt.plot(x, pdf_individual[:, i], '--', label=f'GMM Component {i+1}')
 
@@ -216,32 +228,32 @@ def plot_gmm(gmm, y_pred):
 
 
 if __name__ == "__main__":
-    Train_model = False
+    Train_model = False  # FIXME: more general variable name for this is eval, or test
     model_name = 'edr_model_best_0713.h5'
     data_file = 'data_generation_results_8datapoint.csv'
-    
+
     batch_size = 128
+    # FIXME: don't put data_file here
     edr = EvidentialDeepRegression(data_file, batch_size=batch_size)
+    # FIXME: data_file should be passed here
     X_scaled, y_safety_loss, y_deadlock_time = edr.load_and_preprocess_data()
-    
+
     # Registering the custom loss function in TensorFlow's serialization framework:
     tf.keras.utils.get_custom_objects().update({
         'EvidentialRegressionLoss': EvidentialDeepRegression.EvidentialRegressionLoss
     })
-    
+
     if Train_model:
         edr.build_and_compile_model(X_scaled.shape[1])
         edr.train_model(X_scaled, y_safety_loss, y_deadlock_time)
         edr.save_model(model_name)
         plot_training_history(edr.history)
     else:
-        edr.load_saved_model(model_name)    
+        edr.load_saved_model(model_name)
 
     # Predict and plot using the trained model
     y_pred_safety_loss, y_pred_deadlock_time = edr.model.predict(X_scaled)
-            
+
     # Create GMM for safety loss predictions
     gmm_safety = edr.create_gmm(y_pred_safety_loss[0])
     plot_gmm(gmm_safety, y_pred_safety_loss)
-
- 
