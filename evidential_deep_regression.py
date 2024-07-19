@@ -2,9 +2,12 @@ import pandas as pd
 import tensorflow as tf
 import numpy as np
 import evidential_deep_learning as edl
+from scipy.stats import invgamma, norm
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.mixture import GaussianMixture
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 
 
@@ -37,11 +40,11 @@ class EvidentialDeepRegression:
         return X_scaled, y_safety_loss, y_deadlock_time
     
     def EvidentialRegressionLoss(self, true, pred):
-        # Custom loss function to handle the custom regularizer coefficient
+        '''Custom loss function to handle the custom regularizer coefficient'''
         return edl.losses.EvidentialRegression(true, pred, coeff=1e-2)
 
     def build_and_compile_model(self, input_shape):
-        # Define the evidential deep learning model for both outputs
+        '''Define the evidential deep learning model for both outputs'''
         input_layer = tf.keras.layers.Input(shape=(input_shape,))
         dense_1 = tf.keras.layers.Dense(128, activation="relu")(input_layer)
         dense_2 = tf.keras.layers.Dense(128, activation="relu")(dense_1)
@@ -109,14 +112,50 @@ class EvidentialDeepRegression:
         )
 
     def calculate_uncertainties(self, y_pred):
-        mu, v, alpha, beta = tf.split(y_pred, 4, axis=-1)
-        mu = mu.numpy()[:, 0]
+        '''Calculate aleatoric and epistemic uncertainties from model predictions'''
+        gamma, v, alpha, beta = tf.split(y_pred, 4, axis=-1)
+        gamma = gamma.numpy()[:, 0]
         v = v.numpy()[:, 0]
         alpha = alpha.numpy()[:, 0]
         beta = beta.numpy()[:, 0]
         aleatoric_uncertainty = beta / (alpha - 1)
         epistemic_uncertainty = beta / (v * (alpha - 1))
-        return mu, aleatoric_uncertainty, epistemic_uncertainty
+        return gamma, aleatoric_uncertainty, epistemic_uncertainty
+    
+    def get_gaussian_distributions(self, gamma, v, alpha, beta):
+        '''Get Gaussian distribution for the mean and Inverse-Gamma distribution for the variance.'''
+        gaussians = [norm(loc=g, scale=np.sqrt(b / v)) for g, v, b in zip(gamma, v, beta)]
+        inv_gammas = [invgamma(a=a, scale=b) for a, b in zip(alpha, beta)]
+        
+        return gaussians, inv_gammas
+    
+    def create_gmm(self, y_pred, num_samples=3):
+        '''Sample 3 pairs of (mean, variance) and create a Gaussian Mixture Model (GMM)'''
+        gamma, v, alpha, beta = tf.split(y_pred, 4, axis=-1)
+        gamma = gamma.numpy()
+        v = v.numpy()
+        alpha = alpha.numpy()
+        beta = beta.numpy()
+        
+        gaussians, inv_gammas = self.get_gaussian_distributions(gamma, v, alpha, beta)
+        means = []
+        variances = []
+        
+        for _ in range(num_samples):
+            for gaussian, inv_gamma in zip(gaussians, inv_gammas):
+                variance = inv_gamma.rvs()
+                variances.append(variance)
+                mean = gaussian.rvs()
+                means.append(mean)
+        
+        gmm = GaussianMixture(n_components=num_samples)
+        gmm.means_ = np.array(means).reshape(-1, 1)
+        gmm.covariances_ = np.array(variances).reshape(-1, 1, 1)
+        gmm.weights_ = np.ones(num_samples) / num_samples
+        gmm.precisions_cholesky_ = np.array([np.linalg.cholesky(np.linalg.inv(cov)) for cov in gmm.covariances_]) # For efficient computation
+        
+        return gmm
+
     
     
 def plot_training_history(history):
@@ -143,12 +182,12 @@ def plot_training_history(history):
     plt.show()
 
 def evaluate_predictions(y_true, y_pred, name):
-    mu, v, alpha, beta = tf.split(y_pred, 4, axis=-1)
-    mu = mu.numpy()[:, 0]
+    gamma, v, alpha, beta = tf.split(y_pred, 4, axis=-1)
+    gamma = gamma.numpy()[:, 0]
 
-    mse = mean_squared_error(y_true, mu)
+    mse = mean_squared_error(y_true, gamma)
     rmse = np.sqrt(mse)
-    mae = mean_absolute_error(y_true, mu)
+    mae = mean_absolute_error(y_true, gamma)
 
     print(f"Evaluation metrics for {name}:")
     print(f"MSE: {mse}")
@@ -156,226 +195,23 @@ def evaluate_predictions(y_true, y_pred, name):
     print(f"MAE: {mae}")
     print()
 
-def plot_gaussian_with_different_gammas(edr):
-    import seaborn as sns
-    from scipy.stats import norm    
-    
-    # Define three different combinations of gamma1 and gamma2
-    gamma_combinations = [
-        (0.01, 0.01),
-        (0.5, 0.5),
-        (0.99, 0.99)
-    ]
-    
-    mu_safety_all = []
-    sigma_safety_all = []
-    mu_deadlock_all = []
-    sigma_deadlock_all = []
-    
-    for gamma1, gamma2 in gamma_combinations:
-        # X = df[['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2']].values
-        X_nonscaled = [0.516, 0.0825, 0.0017, 0.9999, gamma1, gamma2]
-        X_batch = np.tile(X_nonscaled, (32, 1)) 
-        X_batch_normed = edr.scaler.transform(X_batch)
+def plot_gmm(gmm, y_pred):
+    x = np.linspace(gmm.means_.min() - 3, gmm.means_.max() + 3, 1000).reshape(-1, 1)
+    logprob = gmm.score_samples(x)
+    responsibilities = gmm.predict_proba(x)
+    pdf = np.exp(logprob)
+    pdf_individual = responsibilities * pdf[:, np.newaxis]
 
-        # Predict using the EDR model
-        y_pred_safety_loss, y_pred_deadlock_time = edr.model.predict(X_batch_normed)
-        
-        # Calculate uncertainties for safety loss
-        mu_safety_loss, aleatoric_uncertainty_safety_loss, epistemic_uncertainty_safety_loss = edr.calculate_uncertainties(y_pred_safety_loss)
-        mu_deadlock_time, aleatoric_uncertainty_deadlock_time, epistemic_uncertainty_deadlock_time = edr.calculate_uncertainties(y_pred_deadlock_time)
-        
-        # Append results to the lists for safety loss
-        mu_safety_all.append(mu_safety_loss[0])
-        sigma_safety_all.append(np.sqrt(aleatoric_uncertainty_safety_loss[0] + epistemic_uncertainty_safety_loss[0]))
-        
-        # Append results to the lists for deadlock time
-        mu_deadlock_all.append(mu_deadlock_time[0])
-        sigma_deadlock_all.append(np.sqrt(aleatoric_uncertainty_deadlock_time[0] + epistemic_uncertainty_deadlock_time[0]))
+    plt.figure(figsize=(10, 6))
+    plt.plot(x, pdf, '-k', label='GMM')
     
-    # Plot GMM for safety loss
-    fig, ax = plt.subplots(1, 2, figsize=(15, 6))
-    
-    colors = ['blue', 'orange', 'green']
-    labels = ['γ1 = 0.01, γ2 = 0.01', 'γ1 = 0.5, γ2 = 0.5', 'γ1 = 0.99, γ2 = 0.99']
-    
-    for i, (mu, sigma, color, label) in enumerate(zip(mu_safety_all, sigma_safety_all, colors, labels)):
-        x = np.linspace(mu - 4*sigma, mu + 4*sigma, 1000)
-        p = norm.pdf(x, mu, sigma)
-        ax[0].plot(x, p, color=color, linestyle='dashed', label=label)
-    
-    ax[0].legend()
-    ax[0].set_xlabel('Safety Loss Prediction (Mu)')
-    ax[0].set_ylabel('Probability Density')
-    ax[0].set_title('Safety Loss GMM of EDR Predictions')
-    
-    # Plot GMM for deadlock time
-    for i, (mu, sigma, color, label) in enumerate(zip(mu_deadlock_all, sigma_deadlock_all, colors, labels)):
-        x = np.linspace(mu - 4*sigma, mu + 4*sigma, 1000)
-        p = norm.pdf(x, mu, sigma)
-        ax[1].plot(x, p, color=color, linestyle='dashed', label=label)
-    
-    ax[1].legend()
-    ax[1].set_xlabel('Deadlock Time Prediction (Mu)')
-    ax[1].set_ylabel('Probability Density')
-    ax[1].set_title('Deadlock Time GMM of EDR Predictions')
-    
-    plt.show()
+    for i in range(pdf_individual.shape[1]):
+        plt.plot(x, pdf_individual[:, i], '--', label=f'GMM Component {i+1}')
 
-def plot_gmm_with_different_gammas(edr):
-    import seaborn as sns
-    from sklearn.mixture import GaussianMixture
-        
-    # Define three different combinations of gamma1 and gamma2
-    gamma_combinations = [
-        (0.01, 0.01),
-        (0.5, 0.5),
-        (0.99, 0.99)
-    ]
-    
-    mu_safety_all = []
-    mu_deadlock_all = []
-    
-    for gamma1, gamma2 in gamma_combinations:
-        # Generate varied samples
-        X_nonscaled = np.array([0.516, 0.0825, 0.0017, 0.9999])
-        gamma_values = np.tile([gamma1, gamma2], (32, 1))
-        noise = np.random.normal(0, 0.01, size=(32, 4))  # Add some noise to the features
-        X_batch = np.hstack((X_nonscaled + noise, gamma_values))  # Create a batch of varied samples
-
-        X_batch_normed = edr.scaler.transform(X_batch)
-
-        # Predict using the EDR model
-        y_pred_safety_loss, y_pred_deadlock_time = edr.model.predict(X_batch_normed)
-        
-        # Calculate uncertainties for safety loss
-        mu_safety_loss, aleatoric_uncertainty_safety_loss, epistemic_uncertainty_safety_loss = edr.calculate_uncertainties(y_pred_safety_loss)
-        mu_deadlock_time, aleatoric_uncertainty_deadlock_time, epistemic_uncertainty_deadlock_time = edr.calculate_uncertainties(y_pred_deadlock_time)
-        
-        # Append results to the lists for safety loss
-        mu_safety_all.extend(mu_safety_loss)
-        
-        # Append results to the lists for deadlock time
-        mu_deadlock_all.extend(mu_deadlock_time)
-    
-    # Convert lists to numpy arrays for GMM fitting
-    mu_safety_all = np.array(mu_safety_all).reshape(-1, 1)
-    mu_deadlock_all = np.array(mu_deadlock_all).reshape(-1, 1)
-    
-    # Fit GMM and plot for safety loss
-    gmm_safety = GaussianMixture(n_components=3).fit(mu_safety_all)
-    x_safety = np.linspace(mu_safety_all.min() - 1, mu_safety_all.max() + 1, 1000)
-    logprob_safety = gmm_safety.score_samples(x_safety.reshape(-1, 1))
-    
-    fig, ax = plt.subplots(1, 2, figsize=(15, 6))
-    sns.histplot(mu_safety_all.flatten(), kde=False, stat='density', bins=30, label='Data', ax=ax[0])
-    ax[0].plot(x_safety, np.exp(logprob_safety), color='black', linestyle='dashed', label='GMM')
-    ax[0].legend()
-    ax[0].set_xlabel('Safety Loss Prediction (Mu)')
-    ax[0].set_ylabel('Probability Density')
-    ax[0].set_title('Safety Loss GMM of EDR Predictions')
-    
-    # Fit GMM and plot for deadlock time
-    gmm_deadlock = GaussianMixture(n_components=3).fit(mu_deadlock_all)
-    x_deadlock = np.linspace(mu_deadlock_all.min() - 1, mu_deadlock_all.max() + 1, 1000)
-    logprob_deadlock = gmm_deadlock.score_samples(x_deadlock.reshape(-1, 1))
-    
-    sns.histplot(mu_deadlock_all.flatten(), kde=False, stat='density', bins=30, label='Data', ax=ax[1])
-    ax[1].plot(x_deadlock, np.exp(logprob_deadlock), color='black', linestyle='dashed', label='GMM')
-    ax[1].legend()
-    ax[1].set_xlabel('Deadlock Time Prediction (Mu)')
-    ax[1].set_ylabel('Probability Density')
-    ax[1].set_title('Deadlock Time GMM of EDR Predictions')
-    
-    plt.show()
-
-def plot_overlay_gaussian_gmm_with_different_gammas(edr):
-    import seaborn as sns
-    from scipy.stats import norm    
-    from sklearn.mixture import GaussianMixture
-    
-    # Define three different combinations of gamma1 and gamma2
-    gamma_combinations = [
-        (0.01, 0.01),
-        (0.5, 0.5),
-        (0.99, 0.99)
-    ]
-    
-    mu_safety_all = []
-    sigma_safety_all = []
-    mu_deadlock_all = []
-    sigma_deadlock_all = []
-    
-    for gamma1, gamma2 in gamma_combinations:
-        # Generate varied samples
-        X_nonscaled = np.array([0.516, 0.0825, 0.0017, 0.9999])
-        gamma_values = np.tile([gamma1, gamma2], (32, 1))
-        noise = np.random.normal(0, 0.01, size=(32, 4))  # Add some noise to the features
-        X_batch = np.hstack((X_nonscaled + noise, gamma_values))  # Create a batch of varied samples
-
-        X_batch_normed = edr.scaler.transform(X_batch)
-
-        # Predict using the EDR model
-        y_pred_safety_loss, y_pred_deadlock_time = edr.model.predict(X_batch_normed)
-        
-        # Calculate uncertainties for safety loss
-        mu_safety_loss, aleatoric_uncertainty_safety_loss, epistemic_uncertainty_safety_loss = edr.calculate_uncertainties(y_pred_safety_loss)
-        mu_deadlock_time, aleatoric_uncertainty_deadlock_time, epistemic_uncertainty_deadlock_time = edr.calculate_uncertainties(y_pred_deadlock_time)
-        
-        # Append results to the lists for safety loss
-        mu_safety_all.extend(mu_safety_loss)
-        sigma_safety_all.extend(np.sqrt(aleatoric_uncertainty_safety_loss + epistemic_uncertainty_safety_loss))
-        
-        # Append results to the lists for deadlock time
-        mu_deadlock_all.extend(mu_deadlock_time)
-        sigma_deadlock_all.extend(np.sqrt(aleatoric_uncertainty_deadlock_time + epistemic_uncertainty_deadlock_time))
-    
-    # Convert lists to numpy arrays for GMM fitting
-    mu_safety_all = np.array(mu_safety_all).reshape(-1, 1)
-    sigma_safety_all = np.array(sigma_safety_all).reshape(-1, 1)
-    mu_deadlock_all = np.array(mu_deadlock_all).reshape(-1, 1)
-    sigma_deadlock_all = np.array(sigma_deadlock_all).reshape(-1, 1)
-    
-    # Fit GMM and plot for safety loss
-    gmm_safety = GaussianMixture(n_components=3).fit(mu_safety_all)
-    x_safety = np.linspace(mu_safety_all.min() - 1, mu_safety_all.max() + 1, 1000)
-    logprob_safety = gmm_safety.score_samples(x_safety.reshape(-1, 1))
-    
-    fig, ax = plt.subplots(1, 2, figsize=(15, 6))
-    sns.histplot(mu_safety_all.flatten(), kde=False, stat='density', bins=30, label='Data', ax=ax[0])
-    ax[0].plot(x_safety, np.exp(logprob_safety), color='black', linestyle='dashed', label='GMM')
-
-    colors = ['blue', 'orange', 'green']
-    labels = ['γ1 = 0.01, γ2 = 0.01', 'γ1 = 0.5, γ2 = 0.5', 'γ1 = 0.99, γ2 = 0.99']
-    
-    for i, (mu, sigma, color, label) in enumerate(zip(mu_safety_all[::32], sigma_safety_all[::32], colors, labels)):
-        x = np.linspace(mu - 4*sigma, mu + 4*sigma, 1000)
-        p = norm.pdf(x, mu, sigma)
-        ax[0].plot(x, p, color=color, linestyle='dashed', label=label)
-    
-    ax[0].legend()
-    ax[0].set_xlabel('Safety Loss Prediction (Mu)')
-    ax[0].set_ylabel('Probability Density')
-    ax[0].set_title('Safety Loss GMM of EDR Predictions')
-    
-    # Fit GMM and plot for deadlock time
-    gmm_deadlock = GaussianMixture(n_components=3).fit(mu_deadlock_all)
-    x_deadlock = np.linspace(mu_deadlock_all.min() - 1, mu_deadlock_all.max() + 1, 1000)
-    logprob_deadlock = gmm_deadlock.score_samples(x_deadlock.reshape(-1, 1))
-    
-    sns.histplot(mu_deadlock_all.flatten(), kde=False, stat='density', bins=30, label='Data', ax=ax[1])
-    ax[1].plot(x_deadlock, np.exp(logprob_deadlock), color='black', linestyle='dashed', label='GMM')
-    
-    for i, (mu, sigma, color, label) in enumerate(zip(mu_deadlock_all[::32], sigma_deadlock_all[::32], colors, labels)):
-        x = np.linspace(mu - 4*sigma, mu + 4*sigma, 1000)
-        p = norm.pdf(x, mu, sigma)
-        ax[1].plot(x, p, color=color, linestyle='dashed', label=label)
-    
-    ax[1].legend()
-    ax[1].set_xlabel('Deadlock Time Prediction (Mu)')
-    ax[1].set_ylabel('Probability Density')
-    ax[1].set_title('Deadlock Time GMM of EDR Predictions')
-    
+    plt.xlabel('Safety Loss Prediction')
+    plt.ylabel('Density')
+    plt.title('Gaussian Mixture Model for Safety Loss Predictions')
+    plt.legend()
     plt.show()
 
 
@@ -401,31 +237,11 @@ if __name__ == "__main__":
     else:
         edr.load_saved_model(model_name)    
 
-    # # Predict and plot using the trained model
-    # y_pred_safety_loss, y_pred_deadlock_time = edr.model.predict(X_scaled)
-
-    # evaluate_predictions(y_safety_loss, y_pred_safety_loss, 'Safety Loss')
-    # evaluate_predictions(y_deadlock_time, y_pred_deadlock_time, 'Deadlock Time')
+    # Predict and plot using the trained model
+    y_pred_safety_loss, y_pred_deadlock_time = edr.model.predict(X_scaled)
             
-    # # Calculate uncertainties for safety loss
-    # mu_safety_loss, aleatoric_uncertainty_safety_loss, epistemic_uncertainty_safety_loss = edr.calculate_uncertainties(y_pred_safety_loss)
-    # print("Safety Loss Prediction and Uncertainties:")
-    # print("Prediction:", mu_safety_loss)
-    # print("Aleatoric Uncertainty:", aleatoric_uncertainty_safety_loss)
-    # print("Epistemic Uncertainty:", epistemic_uncertainty_safety_loss)
-    
-    # # Calculate uncertainties for deadlock time
-    # mu_deadlock_time, aleatoric_uncertainty_deadlock_time, epistemic_uncertainty_deadlock_time = edr.calculate_uncertainties(y_pred_deadlock_time)
-    # print("Deadlock Time Prediction and Uncertainties:")
-    # print("Prediction:", mu_deadlock_time)
-    # print("Aleatoric Uncertainty:", aleatoric_uncertainty_deadlock_time)
-    # print("Epistemic Uncertainty:", epistemic_uncertainty_deadlock_time)
-            
-            
-    plot_gaussian_with_different_gammas(edr)
-    plot_gmm_with_different_gammas(edr)
-    plot_overlay_gaussian_gmm_with_different_gammas(edr)
+    # Create GMM for safety loss predictions
+    gmm_safety = edr.create_gmm(y_pred_safety_loss[0])
+    plot_gmm(gmm_safety, y_pred_safety_loss)
 
-
-
-
+ 
