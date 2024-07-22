@@ -1,8 +1,12 @@
+import os
+import sys
+project_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(project_root, 'cbf_tracking'))
+
 import numpy as np
 import matplotlib.pyplot as plt
-from tracking import LocalTrackingController, CollisionError
-from utils import plotting
-from utils import env
+from cbf_tracking.utils import plotting, env
+from cbf_tracking.tracking import LocalTrackingController, InfeasibleError
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -35,33 +39,34 @@ class SafetyLossFunction:
         return phi
 
 
-
-
-def plot_safety_loss_function_grid(tracking_controller):
+def plot_safety_loss_function_grid(tracking_controller, safety_metric):
     '''
     Plot the safety loss function grid for different alpha_1 and delta_theta values
     We assume a zero control input in this plot
     '''
-    if not tracking_controller.data_generation:
-        return
-
-    alpha_1_values = [0.4, 0.2, 0.1]
+    alpha_1_values = [0.6, 0.4, 0.2]
     delta_theta_values = [-0.1, -0.7, -1.4, -2.1]
     
     # Create subplots for each combination of alpha_1 and delta_theta
     fig = make_subplots(rows=3, cols=4, specs=[[{'type': 'surface'}]*4]*3, 
                         subplot_titles=[f'alpha_1 = {alpha_1}, delta_theta = {delta_theta}' 
-                                        for delta_theta in delta_theta_values for alpha_1 in alpha_1_values])
+                                        for alpha_1 in alpha_1_values for delta_theta in delta_theta_values])
 
     x_range = np.linspace(0, 6, 50)
     y_range = np.linspace(0, 6, 50)
     X, Y = np.meshgrid(x_range, y_range)
 
-    obs_x, obs_y, obs_r = tracking_controller.near_obs.flatten()
+    # Update the detected obstacle
+    nearest_obs = tracking_controller.unknown_obs.flatten()
+    obs_x, obs_y, obs_r = nearest_obs
+
+    # Set CBF parameters
+    cbf_alpha1 = 0.15
+    cbf_alpha2 = 0.15
 
     # Calculate and plot safety loss function for each grid point
-    for j, delta_theta in enumerate(delta_theta_values):
-        for i, alpha_1 in enumerate(alpha_1_values):
+    for i, alpha_1 in enumerate(alpha_1_values):
+        for j, delta_theta in enumerate(delta_theta_values):
             Z = np.zeros_like(X)
             for m in range(X.shape[0]):
                 for n in range(X.shape[1]):
@@ -69,13 +74,13 @@ def plot_safety_loss_function_grid(tracking_controller):
                     robot_state = np.zeros_like(tracking_controller.robot.X)
                     robot_state[0, 0] = X[m, n]
                     robot_state[1, 0] = Y[m, n]
-                    obs_pos = tracking_controller.near_obs[:2].flatten()
-                    tracking_controller.robot.set_cbf_params(gamma1=tracking_controller.gamma1, gamma2=tracking_controller.gamma2)
-                    cbf_constraint_value = tracking_controller.robot.agent_barrier(
-                        robot_state, np.array([0, 0]), tracking_controller.robot.robot_radius, tracking_controller.near_obs
+                    obs_pos = nearest_obs[:2].flatten()
+                    h_k, d_h, dd_h = tracking_controller.robot.agent_barrier_dt(
+                        robot_state, np.array([0, 0]), nearest_obs.flatten()
                     )
-                    tracking_controller.safety_metric.alpha_1 = alpha_1
-                    Z[m, n] = tracking_controller.safety_metric.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
+                    cbf_constraint_value = dd_h + (cbf_alpha1 + cbf_alpha2) * d_h + cbf_alpha1 * cbf_alpha2 * h_k
+                    safety_metric.alpha_1 = alpha_1
+                    Z[m, n] = safety_metric.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
 
             Z_obs = np.where((X - obs_x) ** 2 + (Y - obs_y) ** 2 <= obs_r ** 2, Z, np.nan)
 
@@ -93,44 +98,56 @@ def safety_loss_function_example():
 
     # Define waypoints for the robot to follow
     waypoints = [
-            [0.5, 3, 0.1, 0],
-            [5.5, 3, 0, 0]
+            [0.5, 3, 0.1],
+            [5.5, 3, 0]
     ]
     waypoints = np.array(waypoints, dtype=np.float64)
 
     x_init = waypoints[0]
-    x_goal = waypoints[-1]
 
     # Initialize environment and plotting handler
-    env_handler = env.Env(width=6.0, height=6.0)
-    plot_handler = plotting.Plotting(env_handler)
+    plot_handler = plotting.Plotting()
     ax, fig = plot_handler.plot_grid("Local Tracking Controller")
+    env_handler = env.Env()
 
     # Initialize tracking controller with DynamicUnicycle2D model
-    type = 'DynamicUnicycle2D'
-    tracking_controller = LocalTrackingController(x_init, type=type, dt=dt,
-                                         show_animation=True,
-                                         save_animation=False,
-                                         ax=ax, fig=fig,
-                                         env=env_handler,
-                                         waypoints=waypoints,
-                                         data_generation=True)
+    robot_spec = {
+        'model': 'DynamicUnicycle2D',
+        'w_max': 0.5,
+        'a_max': 0.5,
+        'fov_angle': 70.0,
+        'cam_range': 5.0
+    }
+    control_type = 'mpc_cbf'
+    tracking_controller = LocalTrackingController(x_init, robot_spec,
+                                                control_type=control_type,
+                                                dt=dt,
+                                                show_animation=False,
+                                                save_animation=False,
+                                                ax=ax, fig=fig,
+                                                env=env_handler)
 
     # Define obstacle
     unknown_obs = np.array([[3, 3, 0.5]])
     tracking_controller.set_unknown_obs(unknown_obs)
     tracking_controller.set_waypoints(waypoints)
-    tracking_controller.near_obs = unknown_obs.reshape(-1, 1)
+    
+    # Setup safety loss function
+    alpha_1 = 0.4
+    alpha_2 = 0.1
+    beta_1 = 7.0 # If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
+    beta_2 = 2.5 # If bigger, makes whole surface higher if delta_theta is smaller
+    epsilon = 0.07 # If smaller, makes the peak higher
+    safety_metric = SafetyLossFunction(alpha_1, alpha_2, beta_1, beta_2, epsilon)
     
     # Plot safety loss function grid
-    plot_safety_loss_function_grid(tracking_controller)
+    plot_safety_loss_function_grid(tracking_controller, safety_metric)
     
 def dead_lock_example(deadlock_threshold=0.1, max_sim_time=15):
     '''
     Example function to simulate a scenario and check for deadlocks
     '''
     distance = 0.5
-    velocity = 0.0
     theta = 0.001
     gamma1 = 0.1
     gamma2 = 0.1
@@ -139,47 +156,55 @@ def dead_lock_example(deadlock_threshold=0.1, max_sim_time=15):
         dt = 0.05
 
         # Define waypoints and unknown obstacles based on sampled parameters
-        waypoints = np.array([
-            [1, 3, theta+0.01, velocity],
-            [11, 3, 0, 0]
-        ], dtype=np.float64)
+        waypoints = [
+                [1, 3, theta+0.01],
+                [11, 3, 0]
+        ]
+        waypoints = np.array(waypoints, dtype=np.float64)
 
         x_init = waypoints[0]
-        x_goal = waypoints[-1]
 
         # Initialize environment and plotting handler
-        env_handler = env.Env(width=12.0, height=6.0)
-        plot_handler = plotting.Plotting(env_handler)
+        plot_handler = plotting.Plotting()
         ax, fig = plot_handler.plot_grid("Local Tracking Controller")
+        env_handler = env.Env()
 
         # Initialize tracking controller with DynamicUnicycle2D model
-        tracking_controller = LocalTrackingController(
-            x_init, type='DynamicUnicycle2D', dt=dt,
-            show_animation=True, save_animation=False,
-            ax=ax, fig=fig, env=env_handler,
-            waypoints=waypoints, data_generation=True
-        )
+        robot_spec = {
+            'model': 'DynamicUnicycle2D',
+            'w_max': 0.5,
+            'a_max': 0.5,
+            'fov_angle': 70.0,
+            'cam_range': 3.0
+        }
+        control_type = 'mpc_cbf'
+        tracking_controller = LocalTrackingController(x_init, robot_spec,
+                                                    control_type=control_type,
+                                                    dt=dt,
+                                                    show_animation=True,
+                                                    save_animation=False,
+                                                    ax=ax, fig=fig,
+                                                    env=env_handler)
 
         # Set gamma values for control barrier function
-        tracking_controller.gamma1 = gamma1
-        tracking_controller.gamma2 = gamma2
+        tracking_controller.controller.cbf_param['alpha1'] = gamma1
+        tracking_controller.controller.cbf_param['alpha2'] = gamma2
         
         # Set unknown obstacles
         unknown_obs = np.array([[1 + distance, 3, 0.1]])
         tracking_controller.set_unknown_obs(unknown_obs)
-
         tracking_controller.set_waypoints(waypoints)
-        tracking_controller.set_init_state()
 
         # Run simulation to check for deadlocks
         unexpected_beh = 0
         deadlock_time = 0.0
         sim_time = 0.0
-        safety_loss = 0.0
 
         for _ in range(int(max_sim_time / dt)):
             try:
                 ret = tracking_controller.control_step()
+                tracking_controller.draw_plot()
+
                 unexpected_beh += ret
                 sim_time += dt
 
@@ -187,23 +212,16 @@ def dead_lock_example(deadlock_threshold=0.1, max_sim_time=15):
                 if np.abs(tracking_controller.robot.X[3]) < deadlock_threshold:
                     deadlock_time += dt
 
-                # Store max safety metric
-                if tracking_controller.safety_loss > safety_loss:
-                    safety_loss = tracking_controller.safety_loss[0]
-
-                print(f"Current Velocity: {tracking_controller.robot.X[3]} | Deadlock Threshold: {deadlock_threshold} | Deadlock time: {deadlock_time} | Safety Loss Function Value: {tracking_controller.safety_loss}")
+                print(f"Current Velocity: {tracking_controller.robot.X[3]} | Deadlock Threshold: {deadlock_threshold} | Deadlock time: {deadlock_time}")
                 
             # If collision occurs, handle the exception
-            except CollisionError:
+            except InfeasibleError:
                 plt.close(fig)  
-                return distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time
 
         plt.close(fig)  
-        return distance, velocity, theta, gamma1, gamma2, True, safety_loss, deadlock_time, sim_time
 
-    except CollisionError:
+    except InfeasibleError:
         plt.close(fig) 
-        return distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time
 
 
 
@@ -212,5 +230,4 @@ if __name__ == "__main__":
     safety_loss_function_example()
     
     # Example to simulate a scenario and check for deadlocks
-    dead_lock_example()
-    
+    # dead_lock_example()
