@@ -18,6 +18,10 @@ class EvidentialDeepRegression:
         self.scaler = StandardScaler()
         self.model = None
         self.history = None
+        # Registering the custom loss function in TensorFlow's serialization framework:
+        tf.keras.utils.get_custom_objects().update({
+            'EvidentialRegressionLoss': EvidentialDeepRegression.EvidentialRegressionLoss
+        })
 
     def load_and_preprocess_data(self, data_file):
         # Load the CSV file
@@ -120,8 +124,11 @@ class EvidentialDeepRegression:
         self.scaler = joblib.load(scaler_path)
 
     def predict(self, input_array):
-        input_array = np.array(input_array).reshape(1, -1)
-
+        input_array = np.array(input_array)
+        
+        if input_array.ndim == 1:
+            input_array = input_array[np.newaxis, :]
+        
         # Transform Theta into sine and cosine components
         theta = input_array[:, 2]
         input_transformed = np.column_stack((input_array[:, :2], np.sin(theta), np.cos(theta), input_array[:, 3:]))
@@ -255,11 +262,6 @@ if __name__ == "__main__":
     batch_size = 128
     edr = EvidentialDeepRegression(batch_size=batch_size, learning_rate=2e-6)
     X_scaled, y_safety_loss, y_deadlock_time = edr.load_and_preprocess_data(data_file)
-
-    # Registering the custom loss function in TensorFlow's serialization framework:
-    tf.keras.utils.get_custom_objects().update({
-        'EvidentialRegressionLoss': EvidentialDeepRegression.EvidentialRegressionLoss
-    })
 
     if Test:
         edr.load_saved_model(model_name)
