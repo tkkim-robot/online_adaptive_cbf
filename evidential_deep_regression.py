@@ -119,6 +119,21 @@ class EvidentialDeepRegression:
     def load_saved_scaler(self, scaler_path):
         self.scaler = joblib.load(scaler_path)
 
+    def predict(self, input_array):
+        input_array = np.array(input_array).reshape(1, -1)
+
+        # Transform Theta into sine and cosine components
+        theta = input_array[:, 2]
+        input_transformed = np.column_stack((input_array[:, :2], np.sin(theta), np.cos(theta), input_array[:, 3:]))
+
+        # Normalize the inputs using the loaded scaler
+        input_scaled = self.scaler.transform(input_transformed)
+
+        # Predict the output using the loaded model
+        y_pred_safety_loss, y_pred_deadlock_time = self.model.predict(input_scaled)
+
+        return y_pred_safety_loss, y_pred_deadlock_time
+
     def calculate_uncertainties(self, y_pred):
         '''Calculate aleatoric and epistemic uncertainties from model predictions'''
         gamma, v, alpha, beta = tf.split(y_pred, 4, axis=-1)
@@ -232,10 +247,10 @@ def plot_gmm(gmm):
 
 
 if __name__ == "__main__":
-    Test = False # Set to True if you want to test the model without training
-    model_name = 'edr_model_0720.h5'
+    Test = True # Set to True if you want to test the model without training
+    model_name = 'edr_model_0725.h5'
     scaler_name = 'scaler.save'    
-    data_file = 'data_generation_results_9datapoint.csv'
+    data_file = 'data_generation_results_5datapoint.csv'
 
     batch_size = 128
     edr = EvidentialDeepRegression(batch_size=batch_size, learning_rate=2e-6)
@@ -264,3 +279,9 @@ if __name__ == "__main__":
     # Create GMM for safety loss predictions
     gmm_safety = edr.create_gmm(y_pred_safety_loss[0])
     plot_gmm(gmm_safety)
+    
+    # Example input array [distance, velocity, theta, gamma1, gamma2]
+    input_array = [1.0, 0.5, 0.785398, 0.1, 0.5]
+    y_pred_safety_loss, y_pred_deadlock_time = edr.predict(input_array)
+    print("Predicted Safety Loss:", y_pred_safety_loss)
+    print("Predicted Deadlock Time:", y_pred_deadlock_time)

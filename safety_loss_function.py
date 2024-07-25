@@ -230,4 +230,4 @@ if __name__ == "__main__":
     safety_loss_function_example()
     
     # Example to simulate a scenario and check for deadlocks
-    # dead_lock_example()
+    dead_lock_example()
