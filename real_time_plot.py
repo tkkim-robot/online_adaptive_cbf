@@ -37,7 +37,7 @@ class RealTimePlotter:
 
     def update_real_time_gmm(self, gmms):
         plt.ion()  
-        x = np.linspace(-1, 7, 1000).reshape(-1, 1)
+        x = np.linspace(-0.5, 5.5, 500).reshape(-1, 1)
         for gmm, line_set in zip(gmms, self.lines):
             logprob = gmm.score_samples(x)
             responsibilities = gmm.predict_proba(x)
@@ -58,21 +58,21 @@ class RealTimePlotter:
         gmm_ax3 = self.fig.add_subplot(right_gs[2, 0], sharex=gmm_ax1, sharey=gmm_ax1)
         self.ax_gmm = [gmm_ax1, gmm_ax2, gmm_ax3]
 
-        x = np.linspace(-1, 7, 1000).reshape(-1, 1)
+        x = np.linspace(-0.5, 5.5, 500).reshape(-1, 1)
         self.lines = []
 
         for ax, gamma_pair in zip(self.ax_gmm, self.gamma_pairs):
             main_line, = ax.plot(x, np.zeros_like(x), '-k', label='GMM')
             comp_lines = [ax.plot(x, np.zeros_like(x), '--', label=f'GMM Component {i+1}')[0] for i in range(3)]
             self.lines.append([main_line, comp_lines])
-            ax.set_xlim([-1, 7])
-            ax.set_ylim([0, 1])
+            ax.set_xlim([-0.5, 5.5])
+            ax.set_ylim([0, 5])
             ax.set_title(f'Gamma Pair: {gamma_pair}', fontsize=10)
             ax.tick_params(axis='both', which='major', labelsize=10)
 
         for ax in self.ax_gmm:
-            ax.xaxis.set_major_locator(FixedLocator(np.arange(0, 7, 1)))
-            ax.yaxis.set_major_locator(FixedLocator(np.linspace(0, 1, 5)))
+            ax.xaxis.set_major_locator(FixedLocator(np.arange(0, 6, 1)))
+            ax.yaxis.set_major_locator(FixedLocator(np.linspace(0, 5, 5)))
 
         # Set xlabel and ylabel
         self.ax_gmm[-1].set_xlabel('Safety Loss GMM Distribution Prediction', fontsize=12)
@@ -105,7 +105,7 @@ class RealTimePlotter:
 
 
 def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_time=20):
-    dt = 0.1
+    dt = 0.05
 
     waypoints = np.array([
         [1, 3, theta],
@@ -118,7 +118,7 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
     plot_handler = plotting.Plotting()
     env_handler = env.Env()
     
-    real_time_plotter = RealTimePlotter('edr_model_9datapoint.h5', 'scaler_9datapoint.save')
+    real_time_plotter = RealTimePlotter('edr_model_9datapoint_tuned.h5', 'scaler_9datapoint_tuned.save')
     ax_main, env_handler = real_time_plotter.initialize_plots(plot_handler, env_handler)
     
     # Set robot with controller 
@@ -168,4 +168,4 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
 
 
 if __name__ == "__main__":
-    single_agent_simulation(1.5, 0.5, 0.001, 0.1, 0.2)
+    single_agent_simulation(5.5, 0.5, 0.001, 0.1, 0.2)

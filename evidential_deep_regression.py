@@ -7,7 +7,6 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.mixture import GaussianMixture
 import matplotlib.pyplot as plt
-import seaborn as sns
 import joblib
 
 class EvidentialDeepRegression:
@@ -57,7 +56,7 @@ class EvidentialDeepRegression:
         dense_1 = tf.keras.layers.Dense(128, activation="relu")(input_layer)
         dense_2 = tf.keras.layers.Dense(128, activation="relu")(dense_1)
         dropout_1 = tf.keras.layers.Dropout(0.2)(dense_2)
-        dense_3 = tf.keras.layers.Dense(64, activation="relu")(dropout_1)
+        dense_3 = tf.keras.layers.Dense(96, activation="relu")(dropout_1)
         dropout_2 = tf.keras.layers.Dropout(0.2)(dense_3)
         dense_4 = tf.keras.layers.Dense(64, activation="relu")(dropout_2)
 
@@ -254,13 +253,13 @@ def plot_gmm(gmm):
 
 
 if __name__ == "__main__":
-    Test = False # Set to True if you want to test the model without training
-    model_name = 'edr_model_9datapoint.h5'
-    scaler_name = 'scaler_9datapoint.save'    
+    Test = True # Set to True if you want to test the model without training
+    model_name = 'edr_model_9datapoint_tuned.h5'
+    scaler_name = 'scaler_9datapoint_tuned.save'    
     data_file = 'data_generation_results_9datapoint.csv'
 
-    batch_size = 64
-    edr = EvidentialDeepRegression(batch_size=batch_size, learning_rate=1e-6)
+    batch_size = 32
+    edr = EvidentialDeepRegression(batch_size=batch_size, learning_rate=9.14e-5)
     X_scaled, y_safety_loss, y_deadlock_time = edr.load_and_preprocess_data(data_file, scaler_name)
 
     if Test:
