@@ -23,7 +23,7 @@ class EvidentialDeepRegression:
             'EvidentialRegressionLoss': EvidentialDeepRegression.EvidentialRegressionLoss
         })
 
-    def load_and_preprocess_data(self, data_file):
+    def load_and_preprocess_data(self, data_file, scaler_name):
         # Load the CSV file
         self.data_file = data_file
         df = pd.read_csv(self.data_file)
@@ -43,7 +43,7 @@ class EvidentialDeepRegression:
         X_scaled = self.scaler.fit_transform(X_sin_cos)
         
         # Save the scaler
-        joblib.dump(self.scaler, 'scaler.save')        
+        joblib.dump(self.scaler, scaler_name)        
 
         return X_scaled, y_safety_loss, y_deadlock_time
 
@@ -137,7 +137,7 @@ class EvidentialDeepRegression:
         input_scaled = self.scaler.transform(input_transformed)
 
         # Predict the output using the loaded model
-        y_pred_safety_loss, y_pred_deadlock_time = self.model.predict(input_scaled)
+        y_pred_safety_loss, y_pred_deadlock_time = self.model.predict(input_scaled, verbose=0)
 
         return y_pred_safety_loss, y_pred_deadlock_time
 
@@ -254,14 +254,14 @@ def plot_gmm(gmm):
 
 
 if __name__ == "__main__":
-    Test = True # Set to True if you want to test the model without training
-    model_name = 'edr_model_0725.h5'
-    scaler_name = 'scaler.save'    
-    data_file = 'data_generation_results_5datapoint.csv'
+    Test = False # Set to True if you want to test the model without training
+    model_name = 'edr_model_9datapoint.h5'
+    scaler_name = 'scaler_9datapoint.save'    
+    data_file = 'data_generation_results_9datapoint.csv'
 
-    batch_size = 128
-    edr = EvidentialDeepRegression(batch_size=batch_size, learning_rate=2e-6)
-    X_scaled, y_safety_loss, y_deadlock_time = edr.load_and_preprocess_data(data_file)
+    batch_size = 64
+    edr = EvidentialDeepRegression(batch_size=batch_size, learning_rate=1e-6)
+    X_scaled, y_safety_loss, y_deadlock_time = edr.load_and_preprocess_data(data_file, scaler_name)
 
     if Test:
         edr.load_saved_model(model_name)
