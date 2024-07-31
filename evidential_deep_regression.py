@@ -143,10 +143,10 @@ class EvidentialDeepRegression:
     def calculate_uncertainties(self, y_pred):
         '''Calculate aleatoric and epistemic uncertainties from model predictions'''
         gamma, v, alpha, beta = tf.split(y_pred, 4, axis=-1)
-        gamma = gamma.numpy()[:, 0]
-        v = v.numpy()[:, 0]
-        alpha = alpha.numpy()[:, 0]
-        beta = beta.numpy()[:, 0]
+        gamma = gamma.numpy().flatten()
+        v = v.numpy().flatten()
+        alpha = alpha.numpy().flatten()
+        beta = beta.numpy().flatten()        
         aleatoric_uncertainty = beta / (alpha - 1)
         epistemic_uncertainty = beta / (v * (alpha - 1))
         return gamma, aleatoric_uncertainty, epistemic_uncertainty
