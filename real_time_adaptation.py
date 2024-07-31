@@ -16,7 +16,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 
 class AdaptiveCBFParameterSelector:
-    def __init__(self, edr_model, edr_scaler, lower_bound=0.05, upper_bound=1.0, step_size=0.05, epistemic_threshold=0.5, cvar_boundary=1.0):
+    def __init__(self, edr_model, edr_scaler, lower_bound=0.05, upper_bound=1.0, step_size=0.05, epistemic_threshold=0.6, cvar_boundary=1.2):
         self.edr = EvidentialDeepRegression()
         self.edr.load_saved_model(edr_model)
         self.edr.load_saved_scaler(edr_scaler)
@@ -83,9 +83,13 @@ class AdaptiveCBFParameterSelector:
         if not filtered_predictions:
             return None, None
         min_deadlock_time = min(filtered_predictions, key=lambda x: x[3])[3]
-        best_predictions = [pred for pred in filtered_predictions if pred[3] == min_deadlock_time]
+        best_predictions = [pred for pred in filtered_predictions if pred[3] < 1e-3]
+        # If no predictions under 1e-3, use the minimum deadlock time
+        if not best_predictions:
+            best_predictions = [pred for pred in filtered_predictions if pred[3] == min_deadlock_time]
+        # If there are multiple best predictions, use harmonic mean to select the best one
         if len(best_predictions) != 1:
-            best_prediction = max(best_predictions, key=lambda x: 2 * (x[4] * x[5]) / (x[4] + x[5]) if (x[4] + x[5]) != 0 else 0)
+            best_prediction = max(best_predictions, key=lambda x: 2 * (x[0] * x[1]) / (x[0] + x[1]) if (x[0] + x[1]) != 0 else 0)
             return best_prediction[0], best_prediction[1]
         return best_predictions[0][0], best_predictions[0][1]
 
@@ -96,11 +100,19 @@ class AdaptiveCBFParameterSelector:
         filtered_predictions = self.filter_by_epistemic_uncertainty(predictions)
         final_predictions = self.filter_by_aleatoric_uncertainty(filtered_predictions)
         best_gamma1, best_gamma2 = self.select_best_parameters(final_predictions)
+        if best_gamma1 is not None and best_gamma2 is not None:
+            print(f"CBF parameters updated to: {best_gamma1:.2f}, {best_gamma2:.2f} | Total prediction count: {len(predictions)} | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric DR-CVaR")        
+        else:
+            print(f"CBF parameters updated to: NONE, NONE | Total prediction count: {len(predictions)} | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric DR-CVaR")        
+            
         return best_gamma1, best_gamma2
 
 
 
-def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_time=20, plot_deadlock=False):
+
+
+
+def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_time=20):
     dt = 0.05
 
     waypoints = np.array([
@@ -156,7 +168,6 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
         # Adapt CBF parameters
         best_gamma1, best_gamma2 = adaptive_selector.adaptive_parameter_selection(tracking_controller)
         if best_gamma1 is not None and best_gamma2 is not None:
-            print("CBF parameters updated to: alpha1 = {}, alpha2 = {}".format(best_gamma1, best_gamma2))
             tracking_controller.controller.cbf_param['alpha1'] = best_gamma1
             tracking_controller.controller.cbf_param['alpha2'] = best_gamma2
     
@@ -165,5 +176,106 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
     plt.ioff()
     plt.close()
 
+
+def single_agent_simulation_traj(distance, velocity, theta, gamma1, gamma2, max_sim_time=20, adapt_cbf=False):
+    dt = 0.05
+
+    waypoints = np.array([
+        [1, 3, theta],
+        [11, 3, 0]
+    ], dtype=np.float64)
+
+    x_init = np.append(waypoints[0], velocity)
+
+    plot_handler = plotting.Plotting()
+    ax, fig = plot_handler.plot_grid("Local Tracking Controller")
+    env_handler = env.Env()
+    
+    # Set robot with controller 
+    robot_spec = {
+        'model': 'DynamicUnicycle2D',
+        'w_max': 0.5,
+        'a_max': 0.5,
+        'fov_angle': 70.0,
+        'cam_range': 7.0
+    }
+    control_type = 'mpc_cbf'
+    tracking_controller = LocalTrackingController(x_init, robot_spec,
+                                                control_type=control_type,
+                                                dt=dt,
+                                                show_animation=True,
+                                                save_animation=False,
+                                                ax=ax, fig=fig,
+                                                env=env_handler)
+
+    # Initialize AdaptiveCBFParameterSelector if adaptation is enabled
+    if adapt_cbf:
+        adaptive_selector = AdaptiveCBFParameterSelector('edr_model_9datapoint_tuned.h5', 'scaler_9datapoint_tuned.save')
+
+    # Set gamma values
+    tracking_controller.controller.cbf_param['alpha1'] = gamma1
+    tracking_controller.controller.cbf_param['alpha2'] = gamma2
+    
+    # Set known obstacles
+    tracking_controller.obs = np.array([[1 + distance, 3, 0.4]])
+    tracking_controller.unknown_obs = np.array([[1 + distance, 3, 0.4]])
+    tracking_controller.set_waypoints(waypoints)
+
+    # Run simulation and collect trajectory
+    trajectory = []  
+    for _ in range(int(max_sim_time / dt)):
+        trajectory.append(tracking_controller.robot.X[:2, 0].flatten())  # Save current position
+        ret = tracking_controller.control_step()
+        tracking_controller.draw_plot()
+        if ret == -1:
+            break
+        
+        # Adapt CBF parameters if enabled
+        if adapt_cbf:
+            best_gamma1, best_gamma2 = adaptive_selector.adaptive_parameter_selection(tracking_controller)
+            if best_gamma1 is not None and best_gamma2 is not None:
+                tracking_controller.controller.cbf_param['alpha1'] = best_gamma1
+                tracking_controller.controller.cbf_param['alpha2'] = best_gamma2
+    
+    tracking_controller.export_video()
+    plt.ioff()
+    plt.close()
+
+    return np.array(trajectory)  # Return the trajectory data
+
+
 if __name__ == "__main__":
-    single_agent_simulation(3.0, 0.5, 0.001, 0.1, 0.2, plot_deadlock=False)
+    # single_agent_simulation(3.0, 0.5, 0.001, 0.1, 0.2)
+    trajectory_1 = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.03, 0.03, adapt_cbf=False)
+    trajectory_2 = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.9, 0.9, adapt_cbf=False)
+    trajectory_3 = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.2, 0.2, adapt_cbf=True)
+    
+    plt.figure(figsize=(10, 8))
+
+    # Plot trajectory without adaptation (gamma1=0.1, gamma2=0.1)
+    plt.plot(trajectory_1[:, 0], trajectory_1[:, 1], label="Without Adaptation (gamma1=0.1, gamma2=0.1)", linestyle="--")
+
+    # Plot trajectory without adaptation (gamma1=0.9, gamma2=0.9)
+    plt.plot(trajectory_2[:, 0], trajectory_2[:, 1], label="Without Adaptation (gamma1=0.9, gamma2=0.9)", linestyle="--")
+
+    # Plot trajectory with adaptation
+    plt.plot(trajectory_3[:, 0], trajectory_3[:, 1], label="With Adaptation", linestyle="-")
+
+    # Plot start point
+    plt.scatter(1, 3, c='green', marker='o', label='Start Point')
+
+    # Plot goal point
+    plt.scatter(11, 3, c='red', marker='x', label='Goal Point')
+
+    # Plot obstacle
+    plt.scatter(4, 3, c='black', marker='s', label='Obstacle')
+
+    # Set labels and legend
+    plt.xlabel('X Position')
+    plt.ylabel('Y Position')
+    plt.title('Robot Trajectories with and without CBF Parameter Adaptation')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
