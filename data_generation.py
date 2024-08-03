@@ -64,8 +64,8 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
             'model': 'DynamicUnicycle2D',
             'w_max': 0.5,
             'a_max': 0.5,
-            'fov_angle': 120.0,
-            'cam_range': 7.0
+            'fov_angle': 70.0,
+            'cam_range': 5.0
         }
         control_type = 'mpc_cbf'
         tracking_controller = LocalTrackingController(x_init, robot_spec,
@@ -185,7 +185,7 @@ def concatenate_csv_files(output_filename, total_batches):
 
 
 if __name__ == "__main__":
-    # single_agent_simulation(1,	1,	0.001,	0.99,	0.99)  
+    # single_agent_simulation(3,	1,	0.001,	0.99,	0.99)  
     
     samples_per_dimension = 9   # Number of samples per dimension
     batch_size = 7**5           # Specify the batch size

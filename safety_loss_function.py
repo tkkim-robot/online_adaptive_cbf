@@ -45,12 +45,15 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
     We assume a zero control input in this plot
     '''
     alpha_1_values = [0.6, 0.4, 0.2]
-    delta_theta_values = [-0.1, -0.7, -1.4, -2.1]
+    theta_values = [-0.1, -1.5, -2.9]
     
     # Create subplots for each combination of alpha_1 and delta_theta
-    fig = make_subplots(rows=3, cols=4, specs=[[{'type': 'surface'}]*4]*3, 
-                        subplot_titles=[f'alpha_1 = {alpha_1}, delta_theta = {delta_theta}' 
-                                        for alpha_1 in alpha_1_values for delta_theta in delta_theta_values])
+    fig = make_subplots(rows=3, cols=3, specs=[[{'type': 'surface'}]*3]*3, 
+                        subplot_titles=[f'alpha_1 = {alpha_1}, theta = {theta}' 
+                                        for alpha_1 in alpha_1_values for theta in theta_values],
+                        horizontal_spacing=0.0,  # Reduce this value to decrease horizontal gap
+                        vertical_spacing=0.05     # Reduce this value to decrease vertical gap
+                        )
 
     x_range = np.linspace(0, 6, 50)
     y_range = np.linspace(0, 6, 50)
@@ -66,7 +69,7 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
 
     # Calculate and plot safety loss function for each grid point
     for i, alpha_1 in enumerate(alpha_1_values):
-        for j, delta_theta in enumerate(delta_theta_values):
+        for j, theta in enumerate(theta_values):
             Z = np.zeros_like(X)
             for m in range(X.shape[0]):
                 for n in range(X.shape[1]):
@@ -74,7 +77,10 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
                     robot_state = np.zeros_like(tracking_controller.robot.X)
                     robot_state[0, 0] = X[m, n]
                     robot_state[1, 0] = Y[m, n]
+                    robot_state[2, 0] = theta
+                    robot_state[3, 0] = 1
                     obs_pos = nearest_obs[:2].flatten()
+                    delta_theta = np.arctan2(obs_pos[1] - robot_state[1, 0], obs_pos[0] - robot_state[0, 0]) - theta
                     h_k, d_h, dd_h = tracking_controller.robot.agent_barrier_dt(
                         robot_state, np.array([0, 0]), nearest_obs.flatten()
                     )
@@ -87,7 +93,17 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
             fig.add_trace(go.Surface(z=Z, x=X, y=Y, colorscale='Viridis', showscale=False, opacity=0.8), row=i+1, col=j+1)
             fig.add_trace(go.Surface(z=Z_obs, x=X, y=Y, colorscale='Reds', showscale=False), row=i+1, col=j+1)
 
-    fig.update_layout(height=1080, width=1920, title_text="Safety Loss Function Visualization")
+    zoom = 1.7
+    # Update layout to zoom out the plots
+    camera = dict(
+        eye=dict(x=zoom, y=zoom, z=zoom)  # Adjust these values to control the zoom level
+    )
+    
+    for i in range(1, 4):
+        for j in range(1, 4):
+            fig.update_scenes(camera=camera, row=i, col=j)
+
+    fig.update_layout(height=960, width=1920, title_text="Safety Loss Function Visualization")
     fig.show()
 
 def safety_loss_function_example():
