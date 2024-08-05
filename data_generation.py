@@ -1,14 +1,17 @@
 import os
 import sys
+project_root = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(project_root, 'cbf_tracking'))
+
 import numpy as np
 import pandas as pd
 import tqdm
 from multiprocessing import Pool
 import matplotlib
 import matplotlib.pyplot as plt
-from utils import plotting
-from utils import env
-from tracking import LocalTrackingController, CollisionError
+from cbf_tracking.utils import plotting, env
+from cbf_tracking.tracking import LocalTrackingController, InfeasibleError
+from safety_loss_function import SafetyLossFunction
 
 # Use a non-interactive backend
 matplotlib.use('Agg')
@@ -23,40 +26,72 @@ class SuppressPrints:
         sys.stdout.close()
         sys.stdout = self._original_stdout
 
+
+
+def get_safety_loss_from_controller(tracking_controller, safety_metric):
+    def angle_normalize(x):
+        return (((x + np.pi) % (2 * np.pi)) - np.pi)
+    
+    gamma1 = tracking_controller.controller.cbf_param['alpha1']
+    gamma2 = tracking_controller.controller.cbf_param['alpha2']
+    
+    robot_state = tracking_controller.robot.X
+    obs_state = tracking_controller.obs.flatten()
+    relative_angle = np.arctan2(obs_state[1] - robot_state[1], obs_state[0] - robot_state[0]) - robot_state[2]
+    delta_theta = angle_normalize(relative_angle)
+    h_k, d_h, dd_h = tracking_controller.robot.agent_barrier_dt(robot_state, np.array([0, 0]), obs_state)
+    cbf_constraint_value = dd_h + (gamma1 + gamma2) * d_h + gamma1 * gamma2 * h_k
+    safety_loss = safety_metric.compute_safety_loss_function(robot_state[:2], obs_state[:2], cbf_constraint_value, delta_theta)
+    
+    return safety_loss
+
 def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.1, max_sim_time=5):
     try:
         dt = 0.05
 
-        # Define waypoints and unknown obstacles based on sampled parameters
         waypoints = np.array([
-            [1, 3, theta+0.01, velocity],
-            [11, 3, 0, 0]
+            [1, 3, theta],
+            [11, 3, 0]
         ], dtype=np.float64)
 
-        x_init = waypoints[0]
-        x_goal = waypoints[-1]
+        x_init = np.append(waypoints[0], velocity)
 
-        env_handler = env.Env(width=12.0, height=6.0)
-        plot_handler = plotting.Plotting(env_handler)
+        plot_handler = plotting.Plotting()
         ax, fig = plot_handler.plot_grid("Local Tracking Controller")
+        env_handler = env.Env()
 
-        tracking_controller = LocalTrackingController(
-            x_init, type='DynamicUnicycle2D', dt=dt,
-            show_animation=False, save_animation=False,
-            ax=ax, fig=fig, env=env_handler,
-            waypoints=waypoints, data_generation=True
-        )
+        robot_spec = {
+            'model': 'DynamicUnicycle2D',
+            'w_max': 0.5,
+            'a_max': 0.5,
+            'fov_angle': 70.0,
+            'cam_range': 5.0
+        }
+        control_type = 'mpc_cbf'
+        tracking_controller = LocalTrackingController(x_init, robot_spec,
+                                                    control_type=control_type,
+                                                    dt=dt,
+                                                    show_animation=False,
+                                                    save_animation=False,
+                                                    ax=ax, fig=fig,
+                                                    env=env_handler)
 
         # Set gamma values
-        tracking_controller.gamma1 = gamma1
-        tracking_controller.gamma2 = gamma2
+        tracking_controller.controller.cbf_param['alpha1'] = gamma1
+        tracking_controller.controller.cbf_param['alpha2'] = gamma2
         
-        # Set unknown obstacles
-        unknown_obs = np.array([[1 + distance, 3, 0.1]])
-        tracking_controller.set_unknown_obs(unknown_obs)
-
+        # Set known obstacles
+        tracking_controller.obs = np.array([[1 + distance, 3, 0.1]])
+        tracking_controller.unknown_obs = np.array([[1 + distance, 3, 0.1]])
         tracking_controller.set_waypoints(waypoints)
-        tracking_controller.set_init_state()
+
+        # Setup safety loss function
+        alpha_1 = 0.4
+        alpha_2 = 0.1
+        beta_1 = 7.0 # If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
+        beta_2 = 2.5 # If bigger, makes whole surface higher if delta_theta is smaller
+        epsilon = 0.07 # If smaller, makes the peak higher
+        safety_metric = SafetyLossFunction(alpha_1, alpha_2, beta_1, beta_2, epsilon)
 
         # Run simulation
         unexpected_beh = 0
@@ -67,27 +102,37 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
         for _ in range(int(max_sim_time / dt)):
             try:
                 ret = tracking_controller.control_step()
+                tracking_controller.draw_plot()
+
                 unexpected_beh += ret
                 sim_time += dt
 
+                if ret == -1:
+                    break
+                
                 # Check for deadlock
                 if np.abs(tracking_controller.robot.X[3]) < deadlock_threshold:
                     deadlock_time += dt
 
-                # Store max safety metric
-                if tracking_controller.safety_loss > safety_loss:
-                    safety_loss = tracking_controller.safety_loss[0]
+                # Calculate safety loss & Store max safety metric
+                safety_loss_new = get_safety_loss_from_controller(tracking_controller, safety_metric)
+                if safety_loss_new > safety_loss:
+                    safety_loss = safety_loss_new[0]
+                print(f"Deadlock_time: {deadlock_time} | Safety_loss: {safety_loss_new}")
 
             # If collision occurs, handle the exception
-            except CollisionError:
-                plt.close(fig)
+            except InfeasibleError:
+                plt.ioff()
+                plt.close()
                 return distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time
-
-        plt.close(fig)
+        
+        plt.ioff()
+        plt.close()
         return distance, velocity, theta, gamma1, gamma2, True, safety_loss, deadlock_time, sim_time
 
-    except CollisionError:
-        plt.close(fig)
+    except InfeasibleError:
+        plt.ioff()
+        plt.close()
         return distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time
 
 def worker(params):
@@ -96,13 +141,13 @@ def worker(params):
         result = single_agent_simulation(distance, velocity, theta, gamma1, gamma2)
     return result
 
+
 def generate_data(samples_per_dimension=5, num_processes=8, batch_size=6):
     distance_range = np.linspace(0.35, 3.0, samples_per_dimension)
     velocity_range = np.linspace(0.01, 1.0, samples_per_dimension)
     theta_range = np.linspace(0.001, np.pi / 2, samples_per_dimension)
     gamma1_range = np.linspace(0.005, 0.99, samples_per_dimension)
     gamma2_range = np.linspace(0.005, 0.99, samples_per_dimension)
-
     parameter_space = [(d, v, theta, g1, g2) for d in distance_range
                        for v in velocity_range
                        for theta in theta_range
@@ -140,13 +185,15 @@ def concatenate_csv_files(output_filename, total_batches):
 
 
 if __name__ == "__main__":
-    samples_per_dimension = 10  # Number of samples per dimension
+    # single_agent_simulation(3,	1,	0.001,	0.99,	0.99)  
+    
+    samples_per_dimension = 9   # Number of samples per dimension
     batch_size = 7**5           # Specify the batch size
     num_processes = 8           # Change based on the number of cores available
 
     total_datapoints = samples_per_dimension ** 5
     total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size != 0 else 0)
-    
+
     generate_data(samples_per_dimension, num_processes, batch_size)
     concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint.csv', total_batches)
 

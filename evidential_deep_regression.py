@@ -7,7 +7,6 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from sklearn.mixture import GaussianMixture
 import matplotlib.pyplot as plt
-import seaborn as sns
 import joblib
 
 class EvidentialDeepRegression:
@@ -18,8 +17,12 @@ class EvidentialDeepRegression:
         self.scaler = StandardScaler()
         self.model = None
         self.history = None
+        # Registering the custom loss function in TensorFlow's serialization framework:
+        tf.keras.utils.get_custom_objects().update({
+            'EvidentialRegressionLoss': EvidentialDeepRegression.EvidentialRegressionLoss
+        })
 
-    def load_and_preprocess_data(self, data_file):
+    def load_and_preprocess_data(self, data_file, scaler_name):
         # Load the CSV file
         self.data_file = data_file
         df = pd.read_csv(self.data_file)
@@ -39,7 +42,7 @@ class EvidentialDeepRegression:
         X_scaled = self.scaler.fit_transform(X_sin_cos)
         
         # Save the scaler
-        joblib.dump(self.scaler, 'scaler.save')        
+        joblib.dump(self.scaler, scaler_name)        
 
         return X_scaled, y_safety_loss, y_deadlock_time
 
@@ -53,7 +56,7 @@ class EvidentialDeepRegression:
         dense_1 = tf.keras.layers.Dense(128, activation="relu")(input_layer)
         dense_2 = tf.keras.layers.Dense(128, activation="relu")(dense_1)
         dropout_1 = tf.keras.layers.Dropout(0.2)(dense_2)
-        dense_3 = tf.keras.layers.Dense(64, activation="relu")(dropout_1)
+        dense_3 = tf.keras.layers.Dense(96, activation="relu")(dropout_1)
         dropout_2 = tf.keras.layers.Dropout(0.2)(dense_3)
         dense_4 = tf.keras.layers.Dense(64, activation="relu")(dropout_2)
 
@@ -119,13 +122,31 @@ class EvidentialDeepRegression:
     def load_saved_scaler(self, scaler_path):
         self.scaler = joblib.load(scaler_path)
 
+    def predict(self, input_array):
+        input_array = np.array(input_array)
+        
+        if input_array.ndim == 1:
+            input_array = input_array[np.newaxis, :]
+        
+        # Transform Theta into sine and cosine components
+        theta = input_array[:, 2]
+        input_transformed = np.column_stack((input_array[:, :2], np.sin(theta), np.cos(theta), input_array[:, 3:]))
+
+        # Normalize the inputs using the loaded scaler
+        input_scaled = self.scaler.transform(input_transformed)
+
+        # Predict the output using the loaded model
+        y_pred_safety_loss, y_pred_deadlock_time = self.model.predict(input_scaled, verbose=0)
+
+        return y_pred_safety_loss, y_pred_deadlock_time
+
     def calculate_uncertainties(self, y_pred):
         '''Calculate aleatoric and epistemic uncertainties from model predictions'''
         gamma, v, alpha, beta = tf.split(y_pred, 4, axis=-1)
-        gamma = gamma.numpy()[:, 0]
-        v = v.numpy()[:, 0]
-        alpha = alpha.numpy()[:, 0]
-        beta = beta.numpy()[:, 0]
+        gamma = gamma.numpy().flatten()
+        v = v.numpy().flatten()
+        alpha = alpha.numpy().flatten()
+        beta = beta.numpy().flatten()        
         aleatoric_uncertainty = beta / (alpha - 1)
         epistemic_uncertainty = beta / (v * (alpha - 1))
         return gamma, aleatoric_uncertainty, epistemic_uncertainty
@@ -232,19 +253,14 @@ def plot_gmm(gmm):
 
 
 if __name__ == "__main__":
-    Test = False # Set to True if you want to test the model without training
-    model_name = 'edr_model_0720.h5'
-    scaler_name = 'scaler.save'    
+    Test = True # Set to True if you want to test the model without training
+    model_name = 'edr_model_9datapoint_tuned.h5'
+    scaler_name = 'scaler_9datapoint_tuned.save'    
     data_file = 'data_generation_results_9datapoint.csv'
 
-    batch_size = 128
-    edr = EvidentialDeepRegression(batch_size=batch_size, learning_rate=2e-6)
-    X_scaled, y_safety_loss, y_deadlock_time = edr.load_and_preprocess_data(data_file)
-
-    # Registering the custom loss function in TensorFlow's serialization framework:
-    tf.keras.utils.get_custom_objects().update({
-        'EvidentialRegressionLoss': EvidentialDeepRegression.EvidentialRegressionLoss
-    })
+    batch_size = 32
+    edr = EvidentialDeepRegression(batch_size=batch_size, learning_rate=9.14e-5)
+    X_scaled, y_safety_loss, y_deadlock_time = edr.load_and_preprocess_data(data_file, scaler_name)
 
     if Test:
         edr.load_saved_model(model_name)
@@ -264,3 +280,9 @@ if __name__ == "__main__":
     # Create GMM for safety loss predictions
     gmm_safety = edr.create_gmm(y_pred_safety_loss[0])
     plot_gmm(gmm_safety)
+    
+    # Example input array [distance, velocity, theta, gamma1, gamma2]
+    input_array = [1.0, 0.5, 0.785398, 0.1, 0.5]
+    y_pred_safety_loss, y_pred_deadlock_time = edr.predict(input_array)
+    print("Predicted Safety Loss:", y_pred_safety_loss)
+    print("Predicted Deadlock Time:", y_pred_deadlock_time)
