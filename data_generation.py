@@ -45,7 +45,7 @@ def get_safety_loss_from_controller(tracking_controller, safety_metric):
     
     return safety_loss
 
-def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.1, max_sim_time=5):
+def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, obs_num=1, deadlock_threshold=0.1, max_sim_time=15):
     try:
         dt = 0.05
 
@@ -81,8 +81,13 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
         tracking_controller.controller.cbf_param['alpha2'] = gamma2
         
         # Set known obstacles
-        tracking_controller.obs = np.array([[1 + distance, 3, 0.1]])
-        tracking_controller.unknown_obs = np.array([[1 + distance, 3, 0.1]])
+        obstacles = [
+            [1 + distance, 3, 0.1],  # obs1
+            [6, 4, 0.2],             # obs2
+            [9, 3, 0.2]              # obs3
+        ]
+        tracking_controller.obs = np.array(obstacles[:obs_num])
+        tracking_controller.unknown_obs = np.array(obstacles[:obs_num])
         tracking_controller.set_waypoints(waypoints)
 
         # Setup safety loss function
@@ -124,31 +129,40 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
             except InfeasibleError:
                 plt.ioff()
                 plt.close()
-                return distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time
-        
+                return (distance if obs_num >= 1 else 100, 
+                        (distance if obs_num >= 2 else 100), 
+                        (distance if obs_num >= 3 else 100), 
+                        velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time)
+                
         plt.ioff()
         plt.close()
-        return distance, velocity, theta, gamma1, gamma2, True, safety_loss, deadlock_time, sim_time
+        return (distance if obs_num >= 1 else 100, 
+                (distance if obs_num >= 2 else 100), 
+                (distance if obs_num >= 3 else 100), 
+                velocity, theta, gamma1, gamma2, True, safety_loss, deadlock_time, sim_time)
 
     except InfeasibleError:
         plt.ioff()
         plt.close()
-        return distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time
+        return (distance if obs_num >= 1 else 100, 
+                (distance if obs_num >= 2 else 100), 
+                (distance if obs_num >= 3 else 100), 
+                velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time)
 
 def worker(params):
-    distance, velocity, theta, gamma1, gamma2 = params
+    distance, velocity, theta, gamma1, gamma2, obs_num = params
     with SuppressPrints():
-        result = single_agent_simulation(distance, velocity, theta, gamma1, gamma2)
+        result = single_agent_simulation(distance, velocity, theta, gamma1, gamma2, obs_num)
     return result
 
 
-def generate_data(samples_per_dimension=5, num_processes=8, batch_size=6):
+def generate_data(samples_per_dimension=5, num_processes=8, batch_size=6, obs_num=1):
     distance_range = np.linspace(0.35, 3.0, samples_per_dimension)
     velocity_range = np.linspace(0.01, 1.0, samples_per_dimension)
     theta_range = np.linspace(0.001, np.pi / 2, samples_per_dimension)
-    gamma1_range = np.linspace(0.005, 0.99, samples_per_dimension)
-    gamma2_range = np.linspace(0.005, 0.99, samples_per_dimension)
-    parameter_space = [(d, v, theta, g1, g2) for d in distance_range
+    gamma1_range = np.linspace(0.01, 0.99, samples_per_dimension)
+    gamma2_range = np.linspace(0.01, 0.99, samples_per_dimension)
+    parameter_space = [(d, v, theta, g1, g2, obs_num) for d in distance_range
                        for v in velocity_range
                        for theta in theta_range
                        for g1 in gamma1_range
@@ -166,8 +180,11 @@ def generate_data(samples_per_dimension=5, num_processes=8, batch_size=6):
         pool.close()
         pool.join()
 
-        df = pd.DataFrame(results, columns=['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time'])
+        columns = ['Distance_obs1', 'Distance_obs2', 'Distance_obs3', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time']
+        
+        df = pd.DataFrame(results, columns=columns)
         df.to_csv(f'data_generation_results_batch_{batch_index + 1}.csv', index=False)
+
 
 def concatenate_csv_files(output_filename, total_batches):
     all_data = []
@@ -185,16 +202,17 @@ def concatenate_csv_files(output_filename, total_batches):
 
 
 if __name__ == "__main__":
-    # single_agent_simulation(3,	1,	0.001,	0.99,	0.99)  
+    single_agent_simulation(3, 1, 0.001, 0.1, 0.1, 2)  
     
-    samples_per_dimension = 9   # Number of samples per dimension
-    batch_size = 7**5           # Specify the batch size
+    obs_num = 2                 # Number of obstacles
+    samples_per_dimension = 4   # Number of samples per dimension
+    batch_size = 4**5           # Specify the batch size
     num_processes = 8           # Change based on the number of cores available
 
     total_datapoints = samples_per_dimension ** 5
     total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size != 0 else 0)
 
-    generate_data(samples_per_dimension, num_processes, batch_size)
+    generate_data(samples_per_dimension, num_processes, batch_size, obs_num)
     concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint.csv', total_batches)
 
     print("Data generation complete.")
