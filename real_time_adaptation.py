@@ -16,7 +16,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 
 class AdaptiveCBFParameterSelector:
-    def __init__(self, edr_model, edr_scaler, lower_bound=0.05, upper_bound=1.0, step_size=0.05, epistemic_threshold=0.6, cvar_boundary=1.2):
+    def __init__(self, edr_model, edr_scaler, lower_bound=0.05, upper_bound=1.0, step_size=0.05, epistemic_threshold=0.2, cvar_boundary=1.2):
         self.edr = EvidentialDeepRegression()
         self.edr.load_saved_model(edr_model)
         self.edr.load_saved_scaler(edr_scaler)
@@ -27,8 +27,8 @@ class AdaptiveCBFParameterSelector:
         self.cvar_boundary = cvar_boundary
 
     def sample_cbf_parameters(self, current_gamma1, current_gamma2):
-        gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 0.2), min(self.upper_bound, current_gamma1 + 0.1) + self.step_size, self.step_size)
-        gamma2_range = np.arange(max(self.lower_bound, current_gamma2 - 0.2), min(self.upper_bound, current_gamma2 + 0.1) + self.step_size, self.step_size)
+        gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 0.3), min(self.upper_bound, current_gamma1 + 0.15) + self.step_size, self.step_size)
+        gamma2_range = np.arange(max(self.lower_bound, current_gamma2 - 0.3), min(self.upper_bound, current_gamma2 + 0.15) + self.step_size, self.step_size)
         return gamma1_range, gamma2_range
 
     def get_rel_state_wt_obs(self, tracking_controller):
@@ -41,7 +41,7 @@ class AdaptiveCBFParameterSelector:
         gamma1 = tracking_controller.controller.cbf_param['alpha1']
         gamma2 = tracking_controller.controller.cbf_param['alpha2']
         
-        return [distance, velocity, theta, gamma1, gamma2]
+        return [distance, 100, 100, velocity, theta, gamma1, gamma2]
 
     def predict_with_edr(self, current_state, gamma1_range, gamma2_range):
         batch_input = []
@@ -210,7 +210,7 @@ def single_agent_simulation_traj(distance, velocity, theta, gamma1, gamma2, max_
 
     # Initialize AdaptiveCBFParameterSelector if adaptation is enabled
     if adapt_cbf:
-        adaptive_selector = AdaptiveCBFParameterSelector('edr_model_9datapoint_tuned.h5', 'scaler_9datapoint_tuned.save')
+        adaptive_selector = AdaptiveCBFParameterSelector('edr_model_8datapoint.h5', 'scaler_8datapoint.save')
 
     # Set gamma values
     tracking_controller.controller.cbf_param['alpha1'] = gamma1
@@ -246,9 +246,9 @@ def single_agent_simulation_traj(distance, velocity, theta, gamma1, gamma2, max_
 
 if __name__ == "__main__":
     # single_agent_simulation(3.0, 0.5, 0.001, 0.1, 0.2)
-    trajectory_1 = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.03, 0.03, adapt_cbf=False)
-    trajectory_2 = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.9, 0.9, adapt_cbf=False)
-    trajectory_3 = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.2, 0.2, adapt_cbf=True)
+    # trajectory_1 = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.03, 0.03, adapt_cbf=False)
+    # trajectory_2 = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.1, 0.1, adapt_cbf=False)
+    trajectory_3 = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.05, 0.05, adapt_cbf=True)
     
     plt.figure(figsize=(10, 8))
 

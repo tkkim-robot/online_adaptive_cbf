@@ -1,5 +1,6 @@
 import pandas as pd
 import tensorflow as tf
+import keras
 import numpy as np
 import evidential_deep_learning as edl
 from scipy.stats import invgamma, norm
@@ -10,7 +11,7 @@ import matplotlib.pyplot as plt
 import joblib
 
 class EvidentialDeepRegression:
-    def __init__(self, epochs=1000, batch_size=32, learning_rate=1e-6):
+    def __init__(self, epochs=5000, batch_size=32, learning_rate=1e-6):
         self.epochs = epochs
         self.batch_size = batch_size
         self.learning_rate = learning_rate
@@ -28,7 +29,7 @@ class EvidentialDeepRegression:
         df = pd.read_csv(self.data_file)
 
         # Extract inputs and outputs
-        X = df[['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2']].values
+        X = df[['Distance_obs1', 'Distance_obs2', 'Distance_obs3', 'Velocity', 'Theta', 'Gamma1', 'Gamma2']].values
         y_safety_loss = df['Safety Loss'].values.reshape(-1, 1)
         y_deadlock_time = df['Deadlock Time'].values.reshape(-1, 1)
 
@@ -53,12 +54,12 @@ class EvidentialDeepRegression:
     def build_and_compile_model(self, input_shape):
         '''Define the evidential deep learning model for both outputs'''
         input_layer = tf.keras.layers.Input(shape=(input_shape,))
-        dense_1 = tf.keras.layers.Dense(128, activation="relu")(input_layer)
-        dense_2 = tf.keras.layers.Dense(128, activation="relu")(dense_1)
-        dropout_1 = tf.keras.layers.Dropout(0.2)(dense_2)
+        dense_1 = tf.keras.layers.Dense(64, activation="relu")(input_layer)
+        dense_2 = tf.keras.layers.Dense(256, activation="relu")(dense_1)
+        dropout_1 = tf.keras.layers.Dropout(0.1)(dense_2)
         dense_3 = tf.keras.layers.Dense(96, activation="relu")(dropout_1)
-        dropout_2 = tf.keras.layers.Dropout(0.2)(dense_3)
-        dense_4 = tf.keras.layers.Dense(64, activation="relu")(dropout_2)
+        dropout_2 = tf.keras.layers.Dropout(0)(dense_3)
+        dense_4 = tf.keras.layers.Dense(128, activation="relu")(dropout_2)
 
         # Output layer for safety loss
         output_safety_loss = edl.layers.DenseNormalGamma(1)(dense_4)
@@ -93,18 +94,18 @@ class EvidentialDeepRegression:
             min_lr=1e-8
         )
 
-        model_checkpoint = tf.keras.callbacks.ModelCheckpoint(
-            filepath='edr_model_best.h5',
-            monitor='val_loss',
-            save_best_only=True
-        )
+        # model_checkpoint = tf.keras.callbacks.ModelCheckpoint(
+        #     filepath='edr_model_best.h5',
+        #     monitor='val_loss',
+        #     save_best_only=True
+        # )
 
         self.history = self.model.fit(
             X_scaled, [y_safety_loss, y_deadlock_time],
             epochs=self.epochs,
             batch_size=self.batch_size,
             validation_split=0.2,
-            callbacks=[early_stopping, reduce_lr_on_plateau, model_checkpoint]
+            callbacks=[early_stopping, reduce_lr_on_plateau]#, model_checkpoint]
         )
 
     def save_model(self, model_name):
@@ -129,8 +130,8 @@ class EvidentialDeepRegression:
             input_array = input_array[np.newaxis, :]
         
         # Transform Theta into sine and cosine components
-        theta = input_array[:, 2]
-        input_transformed = np.column_stack((input_array[:, :2], np.sin(theta), np.cos(theta), input_array[:, 3:]))
+        theta = input_array[:, 4]
+        input_transformed = np.column_stack((input_array[:, :4], np.sin(theta), np.cos(theta), input_array[:, 5:]))
 
         # Normalize the inputs using the loaded scaler
         input_scaled = self.scaler.transform(input_transformed)
@@ -194,23 +195,11 @@ def plot_training_history(history):
     plt.figure(figsize=(12, 6))
 
     # Safety Loss Model Training History
-    plt.subplot(1, 2, 1)
-    plt.plot(history.history['dense_normal_gamma_loss'],
-             label='Training Loss - Safety Loss')
-    plt.plot(history.history['val_dense_normal_gamma_loss'],
-             label='Validation Loss - Safety Loss')
-    plt.title('Safety Loss Model Training History')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.legend()
-
-    # Deadlock Time Model Training History
-    plt.subplot(1, 2, 2)
-    plt.plot(history.history['dense_normal_gamma_1_loss'],
-             label='Training Loss - Deadlock Time')
-    plt.plot(history.history['val_dense_normal_gamma_1_loss'],
-             label='Validation Loss - Deadlock Time')
-    plt.title('Deadlock Time Model Training History')
+    plt.plot(history.history['loss'],
+             label='Training Loss')
+    plt.plot(history.history['val_loss'],
+             label='Validation Loss')
+    plt.title('Training History')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
@@ -254,12 +243,13 @@ def plot_gmm(gmm):
 
 if __name__ == "__main__":
     Test = True # Set to True if you want to test the model without training
-    model_name = 'edr_model_9datapoint_tuned.h5'
-    scaler_name = 'scaler_9datapoint_tuned.save'    
-    data_file = 'data_generation_results_9datapoint.csv'
+    datapoint_num = 8
+    model_name = f'edr_model_{datapoint_num}datapoint.h5'
+    scaler_name = f'scaler_{datapoint_num}datapoint.save'    
+    data_file = f'data_generation_results_{datapoint_num}datapoint_obs123.csv'
 
     batch_size = 32
-    edr = EvidentialDeepRegression(batch_size=batch_size, learning_rate=9.14e-5)
+    edr = EvidentialDeepRegression(batch_size=batch_size, learning_rate=3.33e-5)
     X_scaled, y_safety_loss, y_deadlock_time = edr.load_and_preprocess_data(data_file, scaler_name)
 
     if Test:
@@ -282,7 +272,7 @@ if __name__ == "__main__":
     plot_gmm(gmm_safety)
     
     # Example input array [distance, velocity, theta, gamma1, gamma2]
-    input_array = [1.0, 0.5, 0.785398, 0.1, 0.5]
+    input_array = [1.0, 6.0, 8.0, 0.5, 0.785398, 0.1, 0.5]
     y_pred_safety_loss, y_pred_deadlock_time = edr.predict(input_array)
     print("Predicted Safety Loss:", y_pred_safety_loss)
     print("Predicted Deadlock Time:", y_pred_deadlock_time)

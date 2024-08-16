@@ -36,7 +36,7 @@ def get_safety_loss_from_controller(tracking_controller, safety_metric):
     gamma2 = tracking_controller.controller.cbf_param['alpha2']
     
     robot_state = tracking_controller.robot.X
-    obs_state = tracking_controller.obs.flatten()
+    obs_state = tracking_controller.nearest_obs.flatten()
     relative_angle = np.arctan2(obs_state[1] - robot_state[1], obs_state[0] - robot_state[0]) - robot_state[2]
     delta_theta = angle_normalize(relative_angle)
     h_k, d_h, dd_h = tracking_controller.robot.agent_barrier_dt(robot_state, np.array([0, 0]), obs_state)
@@ -82,9 +82,11 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, obs_num=1
         
         # Set known obstacles
         obstacles = [
-            [1 + distance, 3, 0.1],  # obs1
-            [6, 4, 0.2],             # obs2
-            [9, 3, 0.2]              # obs3
+            [1 + distance, 3, 0.2],          # obs1
+            # [7, 3.5, 0.2],                 # obs2-1
+            # [6, 4, 0.2],                   # obs2-2
+            [6.5, 3.7, 0.2], [10, 2.9, 0.2], # obs3-1
+            # [6.5, 4, 0.2], [9, 3, 0.2],    # obs3-2
         ]
         tracking_controller.obs = np.array(obstacles[:obs_num])
         tracking_controller.unknown_obs = np.array(obstacles[:obs_num])
@@ -149,6 +151,8 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, obs_num=1
                 (distance if obs_num >= 3 else 100), 
                 velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time)
 
+
+
 def worker(params):
     distance, velocity, theta, gamma1, gamma2, obs_num = params
     with SuppressPrints():
@@ -157,7 +161,7 @@ def worker(params):
 
 
 def generate_data(samples_per_dimension=5, num_processes=8, batch_size=6, obs_num=1):
-    distance_range = np.linspace(0.35, 3.0, samples_per_dimension)
+    distance_range = np.linspace(0.55, 3.0, samples_per_dimension)
     velocity_range = np.linspace(0.01, 1.0, samples_per_dimension)
     theta_range = np.linspace(0.001, np.pi / 2, samples_per_dimension)
     gamma1_range = np.linspace(0.01, 0.99, samples_per_dimension)
@@ -202,17 +206,19 @@ def concatenate_csv_files(output_filename, total_batches):
 
 
 if __name__ == "__main__":
-    single_agent_simulation(3, 1, 0.001, 0.1, 0.1, 2)  
-    
-    obs_num = 2                 # Number of obstacles
-    samples_per_dimension = 4   # Number of samples per dimension
-    batch_size = 4**5           # Specify the batch size
-    num_processes = 8           # Change based on the number of cores available
+    # single_agent_simulation(3, 1, 0.001, 0.1, 0.1, 3)  
+    # single_agent_simulation_temp(3, 1, 0.001, 0.1, 0.1, 3)  
+
+    obs_num = 1                 # Number of obstacles
+    samples_per_dimension = 8   # Number of samples per dimension
+    batch_size = 6**5           # Specify the batch size
+    num_processes = 6           # Change based on the number of cores available
 
     total_datapoints = samples_per_dimension ** 5
     total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size != 0 else 0)
 
     generate_data(samples_per_dimension, num_processes, batch_size, obs_num)
-    concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint.csv', total_batches)
+    concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint_obs{obs_num}_0811.csv', total_batches)
 
     print("Data generation complete.")
+
