@@ -184,9 +184,11 @@ class EvidentialDeepRegression:
         gmm.means_ = np.array(means).reshape(-1, 1)
         gmm.covariances_ = np.array(variances).reshape(-1, 1, 1)
         gmm.weights_ = np.ones(num_samples) / num_samples
-        gmm.precisions_cholesky_ = np.array([np.linalg.cholesky(np.linalg.inv(
-            cov)) for cov in gmm.covariances_])  # For efficient computation
-
+        try:
+            gmm.precisions_cholesky_ = np.array([np.linalg.cholesky(np.linalg.inv(
+                cov)) for cov in gmm.covariances_])  # For efficient computation
+        except:
+            pass
         return gmm
 
 
@@ -244,13 +246,13 @@ def plot_gmm(gmm):
 if __name__ == "__main__":
     Test = True # Set to True if you want to test the model without training
     datapoint_num = 8
-    model_name = f'edr_model_{datapoint_num}datapoint.h5'
-    scaler_name = f'scaler_{datapoint_num}datapoint.save'    
+    model_name = f'edr_model_{datapoint_num}datapoint_single.h5'
+    scaler_name = f'scaler_{datapoint_num}datapoint_single.save'    
     data_file = f'data_generation_results_{datapoint_num}datapoint_obs123.csv'
 
     batch_size = 32
     edr = EvidentialDeepRegression(batch_size=batch_size, learning_rate=3.33e-5)
-    X_scaled, y_safety_loss, y_deadlock_time = edr.load_and_preprocess_data(data_file, scaler_name)
+    # X_scaled, y_safety_loss, y_deadlock_time = edr.load_and_preprocess_data(data_file, scaler_name)
 
     if Test:
         edr.load_saved_model(model_name)
@@ -262,17 +264,17 @@ if __name__ == "__main__":
         plot_training_history(edr.history)
 
     # Predict and plot using the trained model
-    y_pred_safety_loss, y_pred_deadlock_time = edr.model.predict(X_scaled)
-
+    input_array = [2.934, 0.55, -0.0001386, 0.05, 0.05]
+    y_pred_safety_loss, y_pred_deadlock_time = edr.predict(input_array)
     # Evaluate the predictions
-    evaluate_predictions(y_safety_loss, y_pred_safety_loss, "Safety Loss")
+    # evaluate_predictions(y_safety_loss, y_pred_safety_loss, "Safety Loss")
 
     # Create GMM for safety loss predictions
     gmm_safety = edr.create_gmm(y_pred_safety_loss[0])
     plot_gmm(gmm_safety)
     
     # Example input array [distance, velocity, theta, gamma1, gamma2]
-    input_array = [1.0, 6.0, 8.0, 0.5, 0.785398, 0.1, 0.5]
+    input_array = [1.0, 0.5, 0.785398, 0.1, 0.5]
     y_pred_safety_loss, y_pred_deadlock_time = edr.predict(input_array)
     print("Predicted Safety Loss:", y_pred_safety_loss)
     print("Predicted Deadlock Time:", y_pred_deadlock_time)
