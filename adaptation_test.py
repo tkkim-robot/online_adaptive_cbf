@@ -26,8 +26,8 @@ class AdaptiveCBFParameterSelector:
         self.epistemic_threshold = epistemic_threshold
 
     def sample_cbf_parameters(self, current_gamma1, current_gamma2):
-        gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 0.4), min(self.upper_bound, current_gamma1 + 0.1 + self.step_size), self.step_size)
-        gamma2_range = np.arange(max(self.lower_bound, current_gamma2 - 0.4), min(self.upper_bound, current_gamma2 + 0.1 + self.step_size), self.step_size)
+        gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 0.3), min(self.upper_bound, current_gamma1 + 0.1 + self.step_size), self.step_size)
+        gamma2_range = np.arange(max(self.lower_bound, current_gamma2 - 0.3), min(self.upper_bound, current_gamma2 + 0.1 + self.step_size), self.step_size)
         return gamma1_range, gamma2_range
 
     def get_rel_state_wt_obs(self, tracking_controller):
@@ -74,17 +74,19 @@ class AdaptiveCBFParameterSelector:
         filtered_predictions = [pred for pred, norm_uncert in zip(predictions, normalized_epistemic_uncertainties) if norm_uncert <= self.epistemic_threshold]
         return filtered_predictions
 
-    def calculate_cvar_boundary(self, robot_pos, obs_pos):
+    def calculate_cvar_boundary(self, current_state, obs_pos):
         alpha_1 = 0.4
         beta_1 = 7.0 
         beta_2 = 2.5
+        robot_pos = current_state[:2]
+        delta_theta = np.arctan2(obs_pos[1] - current_state[1], obs_pos[0] - current_state[0]) - current_state[2]
         distance = np.linalg.norm(robot_pos - obs_pos)
-        cvar_boundary = alpha_1 / (beta_1 * np.exp(2 * beta_2) * distance**2 + 1)
+        cvar_boundary = alpha_1 / (beta_1 * np.exp(-beta_2 * (np.cos(delta_theta) + 1)) * distance**2 + 1)
         return cvar_boundary
 
-    def filter_by_aleatoric_uncertainty(self, filtered_predictions, robot_pos, near_obs_pos):
+    def filter_by_aleatoric_uncertainty(self, filtered_predictions, current_state, near_obs_pos):
         final_predictions = []
-        cvar_boundary = self.calculate_cvar_boundary(robot_pos, near_obs_pos)
+        cvar_boundary = self.calculate_cvar_boundary(current_state, near_obs_pos)
         for pred in filtered_predictions:
             gamma1, gamma2, y_pred_safety_loss, _, aleatoric_uncertainty, _ = pred
             gmm = self.edr.create_gmm(y_pred_safety_loss)
@@ -123,7 +125,7 @@ class AdaptiveCBFParameterSelector:
         # gamma1_range, gamma2_range = self.sample_cbf_parameters(current_state[5], current_state[6])
         predictions = self.predict_with_edr(current_state, gamma1_range, gamma2_range)
         filtered_predictions = self.filter_by_epistemic_uncertainty(predictions)
-        final_predictions = self.filter_by_aleatoric_uncertainty(filtered_predictions, robot_pos, near_obs_pos)
+        final_predictions = self.filter_by_aleatoric_uncertainty(filtered_predictions, current_state, near_obs_pos)
         best_gamma1, best_gamma2 = self.select_best_parameters(final_predictions)
         if best_gamma1 is not None and best_gamma2 is not None:
             print(f"CBF parameters updated to: {best_gamma1:.2f}, {best_gamma2:.2f} | Total prediction count: {len(predictions)} | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric DR-CVaR")        
