@@ -3,14 +3,13 @@ import numpy as np
 
 
 class JensenRenyiDivergence():
-    def __init__(self, states, next_states_mean, next_states_var):
-        self.next_states_mean = torch.permute(next_states_mean, (1, 0, 2))
-        self.next_states_var = torch.permute(next_states_var, (1, 0, 2))
-        self.states = states
+    def __init__(self, states_mean, states_var):
+        self.states_mean = states_mean.permute(1, 0, 2)
+        self.states_var = states_var.permute(1, 0, 2)
 
     def compute_measure(self):
-        state_delta_means = self.next_states_mean - self.states.unsqueeze(1)
-        state_delta_vars = self.next_states_var
+        state_delta_means = self.states_mean
+        state_delta_vars = self.states_var
 
         # shape: both (n_actors, ensemble_size, d_state)
         mu, var = state_delta_means, state_delta_vars

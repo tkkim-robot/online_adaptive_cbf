@@ -1,98 +1,91 @@
 import numpy as np
+import pandas as pd
 import os
 import math
 import torch
 import torch.nn as nn
 from torch.distributions.normal import Normal
+from sklearn.preprocessing import StandardScaler
+import joblib
 
 PATH = '/home/add/Desktop/auto_ws/src/auto_learn'
 
 
 class VehicleModel(nn.Module):
-    def __init__(self, n_states, n_actions, n_hidden, n_ensemble, n_history, n_trajectory, device, lr=0.001, model_type='vanilla', incremental=False, activation='relu'):
+    def __init__(self, n_states, n_output, n_hidden, n_ensemble, device, lr=0.001, model_type='vanilla', incremental=False, activation='relu'):
         super(VehicleModel, self).__init__()
         self.device = device
         self.n_states = n_states
-        self.n_actions = n_actions
+        self.n_output = n_output
         self.n_hidden = n_hidden
         self.n_ensemble = n_ensemble
-        self.n_history = n_history
-        self.n_trajectory = n_trajectory
-        if model_type == 'vanilla':
-            from auto_learn.dynamics.nn_sto_ens import EnsembleStochasticLinear
-            self.model = EnsembleStochasticLinear(in_features=((self.n_states + self.n_actions)*self.n_history),
-                                                  out_features=self.n_states,
-                                                  hidden_features=self.n_hidden, trajectory_size=self.n_trajectory, ensemble_size=self.n_ensemble, activation=activation, explore_var='jrd', residual=True)
+        self.scaler = StandardScaler()
+        self.model = None  # Define the model here based on your requirements
 
-        self.model = self.model.to(device)  # kaiming init
+        # Model type configuration
+        if model_type == 'vanilla':
+            from dynamics.nn_sto_ens import EnsembleStochasticLinear
+            self.model = EnsembleStochasticLinear(in_features=self.n_states,
+                                                  out_features=self.n_output,
+                                                  hidden_features=self.n_hidden,
+                                                  ensemble_size=self.n_ensemble, 
+                                                  activation=activation, 
+                                                  explore_var='jrd', 
+                                                  residual=True)
+
+        self.model = self.model.to(device)
 
         if device == 'cuda':
-            model = nn.DataParallel(self.model)
+            self.model = nn.DataParallel(self.model)
             torch.backends.cudnn.benchmark = True
-        print('Am I using CPU or GPU : {}'.format(device))
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-        self.criterion = nn.GaussianNLLLoss()
+        self.criterion = self.gaussian_nll_loss  # Custom Gaussian NLL Loss
         self.mse_loss = nn.MSELoss()
-        self.incremental = incremental
-        self.dataset = None
-
         self.best_test_err = 10000.0
-        self.history_data = torch.zeros(
-            self.n_trajectory, (self.n_states + self.n_actions), self.n_history).to(self.device)
 
-    def forward(self, state, action):
-        xu_history = self.make_history_data(state, action)
-        with torch.no_grad():  # only forwarding here
-            yhat, ens_var = self.model(xu_history)  # Ensemble*K*((X+U)*H)
-        return yhat, ens_var
+    def gaussian_nll_loss(self, mu, target, var):
+        """
+        Custom Gaussian Negative Log Likelihood Loss
+        :param mu: Predicted mean
+        :param target: True target value
+        :param var: Predicted variance
+        :return: Loss value
+        """
+        loss = 0.5 * (torch.log(var) + (target - mu) ** 2 / var)
+        return torch.mean(loss)
 
-    # JW
-    def make_history_data(self, state, action):
-        # TODO: measure state and action's tensor dimension
-        #       it should be K*S and K*X
-        # remove oldest history
-        self.history_data = self.history_data[:, :, 1:]
-        current_data = torch.cat([state, action], dim=1).unsqueeze(
-            2)  # shoule be K*(S+X)*1
-        self.history_data = torch.cat(
-            [self.history_data, current_data], dim=2)  # K*(X+S)*H
+    def load_and_preprocess_data(self, data_file, scaler_path=None):
+        # Load data
+        dataset = pd.read_csv(data_file)
 
-        # 2D tensor with batches: K*((X+S)*H)
-        # return self.history_data.view((self.n_trajectory, -1))
+        # Define input features and outputs
+        # X = dataset[['Distance_obs1', 'Distance_obs2', 'Distance_obs3', 'Velocity', 'Theta', 'Gamma1', 'Gamma2']].values
+        X = dataset[['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2']].values
+        y = dataset[['Safety Loss', 'Deadlock Time']].values 
 
-        temp_history_data = self.history_data.permute(0, 2, 1)
-        return temp_history_data.reshape(self.n_trajectory, -1)
+        # Transform Theta into sine and cosine components
+        Theta = X[:, 2]
+        X_transformed = np.column_stack((X[:, :2], np.sin(Theta), np.cos(Theta), X[:, 3:]))
 
-    def initialize_history(self, states):
-        # TODO: Expand the states to N Trajectories
-        self.history_data = states.to(self.device)
+        # Normalize the inputs
+        if scaler_path and os.path.exists(scaler_path):
+            self.scaler = joblib.load(scaler_path)  # Load existing scaler
+        else:
+            self.scaler.fit(X_transformed)  # Fit new scaler
 
-    def inference(self, state, action):
-        (res_mu, log_std), ens_var = self.forward(state, action)  # states
+        X_scaled = self.scaler.transform(X_transformed)
 
-        std = torch.exp(log_std)
-        dist = Normal(res_mu, std)
-        res_sample = dist.rsample()
-        # next_state = state.clone().detach() + res_sample
+        # Save the scaler for later use
+        if scaler_path:
+            joblib.dump(self.scaler, scaler_path)
 
-        # return next_state, ens_var
-        return res_mu, ens_var
+        # Splitting data into training and testing sets
+        train_size = int(0.7 * len(X_scaled))
+        train_dataX, test_dataX = X_scaled[:train_size], X_scaled[train_size:]
+        train_dataY, test_dataY = y[:train_size], y[train_size:]
 
-        # u = perturbed_action
-        # # u = torch.clamp(perturbed_action, ACTION_LOW, ACTION_HIGH)
-
-        # self.forward(state, u)
-        # with torch.no_grad():
-        #     (res_mu, log_std), ensemble_var = self.forward(state, u)
-
-        # std = torch.exp(log_std)
-        # dist = Normal(res_mu, std)
-        # res_sample = dist.rsample()
-        # # output dtheta directly so can just add
-        # next_state = state.clone().detach() + res_sample
-
-        # return next_state, ensemble_var
+        return train_dataX, train_dataY, test_dataX, test_dataY
 
     def train(self, train_loader, epoch):
         # train a single epoch
@@ -122,7 +115,7 @@ class VehicleModel(nn.Module):
 
         err = float(train_loss.item() / float(len(train_loader)))
         print('Training ==> Epoch {:2d}  Cost: {:.6f}'.format(epoch, err))
-        print('Data Size:', len(train_loader))
+        # print('Data Size:', len(train_loader))
         err_list.append(err)
         return err
 
@@ -267,6 +260,18 @@ class VehicleModel(nn.Module):
         print('r  RMSE   : {}'.format(yawrate_rmse))
         return vx_loss, vy_loss, yawrate_loss, val_rmse, vx_rmse, vy_rmse, yawrate_rmse
 
+    def save_model(self, model_path):
+        os.makedirs(os.path.dirname(model_path), exist_ok=True)
+        torch.save(self.model.state_dict(), model_path)
+
+    def load_model(self, model_path):
+        if os.path.exists(model_path):
+            checkpoint = torch.load(model_path)
+            self.model.load_state_dict(checkpoint)
+        else:
+            print("Model path does not exist. Check the provided path.")
+            
+            
 
 def model_save(model):
     os.makedirs('model', exist_ok=True)
