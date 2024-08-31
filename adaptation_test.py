@@ -16,34 +16,36 @@ from sklearn.preprocessing import MinMaxScaler
 
 
 class AdaptiveCBFParameterSelector:
-    def __init__(self, edr_model, edr_scaler, lower_bound=0.05, upper_bound=1.0, step_size=0.05, epistemic_threshold=0.6):
+    def __init__(self, edr_model, edr_scaler, distance_margin=0.1, step_size=0.03, epistemic_threshold=0.15):
         self.edr = EvidentialDeepRegression()
         self.edr.load_saved_model(edr_model)
         self.edr.load_saved_scaler(edr_scaler)
-        self.lower_bound = lower_bound
-        self.upper_bound = upper_bound
+        self.lower_bound = 0.05
+        self.upper_bound = 1.0
+        self.distance_margin = distance_margin
         self.step_size = step_size
         self.epistemic_threshold = epistemic_threshold
 
     def sample_cbf_parameters(self, current_gamma1, current_gamma2):
-        gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 0.3), min(self.upper_bound, current_gamma1 + 0.1 + self.step_size), self.step_size)
-        gamma2_range = np.arange(max(self.lower_bound, current_gamma2 - 0.3), min(self.upper_bound, current_gamma2 + 0.1 + self.step_size), self.step_size)
+        gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 0.99), min(self.upper_bound, current_gamma1 + 0.1 + self.step_size), self.step_size)
+        gamma2_range = np.arange(max(self.lower_bound, current_gamma2 - 0.99), min(self.upper_bound, current_gamma2 + 0.1 + self.step_size), self.step_size)
         return gamma1_range, gamma2_range
 
     def get_rel_state_wt_obs(self, tracking_controller):
         robot_pos = tracking_controller.robot.X[:2, 0].flatten()
+        robot_radius = tracking_controller.robot.robot_radius
         try:
-            near_obs_pos = tracking_controller.nearest_obs[:2].flatten()
+            near_obs = tracking_controller.nearest_obs.flatten()
         except:
-            near_obs_pos = [100,100]
+            near_obs = [100,100,0.2]
         
-        distance = np.linalg.norm(robot_pos - near_obs_pos)
+        distance = np.linalg.norm(robot_pos - near_obs[:2])
         velocity = tracking_controller.robot.X[3, 0]
-        theta = np.arctan2(near_obs_pos[1] - robot_pos[1], near_obs_pos[0] - robot_pos[0])
+        theta = np.arctan2(near_obs[1] - robot_pos[1], near_obs[0] - robot_pos[0])
         gamma1 = tracking_controller.controller.cbf_param['alpha1']
         gamma2 = tracking_controller.controller.cbf_param['alpha2']
         
-        return [distance, velocity, theta, gamma1, gamma2], robot_pos, near_obs_pos
+        return [distance, velocity, theta, gamma1, gamma2], robot_pos, robot_radius, near_obs
         # return [distance, 7, 9, velocity, theta, gamma1, gamma2]
 
     def predict_with_edr(self, current_state, gamma1_range, gamma2_range):
@@ -74,35 +76,31 @@ class AdaptiveCBFParameterSelector:
         filtered_predictions = [pred for pred, norm_uncert in zip(predictions, normalized_epistemic_uncertainties) if norm_uncert <= self.epistemic_threshold]
         return filtered_predictions
 
-    def calculate_cvar_boundary(self, current_state, obs_pos):
+    def calculate_cvar_boundary(self, robot_pos, robot_radius, theta, near_obs):
         alpha_1 = 0.4
         beta_1 = 7.0 
         beta_2 = 2.5
-        robot_pos = current_state[:2]
-        delta_theta = np.arctan2(obs_pos[1] - current_state[1], obs_pos[0] - current_state[0]) - current_state[2]
-        distance = np.linalg.norm(robot_pos - obs_pos)
-        cvar_boundary = alpha_1 / (beta_1 * np.exp(-beta_2 * (np.cos(delta_theta) + 1)) * distance**2 + 1)
+        delta_theta = np.arctan2(near_obs[1] - robot_pos[1], near_obs[0] - robot_pos[0]) - theta
+        distance = np.linalg.norm(robot_pos - near_obs[:2])
+        min_distance = robot_radius + near_obs[2] + self.distance_margin
+        cvar_boundary = alpha_1 / (beta_1 * min_distance**2 + 1)
         return cvar_boundary
 
-    def filter_by_aleatoric_uncertainty(self, filtered_predictions, current_state, near_obs_pos):
+    def filter_by_aleatoric_uncertainty(self, filtered_predictions, robot_pos, robot_radius, theta, near_obs):
         final_predictions = []
-        cvar_boundary = self.calculate_cvar_boundary(current_state, near_obs_pos)
+        cvar_boundary = self.calculate_cvar_boundary(robot_pos, robot_radius, theta, near_obs)
         for pred in filtered_predictions:
             gamma1, gamma2, y_pred_safety_loss, _, aleatoric_uncertainty, _ = pred
             gmm = self.edr.create_gmm(y_pred_safety_loss)
             cvar_filter = DistributionallyRobustCVaR(gmm)
             
-            # Compute the Distributionally Robust CVaR
             dr_cvar, cvar_values, dr_cvar_index = cvar_filter.compute_dr_cvar(alpha=0.95)
-            # print(f"Distributionally Robust CVaR: {dr_cvar}")
-
-            # # Check if the Distributionally Robust CVaR is within the specified boundary
-            # within_boundary = cvar_filter.is_within_boundary(cvar_boundary, alpha=0.95)
-            # print(f"Within Boundary: {within_boundary}")
+            within_boundary = cvar_filter.is_within_boundary(cvar_boundary, alpha=0.95)
+            if within_boundary:
+                print(f"Distributionally Robust CVaR: {dr_cvar} | boundary: {cvar_boundary}")
 
             if cvar_filter.is_within_boundary(cvar_boundary):
                 final_predictions.append(pred)
-        print(f"Distributionally Robust CVaR: {dr_cvar} | boundary: {cvar_boundary}")
         return final_predictions
 
     def select_best_parameters(self, filtered_predictions):
@@ -120,12 +118,12 @@ class AdaptiveCBFParameterSelector:
         return best_predictions[0][0], best_predictions[0][1]
 
     def adaptive_parameter_selection(self, tracking_controller):
-        current_state, robot_pos, near_obs_pos = self.get_rel_state_wt_obs(tracking_controller)
+        current_state, robot_pos, robot_radius, near_obs = self.get_rel_state_wt_obs(tracking_controller)
         gamma1_range, gamma2_range = self.sample_cbf_parameters(current_state[3], current_state[4])
         # gamma1_range, gamma2_range = self.sample_cbf_parameters(current_state[5], current_state[6])
         predictions = self.predict_with_edr(current_state, gamma1_range, gamma2_range)
         filtered_predictions = self.filter_by_epistemic_uncertainty(predictions)
-        final_predictions = self.filter_by_aleatoric_uncertainty(filtered_predictions, current_state, near_obs_pos)
+        final_predictions = self.filter_by_aleatoric_uncertainty(filtered_predictions, robot_pos, robot_radius, current_state[2], near_obs)
         best_gamma1, best_gamma2 = self.select_best_parameters(final_predictions)
         if best_gamma1 is not None and best_gamma2 is not None:
             print(f"CBF parameters updated to: {best_gamma1:.2f}, {best_gamma2:.2f} | Total prediction count: {len(predictions)} | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric DR-CVaR")        
@@ -204,7 +202,7 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
     plt.close()
 
 
-def single_agent_simulation_traj(distance, velocity, theta, gamma1, gamma2, unknown_obs, max_sim_time=20, adapt_cbf=False):
+def single_agent_simulation_traj(distance, velocity, theta, gamma1, gamma2, unknown_obs, controller, max_sim_time=20, adapt_cbf=False):
     dt = 0.05
 
     waypoints = np.array([
@@ -214,9 +212,9 @@ def single_agent_simulation_traj(distance, velocity, theta, gamma1, gamma2, unkn
 
     x_init = np.append(waypoints[0], velocity)
 
-    plot_handler = plotting.Plotting()
+    plot_handler = plotting.Plotting(width=12.5, height=6.0)
     ax, fig = plot_handler.plot_grid("Local Tracking Controller")
-    env_handler = env.Env(width=12.5, height=6.0)
+    env_handler = env.Env()
     
     # Set robot with controller 
     robot_spec = {
@@ -226,14 +224,15 @@ def single_agent_simulation_traj(distance, velocity, theta, gamma1, gamma2, unkn
         'fov_angle': 70.0,
         'cam_range': 5.0
     }
-    control_type = 'mpc_cbf'
     tracking_controller = LocalTrackingController(x_init, robot_spec,
-                                                control_type=control_type,
+                                                control_type=controller,
                                                 dt=dt,
                                                 show_animation=True,
                                                 save_animation=False,
                                                 ax=ax, fig=fig,
                                                 env=env_handler)
+
+    tracking_controller.robot.robot_radius = 0.3
 
     # Initialize AdaptiveCBFParameterSelector if adaptation is enabled
     if adapt_cbf:
@@ -265,7 +264,7 @@ def single_agent_simulation_traj(distance, velocity, theta, gamma1, gamma2, unkn
             if best_gamma1 is not None and best_gamma2 is not None:
                 tracking_controller.controller.cbf_param['alpha1'] = best_gamma1
                 tracking_controller.controller.cbf_param['alpha2'] = best_gamma2
-                gamma_history.append([best_gamma1, best_gamma2])
+            gamma_history.append([tracking_controller.controller.cbf_param['alpha1'], tracking_controller.controller.cbf_param['alpha2']])
     
     tracking_controller.export_video()
     plt.ioff()
@@ -275,7 +274,7 @@ def single_agent_simulation_traj(distance, velocity, theta, gamma1, gamma2, unkn
 
 
 
-def plot_traj(trajectory_1, trajectory_2, trajectory_3):
+def plot_traj(trajectory_opt1, trajectory_opt2, trajectory_1, trajectory_2, trajectory_3):
     plot_handler = plotting.Plotting()
     ax, fig = plot_handler.plot_grid("Robot Trajectories")
 
@@ -292,8 +291,10 @@ def plot_traj(trajectory_1, trajectory_2, trajectory_3):
         )
 
     ax.plot(trajectory_1[:, 0], trajectory_1[:, 1], label="Without Adaptation (gamma1=0.05, gamma2=0.05)", linestyle="--")
-    ax.plot(trajectory_2[:, 0], trajectory_2[:, 1], label="Without Adaptation (gamma1=0.2, gamma2=0.2)", linestyle="--")
+    ax.plot(trajectory_2[:, 0], trajectory_2[:, 1], label="Without Adaptation (gamma1=0.5, gamma2=0.5)", linestyle="--")
     ax.plot(trajectory_3[:, 0], trajectory_3[:, 1], label="With Adaptation", linestyle="-")
+    ax.plot(trajectory_opt1[:, 0], trajectory_opt1[:, 1], label="Optimal Decay CBF-QP", linestyle="-")
+    ax.plot(trajectory_opt2[:, 0], trajectory_opt2[:, 1], label="Optimal Decay MPC-CBF", linestyle="-")
     ax.scatter(1, 3, c='green', marker='o', label='Start Point')
     ax.scatter(11, 3, c='red', marker='x', label='Goal Point')
     ax.set_xlabel('X Position')
@@ -304,15 +305,45 @@ def plot_traj(trajectory_1, trajectory_2, trajectory_3):
 
     plt.show()
 
+def plot_gamma_history2(gamma_history):
+    plt.figure(figsize=(10, 5))
+    plt.plot(gamma_history[:, 0], label='gamma1', linestyle='-')
+    plt.plot(gamma_history[:, 1], label='gamma2', linestyle='-')
+    plt.xlabel('Simulation Step')
+    plt.ylabel('CBF Parameters')
+    plt.title('Adaptive CBF Parameter Evolution Over Time')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
-
+def plot_gamma_history(gamma_history):
+    plt.figure(figsize=(6, 6))  
+    plt.plot(gamma_history[:, 0], gamma_history[:, 1], linestyle='-', color='b', label='Gamma Trajectory')
+    plt.xlim(0, 1) 
+    plt.ylim(0, 1) 
+    plt.xlabel('Gamma1')
+    plt.ylabel('Gamma2')
+    plt.title('Trajectory of CBF Parameters Gamma1 vs Gamma2')
+    plt.grid(True)
+    plt.legend()
+    plt.gca().set_aspect('equal', adjustable='box') 
+    plt.show()
 
 if __name__ == "__main__":
-    unknown_obs = np.array([[1 + 3.0, 3, 0.2], 
-                            [4, 2.0, 0.2], [4, 3.0, 0.2], [4, 4.2, 0.2],
-                            [6, 2.1, 0.2], [6, 3.3, 0.2], [6, 4.5, 0.2],
-                            [8, 1.7, 0.2], [8, 2.8, 0.2], [8, 3.9, 0.2],
-                            [10, 2.6, 0.2], [10, 3.6, 0.2], [10, 4.6, 0.2]])
+    # unknown_obs = np.array([[4, 1.8, 0.2], [4, 3.0, 0.2], [4, 4.2, 0.2],
+    #                         [6, 2.1, 0.2], [6, 3.3, 0.2], [6, 4.5, 0.2],
+    #                         [8, 1.7, 0.2], [8, 2.8, 0.2], [8, 3.9, 0.2],
+    #                         [10, 2.6, 0.2], [10, 3.6, 0.2], [10, 4.6, 0.2]])
+    
+    unknown_obs = np.array([[4, 3.0, 0.2], [4, 4.5, 0.2],
+                            [6, 3.3, 0.2], [6, 4.8, 0.2],
+                            [8, 2.8, 0.2], [8, 4.1, 0.2],
+                            [10, 2.5, 0.2], [10, 3.7, 0.2]])
+    
+    # unknown_obs = np.array([[1 + 3.0, 3, 0.2], 
+    #                         [5, 3.4, 0.2], [5.3, 3.4, 0.2], [5.6, 3.4, 0.2], [5.9, 3.4, 0.2],
+    #                         [8, 1.7, 0.2], [8, 2.8, 0.2], [8, 3.9, 0.2],
+    #                         [10, 2.6, 0.2], [10, 3.6, 0.2], [10, 4.6, 0.2]])
     
     # height = 2.0
     # unknown_obs = np.array([[2, height, 0.2], [2.4, height, 0.2], [2.8, height, 0.2], [3.2, height, 0.2], [3.6, height, 0.2], [4.0, height, 0.2], [4.4, height, 0.2], [4.8, height, 0.2],
@@ -327,10 +358,15 @@ if __name__ == "__main__":
     
     
     # single_agent_simulation(3.0, 0.5, 0.001, 0.1, 0.2)
-    trajectory_1, _ = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.05, 0.05, unknown_obs = unknown_obs, adapt_cbf=False)
-    trajectory_2, _ = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.20, 0.20, unknown_obs = unknown_obs, adapt_cbf=False)
-    trajectory_3, gamma_history = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.05, 0.05, unknown_obs = unknown_obs, adapt_cbf=True)
+    # trajectory_0, _ = single_agent_simulation_traj(3.0, 0.5, 0.01, 3.0, 3.0, unknown_obs = unknown_obs, controller = 'cbf_qp', adapt_cbf=False)
+    trajectory_3, gamma_history = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.05, 0.05, unknown_obs = unknown_obs, controller = 'mpc_cbf', adapt_cbf=True)
+    # trajectory_opt1, _ = single_agent_simulation_traj(3.0, 0.5, 0.01, 2.5, 2.5, unknown_obs = unknown_obs, controller = 'optimal_decay_cbf_qp', adapt_cbf=False)
+    # trajectory_opt2, _ = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.25, 0.25, unknown_obs = unknown_obs, controller = 'optimal_decay_mpc_cbf', adapt_cbf=False)
+    # trajectory_1, _ = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.05, 0.05, unknown_obs = unknown_obs, controller = 'mpc_cbf', adapt_cbf=False)
+    # trajectory_2, _ = single_agent_simulation_traj(3.0, 0.5, 0.01, 0.50, 0.50, unknown_obs = unknown_obs, controller = 'mpc_cbf', adapt_cbf=False)
     
-    plot_traj(trajectory_1, trajectory_2, trajectory_3)
+    # plot_traj(trajectory_opt1, trajectory_opt2, trajectory_1, trajectory_2, trajectory_3)
 
+    plot_gamma_history(gamma_history)
+    plot_gamma_history2(gamma_history)
 

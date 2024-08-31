@@ -113,13 +113,13 @@ def safety_loss_function_example():
     dt = 0.05
 
     # Define waypoints for the robot to follow
-    waypoints = [
-            [0.5, 3, 0.1],
-            [5.5, 3, 0]
-    ]
+    waypoints = np.array([
+        [1, 3, 0.01],
+        [11, 3, 0]
+    ], dtype=np.float64)
     waypoints = np.array(waypoints, dtype=np.float64)
 
-    x_init = waypoints[0]
+    x_init = np.append(waypoints[0], 0.5)
 
     # Initialize environment and plotting handler
     plot_handler = plotting.Plotting()
@@ -138,13 +138,17 @@ def safety_loss_function_example():
     tracking_controller = LocalTrackingController(x_init, robot_spec,
                                                 control_type=control_type,
                                                 dt=dt,
-                                                show_animation=False,
+                                                show_animation=True,
                                                 save_animation=False,
                                                 ax=ax, fig=fig,
                                                 env=env_handler)
 
+    # Set gamma values
+    tracking_controller.controller.cbf_param['alpha1'] = 0.05
+    tracking_controller.controller.cbf_param['alpha2'] = 0.05
+
     # Define obstacle
-    unknown_obs = np.array([[3, 3, 0.5]])
+    unknown_obs = np.array([[4, 3, 0.2]])
     tracking_controller.set_unknown_obs(unknown_obs)
     tracking_controller.set_waypoints(waypoints)
     
@@ -155,7 +159,25 @@ def safety_loss_function_example():
     beta_2 = 2.5 # If bigger, makes whole surface higher if delta_theta is smaller
     epsilon = 0.07 # If smaller, makes the peak higher
     safety_metric = SafetyLossFunction(alpha_1, alpha_2, beta_1, beta_2, epsilon)
-    
+
+    for _ in range(int(20 / dt)):
+        ret = tracking_controller.control_step()
+        tracking_controller.draw_plot()
+        
+        robot_state = tracking_controller.robot.X
+        robot_pos = tracking_controller.robot.X[:2].flatten()
+        obs_state = tracking_controller.unknown_obs[:2].flatten()
+        obs_pos = tracking_controller.unknown_obs[:2].flatten()[:2]
+        delta_theta = np.arctan2(obs_pos[1] - robot_state[1, 0], obs_pos[0] - robot_state[0, 0]) - robot_state[2, 0]
+        h_k, d_h, dd_h = tracking_controller.robot.agent_barrier_dt(robot_state, np.array([0, 0]), obs_state.flatten())
+        cbf_constraint_value = dd_h + (0.05 + 0.05) * d_h + 0.05 * 0.05 * h_k        
+        safety_loss = safety_metric.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
+        print(f"Safetyloss: {safety_loss}")
+        
+        if ret == -1:
+            break
+        
+
     # Plot safety loss function grid
     plot_safety_loss_function_grid(tracking_controller, safety_metric)
     
@@ -246,4 +268,4 @@ if __name__ == "__main__":
     safety_loss_function_example()
     
     # Example to simulate a scenario and check for deadlocks
-    dead_lock_example()
+    # dead_lock_example()
