@@ -11,8 +11,12 @@ import numpy as np
 import torch.distributions as D
 from torch.distributions.normal import Normal
 
-from dynamics.ensemble.ensemble_linear import EnsembleLinear
-from dynamics.divergence.utility import JensenRenyiDivergence
+try:
+    from dynamics.ensemble.ensemble_linear import EnsembleLinear
+    from dynamics.divergence.utility import JensenRenyiDivergence
+except:
+    from probabilistic_ensemble_nn.dynamics.ensemble.ensemble_linear import EnsembleLinear
+    from probabilistic_ensemble_nn.dynamics.divergence.utility import JensenRenyiDivergence
 
 
 class EnsembleStochasticLinear(torch.nn.Module):
@@ -68,11 +72,17 @@ class EnsembleStochasticLinear(torch.nn.Module):
                 states_mean=mu, states_var=std.square()).compute_measure()
             dis = jrd_div.abs().unsqueeze(1)
 
-        rand_idx = np.random.randint(self.ensemble_size, size=x.shape[1])
-        batch_idx = np.arange(x.shape[1])
-        yhat = mu[rand_idx, batch_idx], log_std[rand_idx, batch_idx]
+        yhat1 = (mu[0], log_std[0])
+        yhat2 = (mu[1], log_std[1])
+        yhat3 = (mu[2], log_std[2])
 
-        return yhat, dis
+        return yhat1, yhat2, yhat3, dis
+
+        # rand_idx = np.random.randint(self.ensemble_size, size=x.shape[1])
+        # batch_idx = np.arange(x.shape[1])
+        # yhat = mu[rand_idx, batch_idx], log_std[rand_idx, batch_idx]
+
+        # return yhat, dis
 
     def single_forward(self, x, index):
         prev_x = x.clone().detach()  # save previous state
