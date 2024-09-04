@@ -131,27 +131,16 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, obs_num=1
             except InfeasibleError:
                 plt.ioff()
                 plt.close()
-                return (distance if obs_num >= 1 else 100, 
-                        (distance if obs_num >= 2 else 100), 
-                        (distance if obs_num >= 3 else 100), 
-                        velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time)
+                return (distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time)
                 
         plt.ioff()
         plt.close()
-        return (distance if obs_num >= 1 else 100, 
-                (distance if obs_num >= 2 else 100), 
-                (distance if obs_num >= 3 else 100), 
-                velocity, theta, gamma1, gamma2, True, safety_loss, deadlock_time, sim_time)
+        return (distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time)
 
     except InfeasibleError:
         plt.ioff()
         plt.close()
-        return (distance if obs_num >= 1 else 100, 
-                (distance if obs_num >= 2 else 100), 
-                (distance if obs_num >= 3 else 100), 
-                velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time)
-
-
+        return (distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time)
 
 def worker(params):
     distance, velocity, theta, gamma1, gamma2, obs_num = params
@@ -159,11 +148,10 @@ def worker(params):
         result = single_agent_simulation(distance, velocity, theta, gamma1, gamma2, obs_num)
     return result
 
-
 def generate_data(samples_per_dimension=5, num_processes=8, batch_size=6, obs_num=1):
     distance_range = np.linspace(0.55, 3.0, samples_per_dimension)
     velocity_range = np.linspace(0.01, 1.0, samples_per_dimension)
-    theta_range = np.linspace(0.001, np.pi / 2, samples_per_dimension)
+    theta_range = np.linspace(np.pi/2, np.pi, samples_per_dimension)
     gamma1_range = np.linspace(0.01, 0.99, samples_per_dimension)
     gamma2_range = np.linspace(0.01, 0.99, samples_per_dimension)
     parameter_space = [(d, v, theta, g1, g2, obs_num) for d in distance_range
@@ -184,11 +172,10 @@ def generate_data(samples_per_dimension=5, num_processes=8, batch_size=6, obs_nu
         pool.close()
         pool.join()
 
-        columns = ['Distance_obs1', 'Distance_obs2', 'Distance_obs3', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time']
+        columns = ['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time']
         
         df = pd.DataFrame(results, columns=columns)
         df.to_csv(f'data_generation_results_batch_{batch_index + 1}.csv', index=False)
-
 
 def concatenate_csv_files(output_filename, total_batches):
     all_data = []
@@ -201,8 +188,6 @@ def concatenate_csv_files(output_filename, total_batches):
     final_df = pd.concat(all_data, ignore_index=True)
     final_df.to_csv(output_filename, index=False)
     print(f"All batch files have been concatenated into {output_filename}")
-
-
 
 
 if __name__ == "__main__":
@@ -218,7 +203,7 @@ if __name__ == "__main__":
     total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size != 0 else 0)
 
     generate_data(samples_per_dimension, num_processes, batch_size, obs_num)
-    concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint_obs{obs_num}_0811.csv', total_batches)
+    concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint_obs1_0902.csv', total_batches)
 
     print("Data generation complete.")
 
