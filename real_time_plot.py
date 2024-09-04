@@ -8,17 +8,17 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FixedLocator
 from cbf_tracking.utils import plotting, env
 from cbf_tracking.tracking import LocalTrackingController
-from evidential_deep_regression import EvidentialDeepRegression
+from probabilistic_ensemble_nn.dynamics.nn_vehicle import ProbabilisticEnsembleNN
 
 class RealTimePlotter:
     def __init__(self, model_name, scaler_name, plot_deadlock=False):
         self.model_name = model_name
         self.scaler_name = scaler_name
         self.plot_deadlock = plot_deadlock
-        self.edr = EvidentialDeepRegression()
-        self.edr.load_saved_model(model_name)
-        self.edr.load_saved_scaler(scaler_name)
-        self.gamma_pairs = [(0.05, 0.05), (0.5, 0.5), (0.9, 0.9)]
+        self.penn = ProbabilisticEnsembleNN()
+        self.penn.load_model(model_name)
+        self.penn.load_scaler(scaler_name)
+        self.gamma_pairs = [(0.05, 0.05), (0.15, 0.15), (0.9, 0.9)]
         self.fig = None
         self.gs = None
         self.ax_gmm_safety = None
@@ -33,6 +33,7 @@ class RealTimePlotter:
         distance = np.linalg.norm(robot_pos - near_obs_pos)
         velocity = tracking_controller.robot.X[3, 0]
         theta = np.arctan2(near_obs_pos[1] - robot_pos[1], near_obs_pos[0] - robot_pos[0])
+        theta = ((theta + np.pi) % (2 * np.pi)) - np.pi
         gamma1 = tracking_controller.controller.cbf_param['alpha1']
         gamma2 = tracking_controller.controller.cbf_param['alpha2']
         
@@ -87,7 +88,7 @@ class RealTimePlotter:
 
         for ax, gamma_pair in zip(self.ax_gmm_safety, self.gamma_pairs):
             main_line, = ax.plot(x, np.zeros_like(x), '-k', label='GMM')
-            comp_lines = [ax.plot(x, np.zeros_like(x), '--', label=f'GMM Component {i+1}')[0] for i in range(3)]
+            comp_lines = [ax.plot(x, np.zeros_like(x), '--', label=f'GMM Component {i+1}', linewidth=2)[0] for i in range(3)]
             self.lines_safety.append([main_line, comp_lines])
             ax.set_xlim([-0.5, 5.5])
             ax.set_ylim([0, 5])
@@ -133,13 +134,13 @@ class RealTimePlotter:
             batch_input.append(state)
 
         batch_input = np.array(batch_input)
-        y_pred_safety_loss, y_pred_deadlock_loss = self.edr.predict(batch_input)
+        y_pred_safety_loss, y_pred_deadlock_loss, _ = self.penn.predict(batch_input)
 
         # Create GMM for safety loss predictions
-        gmms_safety = [self.edr.create_gmm(y_pred_safety_loss[i]) for i in range(len(self.gamma_pairs))]
+        gmms_safety = [self.penn.create_gmm(y_pred_safety_loss[i]) for i in range(len(self.gamma_pairs))]
         
         if self.plot_deadlock:
-            gmms_deadlock = [self.edr.create_gmm(y_pred_deadlock_loss[i]) for i in range(len(self.gamma_pairs))]
+            gmms_deadlock = [self.penn.create_gmm(y_pred_deadlock_loss[i]) for i in range(len(self.gamma_pairs))]
             self.update_real_time_gmm(gmms_safety, gmms_deadlock)
         else:
             self.update_real_time_gmm(gmms_safety)
@@ -161,10 +162,10 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
     x_init = np.append(waypoints[0], velocity)
 
     # Set plot with env
-    plot_handler = plotting.Plotting()
+    plot_handler = plotting.Plotting(width=12.5, height=6)
     env_handler = env.Env()
     
-    real_time_plotter = RealTimePlotter('edr_model_9datapoint_tuned.h5', 'scaler_9datapoint_tuned.save', plot_deadlock)
+    real_time_plotter = RealTimePlotter('penn_model_0902.pth', 'scaler_0902.save', plot_deadlock)
     ax_main, env_handler = real_time_plotter.initialize_plots(plot_handler, env_handler)
     
     # Set robot with controller 
@@ -189,8 +190,8 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
     tracking_controller.controller.cbf_param['alpha2'] = gamma2
     
     # Set known obstacles
-    tracking_controller.obs = np.array([[1 + distance, 3, 0.4]])
-    tracking_controller.unknown_obs = np.array([[1 + distance, 3, 0.4]])
+    tracking_controller.obs = np.array([[1 + distance, 3, 0.4], [7, 3.5, 0.4]])
+    tracking_controller.unknown_obs = np.array([[1 + distance, 3, 0.4], [7, 3.5, 0.4]])
     tracking_controller.set_waypoints(waypoints)
 
     # Run simulation
