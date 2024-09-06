@@ -7,14 +7,13 @@ import numpy as np
 import pandas as pd
 import tqdm
 from multiprocessing import Pool
-import matplotlib
 import matplotlib.pyplot as plt
 from cbf_tracking.utils import plotting, env
 from cbf_tracking.tracking import LocalTrackingController, InfeasibleError
 from safety_loss_function import SafetyLossFunction
 
 # Use a non-interactive backend
-matplotlib.use('Agg')
+# matplotlib.use('Agg')
 
 # Suppress print statements
 class SuppressPrints:
@@ -36,27 +35,37 @@ def get_safety_loss_from_controller(tracking_controller, safety_metric):
     gamma2 = tracking_controller.controller.cbf_param['alpha2']
     
     robot_state = tracking_controller.robot.X
+    robot_rad = tracking_controller.robot.robot_radius
     obs_state = tracking_controller.nearest_obs.flatten()
     relative_angle = np.arctan2(obs_state[1] - robot_state[1], obs_state[0] - robot_state[0]) - robot_state[2]
     delta_theta = angle_normalize(relative_angle)
     h_k, d_h, dd_h = tracking_controller.robot.agent_barrier_dt(robot_state, np.array([0, 0]), obs_state)
     cbf_constraint_value = dd_h + (gamma1 + gamma2) * d_h + gamma1 * gamma2 * h_k
-    safety_loss = safety_metric.compute_safety_loss_function(robot_state[:2], obs_state[:2], cbf_constraint_value, delta_theta)
+    safety_loss = safety_metric.compute_safety_loss_function(robot_state[:2], obs_state[:2], robot_rad, obs_state[2], cbf_constraint_value, delta_theta)
     
     return safety_loss
 
-def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, obs_num=1, deadlock_threshold=0.1, max_sim_time=15):
+def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.1, max_sim_time=25):
     try:
         dt = 0.05
 
         waypoints = np.array([
-            [1, 3, theta],
-            [11, 3, 0]
+            [1, 2, theta],
+            [8, 2, 0]
         ], dtype=np.float64)
-
         x_init = np.append(waypoints[0], velocity)
-
-        plot_handler = plotting.Plotting()
+        
+        # Set known obstacles
+        obstacles = [
+            [1 + distance, 2, 0.2],          # obs1
+            # [7, 3.5, 0.2],                 # obs2-1
+            # [6, 2.5, 0.2],                   # obs2-2
+            # [6, 1.5, 0.2],                   # obs2-2
+            # [6.5, 3.7, 0.2], [10, 2.9, 0.2], # obs3-1
+            # [6.5, 4, 0.2], [9, 3, 0.2],    # obs3-2
+        ]
+        
+        plot_handler = plotting.Plotting(width=10, height=4, known_obs = obstacles)
         ax, fig = plot_handler.plot_grid("Local Tracking Controller")
         env_handler = env.Env()
 
@@ -76,20 +85,15 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, obs_num=1
                                                     ax=ax, fig=fig,
                                                     env=env_handler)
 
+        # Save distance with the actual value between the robot and the obstacle
+        distance = distance - obstacles[0][2] - tracking_controller.robot.robot_radius
+
         # Set gamma values
         tracking_controller.controller.cbf_param['alpha1'] = gamma1
         tracking_controller.controller.cbf_param['alpha2'] = gamma2
         
-        # Set known obstacles
-        obstacles = [
-            [1 + distance, 3, 0.2],          # obs1
-            # [7, 3.5, 0.2],                 # obs2-1
-            # [6, 4, 0.2],                   # obs2-2
-            [6.5, 3.7, 0.2], [10, 2.9, 0.2], # obs3-1
-            # [6.5, 4, 0.2], [9, 3, 0.2],    # obs3-2
-        ]
-        tracking_controller.obs = np.array(obstacles[:obs_num])
-        tracking_controller.unknown_obs = np.array(obstacles[:obs_num])
+
+        tracking_controller.obs = np.array(obstacles)
         tracking_controller.set_waypoints(waypoints)
 
         # Setup safety loss function
@@ -125,7 +129,7 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, obs_num=1
                 safety_loss_new = get_safety_loss_from_controller(tracking_controller, safety_metric)
                 if safety_loss_new > safety_loss:
                     safety_loss = safety_loss_new[0]
-                print(f"Deadlock_time: {deadlock_time} | Safety_loss: {safety_loss_new}")
+                # print(f"Deadlock_time: {deadlock_time} | Safety_loss: {safety_loss_new}")
 
             # If collision occurs, handle the exception
             except InfeasibleError:
@@ -143,18 +147,18 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, obs_num=1
         return (distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time)
 
 def worker(params):
-    distance, velocity, theta, gamma1, gamma2, obs_num = params
+    distance, velocity, theta, gamma1, gamma2 = params
     with SuppressPrints():
-        result = single_agent_simulation(distance, velocity, theta, gamma1, gamma2, obs_num)
+        result = single_agent_simulation(distance, velocity, theta, gamma1, gamma2)
     return result
 
-def generate_data(samples_per_dimension=5, num_processes=8, batch_size=6, obs_num=1):
+def generate_data(samples_per_dimension=5, num_processes=8, batch_size=6):
     distance_range = np.linspace(0.55, 3.0, samples_per_dimension)
     velocity_range = np.linspace(0.01, 1.0, samples_per_dimension)
-    theta_range = np.linspace(np.pi/2, np.pi, samples_per_dimension)
-    gamma1_range = np.linspace(0.01, 0.99, samples_per_dimension)
-    gamma2_range = np.linspace(0.01, 0.99, samples_per_dimension)
-    parameter_space = [(d, v, theta, g1, g2, obs_num) for d in distance_range
+    theta_range = np.linspace(0, np.pi, samples_per_dimension)
+    gamma1_range = np.linspace(0.01, 0.18, samples_per_dimension)
+    gamma2_range = np.linspace(0.01, 0.18, samples_per_dimension)
+    parameter_space = [(d, v, theta, g1, g2) for d in distance_range
                        for v in velocity_range
                        for theta in theta_range
                        for g1 in gamma1_range
@@ -191,19 +195,18 @@ def concatenate_csv_files(output_filename, total_batches):
 
 
 if __name__ == "__main__":
-    # single_agent_simulation(3, 1, 0.001, 0.1, 0.1, 3)  
-    # single_agent_simulation_temp(3, 1, 0.001, 0.1, 0.1, 3)  
+    # single_agent_simulation(3, 0, 0.01, 0.1, 0.1)  
+    # single_agent_simulation_temp(3, 1, 0.01, 0.1, 0.1, 3)  
 
-    obs_num = 1                 # Number of obstacles
-    samples_per_dimension = 8   # Number of samples per dimension
+    samples_per_dimension = 9   # Number of samples per dimension
     batch_size = 6**5           # Specify the batch size
     num_processes = 6           # Change based on the number of cores available
 
     total_datapoints = samples_per_dimension ** 5
     total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size != 0 else 0)
 
-    generate_data(samples_per_dimension, num_processes, batch_size, obs_num)
-    concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint_obs1_0902.csv', total_batches)
+    generate_data(samples_per_dimension, num_processes, batch_size)
+    concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint_0902.csv', total_batches)
 
     print("Data generation complete.")
 

@@ -28,9 +28,11 @@ class RealTimePlotter:
 
     def get_rel_state_wt_obs(self, tracking_controller):
         robot_pos = tracking_controller.robot.X[:2, 0].flatten()
+        robot_rad = tracking_controller.robot.robot_radius
         near_obs_pos = tracking_controller.nearest_obs[:2].flatten()
+        near_obs_rad = tracking_controller.nearest_obs[2]
         
-        distance = np.linalg.norm(robot_pos - near_obs_pos)
+        distance = np.linalg.norm(robot_pos - near_obs_pos) - robot_rad - near_obs_rad
         velocity = tracking_controller.robot.X[3, 0]
         theta = np.arctan2(near_obs_pos[1] - robot_pos[1], near_obs_pos[0] - robot_pos[0])
         theta = ((theta + np.pi) % (2 * np.pi)) - np.pi
@@ -125,25 +127,28 @@ class RealTimePlotter:
         self.ax_gmm_safety[0].legend(loc='upper right', fontsize=10)
 
     def predict_and_update_gmm(self, tracking_controller):
-        current_state_wt_obs = self.get_rel_state_wt_obs(tracking_controller)
-        batch_input = []
-        for g_pair in self.gamma_pairs:
-            state = current_state_wt_obs.copy()
-            state[3] = g_pair[0]
-            state[4] = g_pair[1]
-            batch_input.append(state)
+        try:
+            current_state_wt_obs = self.get_rel_state_wt_obs(tracking_controller)
+            batch_input = []
+            for g_pair in self.gamma_pairs:
+                state = current_state_wt_obs.copy()
+                state[3] = g_pair[0]
+                state[4] = g_pair[1]
+                batch_input.append(state)
 
-        batch_input = np.array(batch_input)
-        y_pred_safety_loss, y_pred_deadlock_loss, _ = self.penn.predict(batch_input)
+            batch_input = np.array(batch_input)
+            y_pred_safety_loss, y_pred_deadlock_loss, _ = self.penn.predict(batch_input)
 
-        # Create GMM for safety loss predictions
-        gmms_safety = [self.penn.create_gmm(y_pred_safety_loss[i]) for i in range(len(self.gamma_pairs))]
-        
-        if self.plot_deadlock:
-            gmms_deadlock = [self.penn.create_gmm(y_pred_deadlock_loss[i]) for i in range(len(self.gamma_pairs))]
-            self.update_real_time_gmm(gmms_safety, gmms_deadlock)
-        else:
-            self.update_real_time_gmm(gmms_safety)
+            # Create GMM for safety loss predictions
+            gmms_safety = [self.penn.create_gmm(y_pred_safety_loss[i]) for i in range(len(self.gamma_pairs))]
+            
+            if self.plot_deadlock:
+                gmms_deadlock = [self.penn.create_gmm(y_pred_deadlock_loss[i]) for i in range(len(self.gamma_pairs))]
+                self.update_real_time_gmm(gmms_safety, gmms_deadlock)
+            else:
+                self.update_real_time_gmm(gmms_safety)
+        except:
+            pass
 
     def initialize_plots(self, plot_handler, env_handler):
         (ax_main, right_ax, self.gs), self.fig = plot_handler.plot_grid("Local Tracking Controller", with_right_subplot=True)
@@ -161,11 +166,13 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
 
     x_init = np.append(waypoints[0], velocity)
 
+    known_obs = np.array([[1 + distance, 3, 0.4], [7, 3.5, 0.4]])
+
     # Set plot with env
-    plot_handler = plotting.Plotting(width=12.5, height=6)
+    plot_handler = plotting.Plotting(width=12.5, height=6, known_obs=known_obs)
     env_handler = env.Env()
     
-    real_time_plotter = RealTimePlotter('penn_model_0902.pth', 'scaler_0902.save', plot_deadlock)
+    real_time_plotter = RealTimePlotter('penn_model_0903.pth', 'scaler_0903.save', plot_deadlock)
     ax_main, env_handler = real_time_plotter.initialize_plots(plot_handler, env_handler)
     
     # Set robot with controller 
@@ -190,8 +197,7 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
     tracking_controller.controller.cbf_param['alpha2'] = gamma2
     
     # Set known obstacles
-    tracking_controller.obs = np.array([[1 + distance, 3, 0.4], [7, 3.5, 0.4]])
-    tracking_controller.unknown_obs = np.array([[1 + distance, 3, 0.4], [7, 3.5, 0.4]])
+    tracking_controller.obs = known_obs
     tracking_controller.set_waypoints(waypoints)
 
     # Run simulation

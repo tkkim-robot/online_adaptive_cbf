@@ -28,14 +28,14 @@ class SafetyLossFunction:
         '''Compute the beta component based on the change in angle (delta_theta)'''
         return self.beta_1 * np.exp(-self.beta_2 * (np.cos(delta_theta) + 1))
 
-    def compute_safety_loss_function(self, robot_pos, obs_pos, cbf_constraint_value, delta_theta):
+    def compute_safety_loss_function(self, robot_pos, obs_pos, robot_rad, obs_rad, cbf_constraint_value, delta_theta):
         '''
         Compute the safety loss function value based on robot position, obstacle position,
         control barrier function constraint value, and change in angle
         '''
         alpha_k = self.compute_alpha_k(cbf_constraint_value)
         beta_k = self.compute_beta_k(delta_theta)
-        phi = alpha_k / (beta_k * np.linalg.norm(robot_pos - obs_pos) ** 2 + self.epsilon)
+        phi = alpha_k / (beta_k * (np.linalg.norm(robot_pos - obs_pos) - robot_rad - obs_rad)** 2 + self.epsilon)
         return phi
 
 
@@ -79,14 +79,16 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
                     robot_state[1, 0] = Y[m, n]
                     robot_state[2, 0] = theta
                     robot_state[3, 0] = 1
+                    robot_rad = tracking_controller.robot.robot_radius
                     obs_pos = nearest_obs[:2].flatten()
+                    obs_rad = nearest_obs[2]
                     delta_theta = np.arctan2(obs_pos[1] - robot_state[1, 0], obs_pos[0] - robot_state[0, 0]) - theta
                     h_k, d_h, dd_h = tracking_controller.robot.agent_barrier_dt(
                         robot_state, np.array([0, 0]), nearest_obs.flatten()
                     )
                     cbf_constraint_value = dd_h + (cbf_alpha1 + cbf_alpha2) * d_h + cbf_alpha1 * cbf_alpha2 * h_k
                     safety_metric.alpha_1 = alpha_1
-                    Z[m, n] = safety_metric.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
+                    Z[m, n] = safety_metric.compute_safety_loss_function(robot_pos, obs_pos, robot_rad, obs_rad, cbf_constraint_value, delta_theta)
 
             Z_obs = np.where((X - obs_x) ** 2 + (Y - obs_y) ** 2 <= obs_r ** 2, Z, np.nan)
 
@@ -166,12 +168,14 @@ def safety_loss_function_example():
         
         robot_state = tracking_controller.robot.X
         robot_pos = tracking_controller.robot.X[:2].flatten()
+        robot_rad = tracking_controller.robot.robot_radius
         obs_state = tracking_controller.unknown_obs[:2].flatten()
         obs_pos = tracking_controller.unknown_obs[:2].flatten()[:2]
+        obs_rad = tracking_controller.unknown_obs[2]
         delta_theta = np.arctan2(obs_pos[1] - robot_state[1, 0], obs_pos[0] - robot_state[0, 0]) - robot_state[2, 0]
         h_k, d_h, dd_h = tracking_controller.robot.agent_barrier_dt(robot_state, np.array([0, 0]), obs_state.flatten())
         cbf_constraint_value = dd_h + (0.05 + 0.05) * d_h + 0.05 * 0.05 * h_k        
-        safety_loss = safety_metric.compute_safety_loss_function(robot_pos, obs_pos, cbf_constraint_value, delta_theta)
+        safety_loss = safety_metric.compute_safety_loss_function(robot_pos, obs_pos, robot_rad, obs_rad, cbf_constraint_value, delta_theta)
         print(f"Safetyloss: {safety_loss}")
         
         if ret == -1:
