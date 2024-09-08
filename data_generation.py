@@ -7,13 +7,14 @@ import numpy as np
 import pandas as pd
 import tqdm
 from multiprocessing import Pool
+import matplotlib
 import matplotlib.pyplot as plt
 from cbf_tracking.utils import plotting, env
 from cbf_tracking.tracking import LocalTrackingController, InfeasibleError
 from safety_loss_function import SafetyLossFunction
 
 # Use a non-interactive backend
-# matplotlib.use('Agg')
+matplotlib.use('Agg')
 
 # Suppress print statements
 class SuppressPrints:
@@ -45,7 +46,7 @@ def get_safety_loss_from_controller(tracking_controller, safety_metric):
     
     return safety_loss
 
-def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.1, max_sim_time=25):
+def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_threshold=0.2, max_sim_time=25):
     try:
         dt = 0.05
 
@@ -139,7 +140,7 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
                 
         plt.ioff()
         plt.close()
-        return (distance, velocity, theta, gamma1, gamma2, False, safety_loss, deadlock_time, sim_time)
+        return (distance, velocity, theta, gamma1, gamma2, True, safety_loss, deadlock_time, sim_time)
 
     except InfeasibleError:
         plt.ioff()
@@ -198,7 +199,7 @@ if __name__ == "__main__":
     # single_agent_simulation(3, 0, 0.01, 0.1, 0.1)  
     # single_agent_simulation_temp(3, 1, 0.01, 0.1, 0.1, 3)  
 
-    samples_per_dimension = 9   # Number of samples per dimension
+    samples_per_dimension = 7   # Number of samples per dimension
     batch_size = 6**5           # Specify the batch size
     num_processes = 6           # Change based on the number of cores available
 
@@ -206,7 +207,7 @@ if __name__ == "__main__":
     total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size != 0 else 0)
 
     generate_data(samples_per_dimension, num_processes, batch_size)
-    concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint_0902.csv', total_batches)
+    concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint_0907.csv', total_batches)
 
     print("Data generation complete.")
 

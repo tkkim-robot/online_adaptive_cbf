@@ -18,7 +18,7 @@ class RealTimePlotter:
         self.penn = ProbabilisticEnsembleNN()
         self.penn.load_model(model_name)
         self.penn.load_scaler(scaler_name)
-        self.gamma_pairs = [(0.05, 0.05), (0.15, 0.15), (0.9, 0.9)]
+        self.gamma_pairs = [(0.05, 0.05), (0.1, 0.1), (0.2, 0.2)]
         self.fig = None
         self.gs = None
         self.ax_gmm_safety = None
@@ -30,9 +30,9 @@ class RealTimePlotter:
         robot_pos = tracking_controller.robot.X[:2, 0].flatten()
         robot_rad = tracking_controller.robot.robot_radius
         near_obs_pos = tracking_controller.nearest_obs[:2].flatten()
-        near_obs_rad = tracking_controller.nearest_obs[2]
+        near_obs_rad = tracking_controller.nearest_obs[2].flatten()
         
-        distance = np.linalg.norm(robot_pos - near_obs_pos) - robot_rad - near_obs_rad
+        distance = np.linalg.norm(robot_pos - near_obs_pos) - robot_rad - near_obs_rad[0]
         velocity = tracking_controller.robot.X[3, 0]
         theta = np.arctan2(near_obs_pos[1] - robot_pos[1], near_obs_pos[0] - robot_pos[0])
         theta = ((theta + np.pi) % (2 * np.pi)) - np.pi
@@ -43,7 +43,7 @@ class RealTimePlotter:
 
     def update_real_time_gmm(self, gmms_safety, gmms_deadlock=None):
         plt.ion()  
-        x = np.linspace(-0.5, 5.5, 500).reshape(-1, 1)
+        x = np.linspace(0, 1.2, 300).reshape(-1, 1)
         for gmm, line_set in zip(gmms_safety, self.lines_safety):
             logprob = gmm.score_samples(x)
             responsibilities = gmm.predict_proba(x)
@@ -84,7 +84,7 @@ class RealTimePlotter:
             
             self.ax_gmm_deadlock = [gmm_ax1_deadlock, gmm_ax2_deadlock, gmm_ax3_deadlock]
 
-        x = np.linspace(-0.5, 5.5, 500).reshape(-1, 1)
+        x = np.linspace(0, 1.2, 300).reshape(-1, 1)
         self.lines_safety = []
         self.lines_deadlock = []
 
@@ -92,12 +92,12 @@ class RealTimePlotter:
             main_line, = ax.plot(x, np.zeros_like(x), '-k', label='GMM')
             comp_lines = [ax.plot(x, np.zeros_like(x), '--', label=f'GMM Component {i+1}', linewidth=2)[0] for i in range(3)]
             self.lines_safety.append([main_line, comp_lines])
-            ax.set_xlim([-0.5, 5.5])
+            ax.set_xlim([0, 1.2])
             ax.set_ylim([0, 5])
             ax.set_title(f'Safety Loss - Gamma Pair: {gamma_pair}', fontsize=10)
             ax.tick_params(axis='both', which='major', labelsize=10)
 
-            ax.xaxis.set_major_locator(FixedLocator(np.arange(0, 6, 1)))
+            ax.xaxis.set_major_locator(FixedLocator(np.linspace(0, 1.2, 7)))
             ax.yaxis.set_major_locator(FixedLocator(np.linspace(0, 5, 5)))
             
         if self.plot_deadlock:
@@ -166,13 +166,13 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
 
     x_init = np.append(waypoints[0], velocity)
 
-    known_obs = np.array([[1 + distance, 3, 0.4], [7, 3.5, 0.4]])
+    known_obs = np.array([[1 + distance, 3, 0.2], [7, 3.5, 0.2]])
 
     # Set plot with env
     plot_handler = plotting.Plotting(width=12.5, height=6, known_obs=known_obs)
     env_handler = env.Env()
     
-    real_time_plotter = RealTimePlotter('penn_model_0903.pth', 'scaler_0903.save', plot_deadlock)
+    real_time_plotter = RealTimePlotter('penn_model_0907.pth', 'scaler_0907.save', plot_deadlock)
     ax_main, env_handler = real_time_plotter.initialize_plots(plot_handler, env_handler)
     
     # Set robot with controller 
@@ -220,4 +220,4 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
 
 
 if __name__ == "__main__":
-    single_agent_simulation(3.0, 0.5, 0.001, 0.1, 0.2, plot_deadlock=False)
+    single_agent_simulation(3.0, 0.5, 0.001, 0.1, 0.1, plot_deadlock=False)

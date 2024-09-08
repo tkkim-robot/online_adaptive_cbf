@@ -60,7 +60,7 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
     X, Y = np.meshgrid(x_range, y_range)
 
     # Update the detected obstacle
-    nearest_obs = tracking_controller.unknown_obs.flatten()
+    nearest_obs = tracking_controller.obs.flatten()
     obs_x, obs_y, obs_r = nearest_obs
 
     # Set CBF parameters
@@ -116,15 +116,16 @@ def safety_loss_function_example():
 
     # Define waypoints for the robot to follow
     waypoints = np.array([
-        [1, 3, 0.01],
-        [11, 3, 0]
+        [1, 3, 0.05],
+        [9, 3, 0]
     ], dtype=np.float64)
     waypoints = np.array(waypoints, dtype=np.float64)
+    x_init = np.append(waypoints[0], 0)
 
-    x_init = np.append(waypoints[0], 0.5)
+    known_obs = np.array([[4, 3, 0.2]])
 
     # Initialize environment and plotting handler
-    plot_handler = plotting.Plotting()
+    plot_handler = plotting.Plotting(width=10, height=6, known_obs=known_obs)
     ax, fig = plot_handler.plot_grid("Local Tracking Controller")
     env_handler = env.Env()
 
@@ -146,20 +147,19 @@ def safety_loss_function_example():
                                                 env=env_handler)
 
     # Set gamma values
-    tracking_controller.controller.cbf_param['alpha1'] = 0.05
-    tracking_controller.controller.cbf_param['alpha2'] = 0.05
+    tracking_controller.controller.cbf_param['alpha1'] = 0.1
+    tracking_controller.controller.cbf_param['alpha2'] = 0.1
 
     # Define obstacle
-    unknown_obs = np.array([[4, 3, 0.2]])
-    tracking_controller.set_unknown_obs(unknown_obs)
+    tracking_controller.obs = known_obs
     tracking_controller.set_waypoints(waypoints)
     
     # Setup safety loss function
     alpha_1 = 0.4
-    alpha_2 = 0.1
-    beta_1 = 7.0 # If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
-    beta_2 = 2.5 # If bigger, makes whole surface higher if delta_theta is smaller
-    epsilon = 0.07 # If smaller, makes the peak higher
+    alpha_2 = 0.1 # 0.1
+    beta_1 = 100.0 # 7.0 If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
+    beta_2 = 2.5 # 2.5 If bigger, makes whole surface higher if delta_theta is smaller
+    epsilon = 0.5 # 0.07 If smaller, makes the peak higher
     safety_metric = SafetyLossFunction(alpha_1, alpha_2, beta_1, beta_2, epsilon)
 
     for _ in range(int(20 / dt)):
@@ -169,9 +169,9 @@ def safety_loss_function_example():
         robot_state = tracking_controller.robot.X
         robot_pos = tracking_controller.robot.X[:2].flatten()
         robot_rad = tracking_controller.robot.robot_radius
-        obs_state = tracking_controller.unknown_obs[:2].flatten()
-        obs_pos = tracking_controller.unknown_obs[:2].flatten()[:2]
-        obs_rad = tracking_controller.unknown_obs[2]
+        obs_state = tracking_controller.obs[:2].flatten()
+        obs_pos = tracking_controller.obs[:2].flatten()[:2]
+        obs_rad = tracking_controller.obs[0][2]
         delta_theta = np.arctan2(obs_pos[1] - robot_state[1, 0], obs_pos[0] - robot_state[0, 0]) - robot_state[2, 0]
         h_k, d_h, dd_h = tracking_controller.robot.agent_barrier_dt(robot_state, np.array([0, 0]), obs_state.flatten())
         cbf_constraint_value = dd_h + (0.05 + 0.05) * d_h + 0.05 * 0.05 * h_k        
@@ -181,7 +181,6 @@ def safety_loss_function_example():
         if ret == -1:
             break
         
-
     # Plot safety loss function grid
     plot_safety_loss_function_grid(tracking_controller, safety_metric)
     
@@ -272,4 +271,4 @@ if __name__ == "__main__":
     safety_loss_function_example()
     
     # Example to simulate a scenario and check for deadlocks
-    # dead_lock_example()
+    dead_lock_example()
