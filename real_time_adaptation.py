@@ -44,8 +44,8 @@ class AdaptiveCBFParameterSelector:
         velocity = tracking_controller.robot.X[3, 0]
         theta = np.arctan2(near_obs[1] - robot_pos[1], near_obs[0] - robot_pos[0])
         theta = ((theta + np.pi) % (2 * np.pi)) - np.pi
-        gamma1 = tracking_controller.controller.cbf_param['alpha1']
-        gamma2 = tracking_controller.controller.cbf_param['alpha2']
+        gamma1 = tracking_controller.pos_controller.cbf_param['alpha1']
+        gamma2 = tracking_controller.pos_controller.cbf_param['alpha2']
         
         return [distance, velocity, theta, gamma1, gamma2], robot_pos, robot_radius, near_obs
         # return [distance, 7, 9, velocity, theta, gamma1, gamma2]
@@ -112,8 +112,8 @@ class AdaptiveCBFParameterSelector:
     def select_best_parameters(self, final_predictions, tracking_controller):
         # If no predictions were selected, gradually decrease the parameter
         if not final_predictions:
-            current_gamma1 = tracking_controller.controller.cbf_param['alpha1']
-            current_gamma2 = tracking_controller.controller.cbf_param['alpha2']
+            current_gamma1 = tracking_controller.pos_controller.cbf_param['alpha1']
+            current_gamma2 = tracking_controller.pos_controller.cbf_param['alpha2']
             gamma1 = max(self.lower_bound, current_gamma1 - 0.02)
             gamma2 = max(self.lower_bound, current_gamma2 - 0.02)
             return gamma1, gamma2
@@ -193,8 +193,8 @@ def single_agent_simulation_traj(distance, velocity, theta, gamma1, gamma2, know
         # adaptive_selector = AdaptiveCBFParameterSelector('edr_model_8datapoint_single.h5', 'scaler_8datapoint_single.save')
 
     # Set gamma values
-    tracking_controller.controller.cbf_param['alpha1'] = gamma1
-    tracking_controller.controller.cbf_param['alpha2'] = gamma2
+    tracking_controller.pos_controller.cbf_param['alpha1'] = gamma1
+    tracking_controller.pos_controller.cbf_param['alpha2'] = gamma2
     
     # Set known obstacles
     tracking_controller.obs = known_obs   
@@ -215,9 +215,9 @@ def single_agent_simulation_traj(distance, velocity, theta, gamma1, gamma2, know
         if adapt_cbf:
             best_gamma1, best_gamma2 = adaptive_selector.adaptive_parameter_selection(tracking_controller)
             if best_gamma1 is not None and best_gamma2 is not None:
-                tracking_controller.controller.cbf_param['alpha1'] = best_gamma1
-                tracking_controller.controller.cbf_param['alpha2'] = best_gamma2
-            gamma_history.append([tracking_controller.controller.cbf_param['alpha1'], tracking_controller.controller.cbf_param['alpha2']])
+                tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma1
+                tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma2
+            gamma_history.append([tracking_controller.pos_controller.cbf_param['alpha1'], tracking_controller.pos_controller.cbf_param['alpha2']])
     
     tracking_controller.export_video()
     plt.ioff()

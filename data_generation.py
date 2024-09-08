@@ -32,8 +32,8 @@ def get_safety_loss_from_controller(tracking_controller, safety_metric):
     def angle_normalize(x):
         return (((x + np.pi) % (2 * np.pi)) - np.pi)
     
-    gamma1 = tracking_controller.controller.cbf_param['alpha1']
-    gamma2 = tracking_controller.controller.cbf_param['alpha2']
+    gamma1 = tracking_controller.pos_controller.cbf_param['alpha1']
+    gamma2 = tracking_controller.pos_controller.cbf_param['alpha2']
     
     robot_state = tracking_controller.robot.X
     robot_rad = tracking_controller.robot.robot_radius
@@ -90,8 +90,8 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
         distance = distance - obstacles[0][2] - tracking_controller.robot.robot_radius
 
         # Set gamma values
-        tracking_controller.controller.cbf_param['alpha1'] = gamma1
-        tracking_controller.controller.cbf_param['alpha2'] = gamma2
+        tracking_controller.pos_controller.cbf_param['alpha1'] = gamma1
+        tracking_controller.pos_controller.cbf_param['alpha2'] = gamma2
         
 
         tracking_controller.obs = np.array(obstacles)

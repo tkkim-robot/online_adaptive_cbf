@@ -147,8 +147,8 @@ def safety_loss_function_example():
                                                 env=env_handler)
 
     # Set gamma values
-    tracking_controller.controller.cbf_param['alpha1'] = 0.1
-    tracking_controller.controller.cbf_param['alpha2'] = 0.1
+    tracking_controller.pos_controller.cbf_param['alpha1'] = 0.1
+    tracking_controller.pos_controller.cbf_param['alpha2'] = 0.1
 
     # Define obstacle
     tracking_controller.obs = known_obs
@@ -228,8 +228,8 @@ def dead_lock_example(deadlock_threshold=0.1, max_sim_time=15):
                                                     env=env_handler)
 
         # Set gamma values for control barrier function
-        tracking_controller.controller.cbf_param['alpha1'] = gamma1
-        tracking_controller.controller.cbf_param['alpha2'] = gamma2
+        tracking_controller.pos_controller.cbf_param['alpha1'] = gamma1
+        tracking_controller.pos_controller.cbf_param['alpha2'] = gamma2
         
         # Set unknown obstacles
         unknown_obs = np.array([[1 + distance, 3, 0.1]])

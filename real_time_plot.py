@@ -36,8 +36,8 @@ class RealTimePlotter:
         velocity = tracking_controller.robot.X[3, 0]
         theta = np.arctan2(near_obs_pos[1] - robot_pos[1], near_obs_pos[0] - robot_pos[0])
         theta = ((theta + np.pi) % (2 * np.pi)) - np.pi
-        gamma1 = tracking_controller.controller.cbf_param['alpha1']
-        gamma2 = tracking_controller.controller.cbf_param['alpha2']
+        gamma1 = tracking_controller.pos_controller.cbf_param['alpha1']
+        gamma2 = tracking_controller.pos_controller.cbf_param['alpha2']
         
         return [distance, velocity, theta, gamma1, gamma2]
 
@@ -193,8 +193,8 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
                                                 env=env_handler)
 
     # Set gamma values
-    tracking_controller.controller.cbf_param['alpha1'] = gamma1
-    tracking_controller.controller.cbf_param['alpha2'] = gamma2
+    tracking_controller.pos_controller.cbf_param['alpha1'] = gamma1
+    tracking_controller.pos_controller.cbf_param['alpha2'] = gamma2
     
     # Set known obstacles
     tracking_controller.obs = known_obs
