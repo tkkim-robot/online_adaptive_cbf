@@ -15,8 +15,8 @@ try:
     from dynamics.ensemble.ensemble_linear import EnsembleLinear
     from dynamics.divergence.utility import JensenRenyiDivergence
 except:
-    from probabilistic_ensemble_nn.dynamics.ensemble.ensemble_linear import EnsembleLinear
-    from probabilistic_ensemble_nn.dynamics.divergence.utility import JensenRenyiDivergence
+    from penn.dynamics.ensemble.ensemble_linear import EnsembleLinear
+    from penn.dynamics.divergence.utility import JensenRenyiDivergence
 
 
 class EnsembleStochasticLinear(torch.nn.Module):

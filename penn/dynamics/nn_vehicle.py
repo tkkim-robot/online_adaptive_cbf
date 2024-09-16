@@ -26,7 +26,7 @@ class ProbabilisticEnsembleNN(nn.Module):
             try:
                 from dynamics.nn_sto_ens import EnsembleStochasticLinear
             except:
-                from probabilistic_ensemble_nn.dynamics.nn_sto_ens import EnsembleStochasticLinear
+                from penn.dynamics.nn_sto_ens import EnsembleStochasticLinear
             self.model = EnsembleStochasticLinear(in_features=self.n_states,
                                                   out_features=self.n_output,
                                                   hidden_features=self.n_hidden,
