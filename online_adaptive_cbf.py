@@ -168,7 +168,8 @@ def single_agent_simulation_traj(velocity, waypoints, known_obs, controller_name
         'w_max': 0.5,
         'a_max': 0.5,
         'fov_angle': 70.0,
-        'cam_range': 3.0
+        'cam_range': 3.0,
+        'radius': 0.3
     }
     tracking_controller = LocalTrackingController(x_init, robot_spec,
                                                 control_type=controller,
@@ -177,8 +178,6 @@ def single_agent_simulation_traj(velocity, waypoints, known_obs, controller_name
                                                 save_animation=False,
                                                 ax=ax, fig=fig,
                                                 env=env_handler)
-
-    tracking_controller.robot.robot_radius = 0.3
 
     # Initialize AdaptiveCBFParameterSelector if adaptation is enabled
     if adapt_cbf:
