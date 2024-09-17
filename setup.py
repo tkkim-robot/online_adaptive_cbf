@@ -16,7 +16,7 @@ setup(
         'pandas',
         'tqdm',
         'plotly'
-        'pytorch'
+        'torch'
     ],
     include_package_data=True,
     zip_safe=False,
