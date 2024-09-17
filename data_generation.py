@@ -58,12 +58,7 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
         
         # Set known obstacles
         obstacles = [
-            [1 + distance, 2, 0.2],          # obs1
-            # [7, 3.5, 0.2],                 # obs2-1
-            # [6, 2.5, 0.2],                   # obs2-2
-            # [6, 1.5, 0.2],                   # obs2-2
-            # [6.5, 3.7, 0.2], [10, 2.9, 0.2], # obs3-1
-            # [6.5, 4, 0.2], [9, 3, 0.2],    # obs3-2
+            [1 + distance, 2, 0.2],        
         ]
         
         plot_handler = plotting.Plotting(width=10, height=4, known_obs = obstacles)
@@ -86,13 +81,14 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
                                                     ax=ax, fig=fig,
                                                     env=env_handler)
 
+        tracking_controller.robot.robot_radius = 0.3
+
         # Save distance with the actual value between the robot and the obstacle
         distance = distance - obstacles[0][2] - tracking_controller.robot.robot_radius
 
         # Set gamma values
         tracking_controller.pos_controller.cbf_param['alpha1'] = gamma1
         tracking_controller.pos_controller.cbf_param['alpha2'] = gamma2
-        
 
         tracking_controller.obs = np.array(obstacles)
         tracking_controller.set_waypoints(waypoints)
