@@ -168,7 +168,7 @@ def single_agent_simulation_traj(velocity, waypoints, known_obs, controller_name
         'w_max': 0.5,
         'a_max': 0.5,
         'fov_angle': 70.0,
-        'cam_range': 0.0
+        'cam_range': 3.0
     }
     tracking_controller = LocalTrackingController(x_init, robot_spec,
                                                 control_type=controller,
