@@ -181,7 +181,8 @@ def single_agent_simulation(max_sim_time=20):
         'w_max': 0.5,
         'a_max': 0.5,
         'fov_angle': 70.0,
-        'cam_range': 0.0
+        'cam_range': 3.0,
+        'radius': 0.3
     }
     control_type = 'mpc_cbf'
     tracking_controller = LocalTrackingController(x_init, robot_spec,

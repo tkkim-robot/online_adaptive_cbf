@@ -70,7 +70,8 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
             'w_max': 0.5,
             'a_max': 0.5,
             'fov_angle': 70.0,
-            'cam_range': 5.0
+            'cam_range': 3.0,
+            'radius': 0.3
         }
         control_type = 'mpc_cbf'
         tracking_controller = LocalTrackingController(x_init, robot_spec,
@@ -80,8 +81,6 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
                                                     save_animation=False,
                                                     ax=ax, fig=fig,
                                                     env=env_handler)
-
-        tracking_controller.robot.robot_radius = 0.3
 
         # Save distance with the actual value between the robot and the obstacle
         distance = distance - obstacles[0][2] - tracking_controller.robot.robot_radius
@@ -98,7 +97,7 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, deadlock_
         alpha_2 = 0.1
         beta_1 = 7.0 # If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
         beta_2 = 2.5 # If bigger, makes whole surface higher if delta_theta is smaller
-        epsilon = 0.07 # If smaller, makes the peak higher
+        epsilon = 0.07 # If smaller, makes the peak higher 
         safety_metric = SafetyLossFunction(alpha_1, alpha_2, beta_1, beta_2, epsilon)
 
         # Run simulation
