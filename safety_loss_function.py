@@ -126,7 +126,7 @@ def safety_loss_function_example():
 
     # Initialize environment and plotting handler
     plot_handler = plotting.Plotting(width=10, height=6, known_obs=known_obs)
-    ax, fig = plot_handler.plot_grid("Local Tracking Controller")
+    ax, fig = plot_handler.plot_grid("Safety Loss Function Example")
     env_handler = env.Env()
 
     # Initialize tracking controller with DynamicUnicycle2D model
@@ -135,7 +135,7 @@ def safety_loss_function_example():
         'w_max': 0.5,
         'a_max': 0.5,
         'fov_angle': 70.0,
-        'cam_range': 5.0
+        'cam_range': 0.0
     }
     control_type = 'mpc_cbf'
     tracking_controller = LocalTrackingController(x_init, robot_spec,
@@ -156,10 +156,10 @@ def safety_loss_function_example():
     
     # Setup safety loss function
     alpha_1 = 0.4
-    alpha_2 = 0.1 # 0.1
-    beta_1 = 100.0 # 7.0 If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
-    beta_2 = 2.5 # 2.5 If bigger, makes whole surface higher if delta_theta is smaller
-    epsilon = 0.5 # 0.07 If smaller, makes the peak higher
+    alpha_2 = 0.1 
+    beta_1 = 100.0 # If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
+    beta_2 = 2.5 # If bigger, makes whole surface higher if delta_theta is smaller
+    epsilon = 0.5 # If smaller, makes the peak higher
     safety_metric = SafetyLossFunction(alpha_1, alpha_2, beta_1, beta_2, epsilon)
 
     for _ in range(int(20 / dt)):
@@ -184,30 +184,26 @@ def safety_loss_function_example():
     # Plot safety loss function grid
     plot_safety_loss_function_grid(tracking_controller, safety_metric)
     
-def dead_lock_example(deadlock_threshold=0.1, max_sim_time=15):
+def dead_lock_example(deadlock_threshold=0.2, max_sim_time=15):
     '''
     Example function to simulate a scenario and check for deadlocks
     '''
-    distance = 0.5
-    theta = 0.001
-    gamma1 = 0.1
-    gamma2 = 0.1
-    
     try:
         dt = 0.05
 
         # Define waypoints and unknown obstacles based on sampled parameters
         waypoints = [
-                [1, 3, theta+0.01],
-                [11, 3, 0]
+                [0.25, 1.5, 0.01],
+                [5.75, 1.5, 0]
         ]
         waypoints = np.array(waypoints, dtype=np.float64)
-
         x_init = waypoints[0]
 
+        known_obs = np.array([[0.75, 1.5, 0.1]])
+
         # Initialize environment and plotting handler
-        plot_handler = plotting.Plotting()
-        ax, fig = plot_handler.plot_grid("Local Tracking Controller")
+        plot_handler = plotting.Plotting(width=6, height=3, known_obs=known_obs)
+        ax, fig = plot_handler.plot_grid("Dead Lock Example")
         env_handler = env.Env()
 
         # Initialize tracking controller with DynamicUnicycle2D model
@@ -216,7 +212,7 @@ def dead_lock_example(deadlock_threshold=0.1, max_sim_time=15):
             'w_max': 0.5,
             'a_max': 0.5,
             'fov_angle': 70.0,
-            'cam_range': 3.0
+            'cam_range': 0.0
         }
         control_type = 'mpc_cbf'
         tracking_controller = LocalTrackingController(x_init, robot_spec,
@@ -228,12 +224,11 @@ def dead_lock_example(deadlock_threshold=0.1, max_sim_time=15):
                                                     env=env_handler)
 
         # Set gamma values for control barrier function
-        tracking_controller.pos_controller.cbf_param['alpha1'] = gamma1
-        tracking_controller.pos_controller.cbf_param['alpha2'] = gamma2
+        tracking_controller.pos_controller.cbf_param['alpha1'] = 0.1
+        tracking_controller.pos_controller.cbf_param['alpha2'] = 0.1
         
-        # Set unknown obstacles
-        unknown_obs = np.array([[1 + distance, 3, 0.1]])
-        tracking_controller.set_unknown_obs(unknown_obs)
+        # Define obstacles
+        tracking_controller.obs = known_obs
         tracking_controller.set_waypoints(waypoints)
 
         # Run simulation to check for deadlocks

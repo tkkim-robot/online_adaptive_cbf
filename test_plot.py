@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FixedLocator
 from cbf_tracking.utils import plotting, env
 from cbf_tracking.tracking import LocalTrackingController
-from probabilistic_ensemble_nn.dynamics.nn_vehicle import ProbabilisticEnsembleNN
+from penn.dynamics.nn_vehicle import ProbabilisticEnsembleNN
 
 class RealTimePlotter:
     def __init__(self, model_name, scaler_name, plot_deadlock=False):
@@ -18,7 +18,7 @@ class RealTimePlotter:
         self.penn = ProbabilisticEnsembleNN()
         self.penn.load_model(model_name)
         self.penn.load_scaler(scaler_name)
-        self.gamma_pairs = [(0.05, 0.05), (0.1, 0.1), (0.2, 0.2)]
+        self.gamma_pairs = [(0.03, 0.03), (0.1, 0.1), (0.18, 0.18)]
         self.fig = None
         self.gs = None
         self.ax_gmm_safety = None
@@ -28,13 +28,14 @@ class RealTimePlotter:
 
     def get_rel_state_wt_obs(self, tracking_controller):
         robot_pos = tracking_controller.robot.X[:2, 0].flatten()
+        robot_theta = tracking_controller.robot.X[2,0]
         robot_rad = tracking_controller.robot.robot_radius
         near_obs_pos = tracking_controller.nearest_obs[:2].flatten()
         near_obs_rad = tracking_controller.nearest_obs[2].flatten()
         
         distance = np.linalg.norm(robot_pos - near_obs_pos) - robot_rad - near_obs_rad[0]
         velocity = tracking_controller.robot.X[3, 0]
-        theta = np.arctan2(near_obs_pos[1] - robot_pos[1], near_obs_pos[0] - robot_pos[0])
+        theta = np.arctan2(near_obs_pos[1] - robot_pos[1], near_obs_pos[0] - robot_pos[0]) - robot_theta
         theta = ((theta + np.pi) % (2 * np.pi)) - np.pi
         gamma1 = tracking_controller.pos_controller.cbf_param['alpha1']
         gamma2 = tracking_controller.pos_controller.cbf_param['alpha2']
@@ -156,23 +157,22 @@ class RealTimePlotter:
         return ax_main, env_handler
 
 
-def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_time=20, plot_deadlock=False):
+def single_agent_simulation(max_sim_time=20):
     dt = 0.05
 
     waypoints = np.array([
-        [1, 3, theta],
-        [11, 3, 0]
+        [1, 1, np.pi/2],
+        [2.5, 6, 0]
     ], dtype=np.float64)
+    x_init = np.append(waypoints[0], 0.5)
 
-    x_init = np.append(waypoints[0], velocity)
-
-    known_obs = np.array([[1 + distance, 3, 0.2], [7, 3.5, 0.2]])
+    known_obs = np.array([[1.2, 3.5, 0.2]])
 
     # Set plot with env
-    plot_handler = plotting.Plotting(width=12.5, height=6, known_obs=known_obs)
+    plot_handler = plotting.Plotting(width=3, height=6.5, known_obs=known_obs)
     env_handler = env.Env()
     
-    real_time_plotter = RealTimePlotter('penn_model_0907.pth', 'scaler_0907.save', plot_deadlock)
+    real_time_plotter = RealTimePlotter('checkpoint/penn_model_0907.pth', 'checkpoint/scaler_0907.save')
     ax_main, env_handler = real_time_plotter.initialize_plots(plot_handler, env_handler)
     
     # Set robot with controller 
@@ -181,20 +181,20 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
         'w_max': 0.5,
         'a_max': 0.5,
         'fov_angle': 70.0,
-        'cam_range': 7.0
+        'cam_range': 0.0
     }
     control_type = 'mpc_cbf'
     tracking_controller = LocalTrackingController(x_init, robot_spec,
                                                 control_type=control_type,
                                                 dt=dt,
                                                 show_animation=True,
-                                                save_animation=True,
+                                                save_animation=False,
                                                 ax=ax_main, fig=real_time_plotter.fig,
                                                 env=env_handler)
 
     # Set gamma values
-    tracking_controller.pos_controller.cbf_param['alpha1'] = gamma1
-    tracking_controller.pos_controller.cbf_param['alpha2'] = gamma2
+    tracking_controller.pos_controller.cbf_param['alpha1'] = 0.1
+    tracking_controller.pos_controller.cbf_param['alpha2'] = 0.1
     
     # Set known obstacles
     tracking_controller.obs = known_obs
@@ -220,4 +220,4 @@ def single_agent_simulation(distance, velocity, theta, gamma1, gamma2, max_sim_t
 
 
 if __name__ == "__main__":
-    single_agent_simulation(3.0, 0.5, 0.001, 0.1, 0.1, plot_deadlock=False)
+    single_agent_simulation()
