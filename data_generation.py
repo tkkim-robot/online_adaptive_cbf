@@ -112,6 +112,7 @@ def single_agent_simulation(distance, velocity, theta, gamma0, gamma1, deadlock_
         deadlock_time = 0.0
         sim_time = 0.0
         safety_loss = 0.0
+        max_safety_loss = 0.5
 
         for _ in range(int(max_sim_time / dt)):
             try:
@@ -133,11 +134,11 @@ def single_agent_simulation(distance, velocity, theta, gamma0, gamma1, deadlock_
                 if safety_loss_new > safety_loss:
                     safety_loss = safety_loss_new[0]
 
-            # Handle collision by catching the InfeasibleError
+            # Handle InfeasibleError and Collision
             except InfeasibleError:
                 plt.ioff()
                 plt.close()
-                return (distance, velocity, theta, gamma0, gamma1, False, safety_loss, deadlock_time, sim_time)
+                return (distance, velocity, theta, gamma0, gamma1, False, max_safety_loss, deadlock_time, sim_time)
                 
         plt.ioff()
         plt.close()
@@ -146,7 +147,7 @@ def single_agent_simulation(distance, velocity, theta, gamma0, gamma1, deadlock_
     except InfeasibleError:
         plt.ioff()
         plt.close()
-        return (distance, velocity, theta, gamma0, gamma1, False, safety_loss, deadlock_time, sim_time)
+        return (distance, velocity, theta, gamma0, gamma1, False, max_safety_loss, deadlock_time, sim_time)
 
 def worker(params):
     '''
