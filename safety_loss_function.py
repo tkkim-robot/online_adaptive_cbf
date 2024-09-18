@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 
 
 class SafetyLossFunction:
-    def __init__(self, lambda_1=0.4, lambda_2=0.1, beta_1=300.0, beta_2=2.5):
+    def __init__(self, lambda_1=0.4, lambda_2=0.1, beta_1=100.0, beta_2=2.5):
         '''Initialize parameters for the safety loss function'''
         self.lambda_1 = lambda_1
         self.lambda_2 = lambda_2
@@ -156,7 +156,7 @@ def safety_loss_function_example():
     # Setup safety loss function
     lambda_1 = 0.4
     lambda_2 = 0.1 
-    beta_1 = 300.0
+    beta_1 = 100.0
     beta_2 = 2.5 
     safety_metric = SafetyLossFunction(lambda_1, lambda_2, beta_1, beta_2)
 

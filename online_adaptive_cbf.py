@@ -98,7 +98,7 @@ class AdaptiveCBFParameterSelector:
         Calculate the boundary where that the class K functions are locally valid
         '''
         lambda_1 = 0.4  # Same value used from the data generation step
-        beta_1 = 300.0  # Same value used from the data generation step
+        beta_1 = 100.0  # Same value used from the data generation step
         d_min = self.d_min
         cvar_boundary = lambda_1 / (beta_1 * d_min**2 + 1)
         return cvar_boundary
