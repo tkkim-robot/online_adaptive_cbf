@@ -1,30 +1,29 @@
 import os
 import sys
 project_root = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(project_root, 'cbf_tracking'))
+sys.path.append(os.path.join(project_root, 'safe_control'))
 
 import numpy as np
 import matplotlib.pyplot as plt
-from cbf_tracking.utils import plotting, env
-from cbf_tracking.tracking import LocalTrackingController, InfeasibleError
+from safe_control.utils import plotting, env
+from safe_control.tracking import LocalTrackingController, InfeasibleError
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 
 class SafetyLossFunction:
-    def __init__(self, alpha_1=0.2, alpha_2=0.1, beta_1=7.0, beta_2=2.5, epsilon=0.07):
+    def __init__(self, lambda_1=0.4, lambda_2=0.1, beta_1=300.0, beta_2=2.5):
         '''Initialize parameters for the safety loss function'''
-        self.alpha_1 = alpha_1
-        self.alpha_2 = alpha_2
+        self.lambda_1 = lambda_1
+        self.lambda_2 = lambda_2
         self.beta_1 = beta_1
         self.beta_2 = beta_2
-        self.epsilon = epsilon
 
-    def compute_alpha_k(self, zeta_k):
-        '''Compute the alpha component based on the control barrier function constraint value (zeta_k)'''
-        return self.alpha_1 * np.exp(-self.alpha_2 * zeta_k)
+    def compute_lambda_j(self, psi_j):
+        '''Compute the alpha component based on the control barrier function constraint value (psi_j)'''
+        return self.lambda_1 * np.exp(-self.lambda_2 * psi_j)
 
-    def compute_beta_k(self, delta_theta):
+    def compute_beta_j(self, delta_theta):
         '''Compute the beta component based on the change in angle (delta_theta)'''
         return self.beta_1 * np.exp(-self.beta_2 * (np.cos(delta_theta) + 1))
 
@@ -33,25 +32,24 @@ class SafetyLossFunction:
         Compute the safety loss function value based on robot position, obstacle position,
         control barrier function constraint value, and change in angle
         '''
-        alpha_k = self.compute_alpha_k(cbf_constraint_value)
-        beta_k = self.compute_beta_k(delta_theta)
-        phi = alpha_k / (beta_k * (np.linalg.norm(robot_pos - obs_pos) - robot_rad - obs_rad)** 2 + self.epsilon)
-        return phi
-
+        lambda_j = self.compute_lambda_j(cbf_constraint_value)
+        beta_j = self.compute_beta_j(delta_theta)
+        Phi = lambda_j / (beta_j * (np.linalg.norm(robot_pos - obs_pos) - robot_rad - obs_rad)** 2 + 1)
+        return Phi
 
 def plot_safety_loss_function_grid(tracking_controller, safety_metric):
     '''
-    Plot the safety loss function grid for different alpha_1 and delta_theta values
+    Plot the safety loss function grid for different lambda_1 and delta_theta values
     We assume a zero control input in this plot
     '''
-    alpha_1_values = [0.6, 0.4, 0.2]
-    theta_values = [-0.1, -1.5, -2.9]
+    lambda_1_values = [0.6, 0.4, 0.2]
+    delta_theta_values = [-0.1, -1.5, -2.9]
     
-    # Create subplots for each combination of alpha_1 and delta_theta
+    # Create subplots for each combination of lambda_1 and delta_theta
     fig = make_subplots(rows=3, cols=3, specs=[[{'type': 'surface'}]*3]*3, 
-                        subplot_titles=[f'alpha_1 = {alpha_1}, theta = {theta}' 
-                                        for alpha_1 in alpha_1_values for theta in theta_values],
-                        horizontal_spacing=0.0,  # Reduce this value to decrease horizontal gap
+                        subplot_titles=[f'lambda_1 = {lambda_1}, delta_theta = {delta_theta}' 
+                                        for lambda_1 in lambda_1_values for delta_theta in delta_theta_values],
+                        horizontal_spacing=0.0,   # Reduce this value to decrease horizontal gap
                         vertical_spacing=0.05     # Reduce this value to decrease vertical gap
                         )
 
@@ -64,12 +62,12 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
     obs_x, obs_y, obs_r = nearest_obs
 
     # Set CBF parameters
-    cbf_alpha1 = 0.15
-    cbf_alpha2 = 0.15
+    cbf_gamma0 = 0.15
+    cbf_gamma1 = 0.15
 
     # Calculate and plot safety loss function for each grid point
-    for i, alpha_1 in enumerate(alpha_1_values):
-        for j, theta in enumerate(theta_values):
+    for i, lambda_1 in enumerate(lambda_1_values):
+        for j, delta_theta in enumerate(delta_theta_values):
             Z = np.zeros_like(X)
             for m in range(X.shape[0]):
                 for n in range(X.shape[1]):
@@ -77,17 +75,17 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
                     robot_state = np.zeros_like(tracking_controller.robot.X)
                     robot_state[0, 0] = X[m, n]
                     robot_state[1, 0] = Y[m, n]
-                    robot_state[2, 0] = theta
+                    robot_state[2, 0] = delta_theta
                     robot_state[3, 0] = 1
                     robot_rad = tracking_controller.robot.robot_radius
                     obs_pos = nearest_obs[:2].flatten()
                     obs_rad = nearest_obs[2]
-                    delta_theta = np.arctan2(obs_pos[1] - robot_state[1, 0], obs_pos[0] - robot_state[0, 0]) - theta
+                    delta_theta = np.arctan2(obs_pos[1] - robot_state[1, 0], obs_pos[0] - robot_state[0, 0]) - delta_theta
                     h_k, d_h, dd_h = tracking_controller.robot.agent_barrier_dt(
                         robot_state, np.array([0, 0]), nearest_obs.flatten()
                     )
-                    cbf_constraint_value = dd_h + (cbf_alpha1 + cbf_alpha2) * d_h + cbf_alpha1 * cbf_alpha2 * h_k
-                    safety_metric.alpha_1 = alpha_1
+                    cbf_constraint_value = dd_h + (cbf_gamma0 + cbf_gamma1) * d_h + cbf_gamma0 * cbf_gamma1 * h_k
+                    safety_metric.lambda_1 = lambda_1
                     Z[m, n] = safety_metric.compute_safety_loss_function(robot_pos, obs_pos, robot_rad, obs_rad, cbf_constraint_value, delta_theta)
 
             Z_obs = np.where((X - obs_x) ** 2 + (Y - obs_y) ** 2 <= obs_r ** 2, Z, np.nan)
@@ -98,7 +96,7 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
     zoom = 1.7
     # Update layout to zoom out the plots
     camera = dict(
-        eye=dict(x=zoom, y=zoom, z=zoom)  # Adjust these values to control the zoom level
+        eye=dict(x=zoom, y=zoom, z=zoom)
     )
     
     for i in range(1, 4):
@@ -110,7 +108,7 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
 
 def safety_loss_function_example():
     '''
-    Example function to visualize the safety loss function grid of alpha_1 and delta_theta
+    Example function to visualize the safety loss function grid of lambda_1 and delta_theta
     '''
     dt = 0.05
 
@@ -156,12 +154,11 @@ def safety_loss_function_example():
     tracking_controller.set_waypoints(waypoints)
     
     # Setup safety loss function
-    alpha_1 = 0.4
-    alpha_2 = 0.1 
-    beta_1 = 100.0 # If bigger, make the surface sharper and makes the peak smaller if delta_theta is bigger
-    beta_2 = 2.5 # If bigger, makes whole surface higher if delta_theta is smaller
-    epsilon = 0.5 # If smaller, makes the peak higher
-    safety_metric = SafetyLossFunction(alpha_1, alpha_2, beta_1, beta_2, epsilon)
+    lambda_1 = 0.4
+    lambda_2 = 0.1 
+    beta_1 = 300.0
+    beta_2 = 2.5 
+    safety_metric = SafetyLossFunction(lambda_1, lambda_2, beta_1, beta_2)
 
     for _ in range(int(20 / dt)):
         ret = tracking_controller.control_step()
@@ -264,7 +261,7 @@ def dead_lock_example(deadlock_threshold=0.2, max_sim_time=15):
 
 
 if __name__ == "__main__":
-    # Example to visualize the safety loss function grid of alpha_1 and delta_theta
+    # Example to visualize the safety loss function grid of lambda_1 and delta_theta
     safety_loss_function_example()
     
     # Example to simulate a scenario and check for deadlocks
