@@ -112,7 +112,7 @@ def single_agent_simulation(distance, velocity, theta, gamma0, gamma1, deadlock_
         deadlock_time = 0.0
         sim_time = 0.0
         safety_loss = 0.0
-        max_safety_loss = 1.0 # tuned to be twice amount of the maximum safety loss without collision
+        max_safety_loss = 1.0 # Maximum safety loss including penalty for collisions and infeasible errors
 
         for _ in range(int(max_sim_time / dt)):
             try:

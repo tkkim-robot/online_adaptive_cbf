@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController
-from penn.dynamics.nn_vehicle import ProbabilisticEnsembleNN
+from nn_model.penn.nn_iccbf_predict import ProbabilisticEnsembleNN
 from DistributionallyRobustCVaR.distributionally_robust_cvar import DistributionallyRobustCVaR
 from sklearn.preprocessing import MinMaxScaler
 
@@ -216,7 +216,7 @@ def single_agent_simulation(velocity, waypoints, known_obs, controller_name, max
 
     # Initialize AdaptiveCBFParameterSelector if adaptation is enabled
     if adapt_cbf:
-        adaptive_selector = AdaptiveCBFParameterSelector('checkpoint/penn_model_0907.pth', 'checkpoint/scaler_0907.save')
+        adaptive_selector = AdaptiveCBFParameterSelector('nn_model/checkpoint/penn_model_0907.pth', 'nn_model/checkpoint/scaler_0907.save')
 
     # Set initial gamma values for the CBF
     tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
