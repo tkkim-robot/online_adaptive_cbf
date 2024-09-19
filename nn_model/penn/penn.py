@@ -4,7 +4,6 @@
         2. Truely parallel ensemble
         3. API for encoding historical state-action pairs
 """
-from ast import JoinedStr
 import torch
 import torch.nn as nn
 import numpy as np
@@ -12,12 +11,11 @@ import torch.distributions as D
 from torch.distributions.normal import Normal
 
 try:
-    from dynamics.ensemble.ensemble_linear import EnsembleLinear
-    from dynamics.divergence.utility import JensenRenyiDivergence
+    from penn.ensemble.ensemble_linear import EnsembleLinear
+    from penn.divergence.utility import JensenRenyiDivergence
 except:
-    from penn.dynamics.ensemble.ensemble_linear import EnsembleLinear
-    from penn.dynamics.divergence.utility import JensenRenyiDivergence
-
+    from nn_model.penn.ensemble.ensemble_linear import EnsembleLinear
+    from nn_model.penn.divergence.utility import JensenRenyiDivergence
 
 class EnsembleStochasticLinear(torch.nn.Module):
     def __init__(self, in_features, out_features, hidden_features, ensemble_size=3, activation='relu', explore_var='legacy', residual=True, dt=0.1):
@@ -49,8 +47,6 @@ class EnsembleStochasticLinear(torch.nn.Module):
         self.log_std_min = -20
         self.log_std_max = 1  # 2
 
-        self.mix = D.Categorical(torch.ones(self.ensemble_size, self.n_output))
-
     def forward(self, x):
         prev_x = x.clone().detach()  # save previous state (history)
         x = self.act(self.lin1(x))
@@ -63,8 +59,13 @@ class EnsembleStochasticLinear(torch.nn.Module):
         log_std = x[:, :, self.n_output:]
         log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
 
-        # use gaussian mixture model to sample !!!!
-        # shape[1] indicates batch size
+        # List to store mean and log_std of each ensemble
+        ensemble_outputs = []
+        
+        # Loop through each ensemble to collect mu and log_std
+        for i in range(self.ensemble_size):
+            yhat = (mu[i], log_std[i])
+            ensemble_outputs.append(yhat)
 
         if self.explore_var == 'jrd':
             std = torch.exp(log_std)
@@ -72,17 +73,7 @@ class EnsembleStochasticLinear(torch.nn.Module):
                 states_mean=mu, states_var=std.square()).compute_measure()
             dis = jrd_div.abs().unsqueeze(1)
 
-        yhat1 = (mu[0], log_std[0])
-        yhat2 = (mu[1], log_std[1])
-        yhat3 = (mu[2], log_std[2])
-
-        return yhat1, yhat2, yhat3, dis
-
-        # rand_idx = np.random.randint(self.ensemble_size, size=x.shape[1])
-        # batch_idx = np.arange(x.shape[1])
-        # yhat = mu[rand_idx, batch_idx], log_std[rand_idx, batch_idx]
-
-        # return yhat, dis
+        return (*ensemble_outputs, dis)
 
     def single_forward(self, x, index):
         prev_x = x.clone().detach()  # save previous state
