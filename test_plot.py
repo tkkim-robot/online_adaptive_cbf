@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import FixedLocator
 from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController
-from penn.dynamics.nn_vehicle import ProbabilisticEnsembleNN
+from nn_model.penn.nn_iccbf_predict import ProbabilisticEnsembleNN
 
 class RealTimePlotter:
     def __init__(self, model_name, scaler_name, plot_deadlock=False):
@@ -201,7 +201,7 @@ def test_plot_example(max_sim_time=20):
     env_handler = env.Env()
     
     # Initialize the real-time plotter and tracking controller
-    real_time_plotter = RealTimePlotter('checkpoint/penn_model_0907.pth', 'checkpoint/scaler_0907.save')
+    real_time_plotter = RealTimePlotter('nn_model/checkpoint/penn_model_0907.pth', 'nn_model/checkpoint/scaler_0907.save')
     ax_main, env_handler = real_time_plotter.initialize_plots(plot_handler, env_handler)
     
     # Set up the robot's specifications

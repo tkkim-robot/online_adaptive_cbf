@@ -1,5 +1,3 @@
-# Infinite loop Truckmaker
-from distutils.command.build_scripts import first_line_re
 import time
 import os
 import numpy as np
@@ -9,18 +7,19 @@ from module import module
 import random
 import math
 import matplotlib.pyplot as plt
+import joblib
+from sklearn.preprocessing import StandardScaler
 
 from torch.utils.data import DataLoader
-from dynamics.nn_vehicle import ProbabilisticEnsembleNN
+from penn.nn_iccbf_predict import ProbabilisticEnsembleNN
 
-# ACTIVATION = 'softplus'
 ACTIVATION = 'relu'
 
 # Name or model and saving path
-MODELNAME = 'data_generation_results_8datapoint_obs123_0819'
-MODELNAME_SAVE = 'penn_model_0902'
-data_file = 'data/' + MODELNAME + '.csv'
-scaler_path = 'checkpoint/scaler_0902.save'
+DATANAME = 'data_generation_results_5datapoint'
+MODELNAME_SAVE = 'penn_model_1111'
+data_file = 'data/' + DATANAME + '.csv'
+scaler_path = 'checkpoint/scaler_1111.save'
 model_path = 'checkpoint/' + MODELNAME_SAVE + '.pth'
 
 # Neural Network Paramters
@@ -32,7 +31,46 @@ n_ensemble = 3
 
 LR = 0.0001
 BATCHSIZE = 32
-EPOCH = 30
+EPOCH = 1500
+
+
+def load_and_preprocess_data(data_file, scaler_path=None, noise_percentage=0.0):
+    # Load data
+    dataset = pd.read_csv(data_file)
+
+    # Define input features and outputs
+    X = dataset[['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2']].values
+    y = dataset[['Safety Loss', 'Deadlock Time']].values 
+
+    # Apply noise to Distance, Velocity, and Theta
+    noise = np.random.randn(*X[:, :3].shape) * noise_percentage / 100
+    X[:, :3] += X[:, :3] * noise
+
+    # Transform Theta into sine and cosine components
+    Theta = X[:, 2]
+    X_transformed = np.column_stack((X[:, :2], np.sin(Theta), np.cos(Theta), X[:, 3:]))
+
+    # Initialize the scaler
+    scaler = StandardScaler()
+    
+    # Normalize the inputs
+    if scaler_path and os.path.exists(scaler_path):
+        scaler = joblib.load(scaler_path)  # Load existing scaler
+    else:
+        scaler.fit(X_transformed)  # Fit new scaler
+
+    X_scaled = scaler.transform(X_transformed)
+
+    # Save the scaler for later use
+    if scaler_path:
+        joblib.dump(scaler, scaler_path)
+
+    # Splitting data into training and testing sets
+    train_size = int(0.7 * len(X_scaled))
+    train_dataX, test_dataX = X_scaled[:train_size], X_scaled[train_size:]
+    train_dataY, test_dataY = y[:train_size], y[train_size:]
+
+    return train_dataX, train_dataY, test_dataX, test_dataY, scaler
 
 def plot_gmm(gmm):
     x = np.linspace(gmm.means_.min() - 3, gmm.means_.max() +
@@ -62,7 +100,7 @@ if __name__ == '__main__':
     np.random.seed(seed)
     random.seed(seed)
 
-    # Initialize the vehicle model
+    # Initialize the model
     penn = ProbabilisticEnsembleNN(n_states, n_output, n_hidden, n_ensemble, device, lr=LR)
 
     if Test:
@@ -70,7 +108,7 @@ if __name__ == '__main__':
         penn.load_model(model_path)
         
         # Example input array [distance, velocity, theta, gamma1, gamma2
-        input_data = [0.55, 0.01, 0.001, 0.005, 0.005]
+        input_data = [2.55, 0.01, 0.001, 0.005, 0.005]
         y_pred_safety_loss, y_pred_deadlock_time, div = penn.predict(input_data)
         print("Predicted Safety Loss:", y_pred_safety_loss)
         print("Predicted Deadlock Time:", y_pred_deadlock_time)
@@ -81,22 +119,23 @@ if __name__ == '__main__':
         
     else:
         # Load and preprocess data
-        train_dataX, train_dataY, test_dataX, test_dataY = penn.load_and_preprocess_data(data_file, scaler_path, noise_percentage=3.0)
+        train_dataX, train_dataY, test_dataX, test_dataY, scaler = load_and_preprocess_data(data_file, scaler_path, noise_percentage=3.0)
 
+        # Assign the scaler to the model
+        penn.scaler = scaler
+        
         # Create datasets and dataloaders
         train_dataset = module.CustomDataset(train_dataX, train_dataY)
         test_dataset = module.CustomDataset(test_dataX, test_dataY)
         train_loader = DataLoader(train_dataset, batch_size=BATCHSIZE, shuffle=True, num_workers=1, pin_memory=True)
         test_loader = DataLoader(test_dataset, batch_size=BATCHSIZE, shuffle=False)
 
-        
         start_epoch = 0
         best_test_rmse = 1000000
         start_time = time.time()
         for epoch in range(start_epoch, start_epoch + EPOCH):
             train_loss = penn.train(train_loader, epoch)
-            test_loss, bool_best, test_rmse = penn.test(
-                test_loader, epoch, verbose=False)
+            test_loss, bool_best, test_rmse = penn.test(test_loader, epoch)
             if test_rmse < best_test_rmse:
                 best_test_rmse = test_rmse
                 print('Saving... \n')
