@@ -13,7 +13,7 @@ from nn_model.penn.nn_iccbf_predict import ProbabilisticEnsembleNN
 from DistributionallyRobustCVaR.distributionally_robust_cvar import DistributionallyRobustCVaR
 from sklearn.preprocessing import MinMaxScaler
 
-class AdaptiveCBFParameterSelector:
+class OnlineCBFAdapter:
     def __init__(self, model_name, scaler_name, d_min=0.07, step_size=0.02, epistemic_threshold=0.2):
         '''
         Initialize the adaptive CBF parameter selector
@@ -141,7 +141,7 @@ class AdaptiveCBFParameterSelector:
             return best_prediction[0], best_prediction[1]
         return best_predictions[0][0], best_predictions[0][1]
 
-    def adaptive_parameter_selection(self, tracking_controller):
+    def cbf_param_adaptation(self, tracking_controller):
         '''
         Perform adaptive CBF parameter selection based on the prediction from the PENN model 
         which is both confident and satisfies the local validity condition
@@ -214,9 +214,9 @@ def single_agent_simulation(velocity, waypoints, known_obs, controller_name, max
                                                 ax=ax, fig=fig,
                                                 env=env_handler)
 
-    # Initialize AdaptiveCBFParameterSelector if adaptation is enabled
+    # Initialize OnlineCBFAdapter if adaptation is enabled
     if adapt_cbf:
-        adaptive_selector = AdaptiveCBFParameterSelector('nn_model/checkpoint/penn_model_0907.pth', 'nn_model/checkpoint/scaler_0907.save')
+        online_cbf_adapter = OnlineCBFAdapter('nn_model/checkpoint/penn_model_0907.pth', 'nn_model/checkpoint/scaler_0907.save')
 
     # Set initial gamma values for the CBF
     tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
@@ -239,7 +239,7 @@ def single_agent_simulation(velocity, waypoints, known_obs, controller_name, max
         
         # Adapt CBF parameters if enabled
         if adapt_cbf:
-            best_gamma0, best_gamma1 = adaptive_selector.adaptive_parameter_selection(tracking_controller)
+            best_gamma0, best_gamma1 = online_cbf_adapter.cbf_param_adaptation(tracking_controller)
             if best_gamma0 is not None and best_gamma1 is not None:
                 tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma0
                 tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1
