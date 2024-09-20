@@ -38,7 +38,7 @@ To install this project, follow these steps:
 
 Familiarize with APIs and examples with the scripts in [`online_adaptive_cbf.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/online_adaptive_cbf.py)
 
-## Basic Example
+### Basic Example
 You can run our test example by:
 
 ```bash
@@ -103,7 +103,7 @@ The sample results from the basic example:
 
 The green point is the goal location, and the gray circles are the obstacles that are known a priori.
 
-# Module Breakdown
+## Module Breakdown
 
 ## Safety Loss Density Function
 
@@ -118,16 +118,16 @@ The `safety_margin` refers to the maximum safety loss value recorded during the 
 |  <img src="https://github.com/user-attachments/assets/591813c0-15e3-4857-8949-eef009a2697a"  height="250px"> |
 
 
-## PENN Prediction
+### PENN Prediction
 
-## Distributionally Robust CVaR
+### Distributionally Robust CVaR
 
-Please refer to our repository [DistributionallyRobustCVaR](https://github.com/signalkee/DistributionallyRobustCVaR/tree/7405e05f7455f320b2c7b0ae72cef31a82d4a4f8) for more details.
+Please refer to our repository [`DistributionallyRobustCVaR`](https://github.com/signalkee/DistributionallyRobustCVaR/tree/7405e05f7455f320b2c7b0ae72cef31a82d4a4f8) for more details.
 
 
-## Visualize Prediction Results for CBF Parameters of Interest
+### Visualize Prediction Results for CBF Parameters of Interest
 
-['test_plot.py'](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/test_plot.py) provides an online plotting tool to visualize the predicted GMM distribution of the candidate CBF parameters. Here is the example of visualizing the predicted `safety_margin` with three candidates, without adapting the paremeters.
+[`test_plot.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/test_plot.py) provides an online plotting tool to visualize the predicted GMM distribution of the candidate CBF parameters. Here is the example of visualizing the predicted `safety_margin` with three candidates, without adapting the paremeters.
 
 
 |    Single Obstacle         |    Multiple Obstacles    |
@@ -136,7 +136,7 @@ Please refer to our repository [DistributionallyRobustCVaR](https://github.com/s
 
 
 
-# Citing
+## Citing
 
 If you find this repository useful, please consider citing our paper:
 
@@ -150,7 +150,7 @@ If you find this repository useful, please consider citing our paper:
 }
 ```
 
-# Related Works
+## Related Works
 
 Here are some related projects/codes that you might be interested:
 
