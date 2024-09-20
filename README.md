@@ -9,7 +9,6 @@ This repository contains the implementation of an online adaptive framework for 
 - Integration with the [`safe_control`](https://github.com/tkkim-robot/safe_control) repository for simulating robotic navigation, offering various robot dynamics, controllers, and RGB-D type sensor simulation.
 - Implementation of the Online Adaptive ICCBF, adapting ICCBF parameters online based on the robot's current state and nearby environment.
 
-Certainly! Let's move on to the next two sections: Installation and Getting Started. Based on the structure we've been following, I'll draft these sections for you. Please review and let me know if you need any modifications.
 
 ## Installation
 To install this project, follow these steps:
@@ -45,7 +44,7 @@ You can run our test example by:
 python online_adaptive_cbf.py
 ```
 
-The MPC-CBF framework is implemented in our [`safe_control`](https://github.com/tkkim-robot/safe_control) repository. It imports `LocalTrackingController` class and uses mpc_cbf implementation:
+The MPC-CBF framework is implemented in our [`safe_control`](https://github.com/tkkim-robot/safe_control) repository. It imports `LocalTrackingController` class and uses the `mpc_cbf` implementation:
 ```python
 from safe_control.tracking import LocalTrackingController
 controller = LocalTrackingController(x_init, robot_spec,
@@ -105,9 +104,9 @@ The green point is the goal location, and the gray circles are the obstacles tha
 
 ## Module Breakdown
 
-## Safety Loss Density Function
+### Safety Loss Density Function
 
-## Data Generation
+### Data Generation
 
 You can use [`data_generation.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/data_generation.py) to collect training dataset. It will store `safety_margin` and `deadlock_time` as the ground truth. 
 
