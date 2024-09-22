@@ -80,13 +80,13 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
                     robot_rad = tracking_controller.robot.robot_radius
                     obs_pos = nearest_obs[:2].flatten()
                     obs_rad = nearest_obs[2]
-                    delta_theta = np.arctan2(obs_pos[1] - robot_state[1, 0], obs_pos[0] - robot_state[0, 0]) - delta_theta
+                    relative_theta = np.arctan2(obs_pos[1] - robot_state[1, 0], obs_pos[0] - robot_state[0, 0]) - delta_theta
                     h_k, d_h, dd_h = tracking_controller.robot.agent_barrier_dt(
                         robot_state, np.array([0, 0]), nearest_obs.flatten()
                     )
                     cbf_constraint_value = dd_h + (cbf_gamma0 + cbf_gamma1) * d_h + cbf_gamma0 * cbf_gamma1 * h_k
                     safety_metric.lambda_1 = lambda_1
-                    Z[m, n] = safety_metric.compute_safety_loss_function(robot_pos, obs_pos, robot_rad, obs_rad, cbf_constraint_value, delta_theta)
+                    Z[m, n] = safety_metric.compute_safety_loss_function(robot_pos, obs_pos, robot_rad, obs_rad, cbf_constraint_value, relative_theta)
 
             Z_obs = np.where((X - obs_x) ** 2 + (Y - obs_y) ** 2 <= obs_r ** 2, Z, np.nan)
 

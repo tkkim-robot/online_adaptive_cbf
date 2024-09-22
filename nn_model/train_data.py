@@ -39,7 +39,7 @@ def load_and_preprocess_data(data_file, scaler_path=None, noise_percentage=0.0):
     dataset = pd.read_csv(data_file)
 
     # Define input features and outputs
-    X = dataset[['Distance', 'Velocity', 'Theta', 'Gamma1', 'Gamma2']].values
+    X = dataset[['Distance', 'Velocity', 'Theta', 'gamma0', 'gamma1']].values
     y = dataset[['Safety Loss', 'Deadlock Time']].values 
 
     # Apply noise to Distance, Velocity, and Theta
