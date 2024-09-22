@@ -106,6 +106,12 @@ The green point is the goal location, and the gray circles are the obstacles tha
 
 ### Safety Loss Density Function
 
+The [`safety loss density function`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/safety_loss_function.py) is designed to capture the collision risk to the obstacle. The safety loss is computed based on robot's state and the obstacle's location. 
+
+|    Mean Predicted Risk Level    |
+| :-------------------------------: |
+|  <img src="https://github.com/user-attachments/assets/9d8d2e21-ab83-4445-9cc4-de09029550b2"  height="350px"> |
+
 ### Data Generation
 
 You can use [`data_generation.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/data_generation.py) to collect training dataset. It will store `safety_margin` and `deadlock_time` as the ground truth. 
@@ -119,10 +125,21 @@ The `safety_margin` refers to the maximum safety loss value recorded during the 
 
 ### PENN Prediction
 
+Train the PENN model using [`penn/train_data.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/nn_model/train_data.py). An example of the prediction results after training is shown below:
+
+|    Mean Predicted Risk Level    |
+| :-------------------------------: |
+|  <img src="https://github.com/user-attachments/assets/611dea04-93df-4635-97eb-34b93a5850ad"  height="350px"> |
+
+You can observe that as the CBF parameter increase, the distance to the obstacle is close, the velocity is high, the relative degree to the obstacle is small, the predicted risk level becomes higher. 
+
 ### Distributionally Robust CVaR
 
-Please refer to our repository [`DistributionallyRobustCVaR`](https://github.com/signalkee/DistributionallyRobustCVaR/tree/7405e05f7455f320b2c7b0ae72cef31a82d4a4f8) for more details.
+<p align="left">
+  <img src="https://github.com/user-attachments/assets/b6da3010-dcac-47a9-ad63-34a03df8e29a" height="200px">
+</p>
 
+Please refer to our repository [`DistributionallyRobustCVaR`](https://github.com/signalkee/DistributionallyRobustCVaR/tree/7405e05f7455f320b2c7b0ae72cef31a82d4a4f8) for more details.
 
 ### Visualize Prediction Results for CBF Parameters of Interest
 
