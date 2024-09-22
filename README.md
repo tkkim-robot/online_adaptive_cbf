@@ -114,9 +114,9 @@ The [`safety loss density function`](https://github.com/tkkim-robot/online_adapt
 
 ### Data Generation
 
-You can use [`data_generation.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/data_generation.py) to collect training dataset. It will store `safety_margin` and `deadlock_time` as the ground truth. 
+You can use [`data_generation.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/data_generation.py) to collect training dataset. It will store `risk_level` and `deadlock_time` as the ground truth. 
 
-The `safety_margin` refers to the maximum safety loss value recorded during the navigation (see the illustration below).
+The `risk_level` refers to the maximum safety loss value recorded during the navigation (see the illustration below).
 
 |    Safety Loss during Navigation     |
 | :-------------------------------: |
@@ -143,7 +143,7 @@ Please refer to our repository [`DistributionallyRobustCVaR`](https://github.com
 
 ### Visualize Prediction Results for CBF Parameters of Interest
 
-[`test_plot.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/test_plot.py) provides an online plotting tool to visualize the predicted GMM distribution of the candidate CBF parameters. Here is the example of visualizing the predicted `safety_margin` with three candidates, without adapting the paremeters.
+[`test_plot.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/test_plot.py) provides an online plotting tool to visualize the predicted GMM distribution of the candidate CBF parameters. Here is the example of visualizing the predicted `risk_level` with three candidates, without adapting the paremeters.
 
 
 |    Single Obstacle         |    Multiple Obstacles    |
