@@ -2,6 +2,21 @@
 
 This repository contains the implementation of an online adaptive framework for Control Barrier Functions (CBFs) in input-constrained nonlinear systems. The algorithm dynamically adapts CBF parameters to optimize performance while ensuring safety, particularly for robotic navigation tasks. Please see our paper ["Learning to Refine Input Constrained Control Barrier Functions via Uncertainty-Aware Online Parameter Adaptation"]() for more details.
 
+
+<div align="center">
+<img src="https://github.com/user-attachments/assets/d047f394-008f-4eb2-9e79-3e2f7a074b47" width="700px">
+
+<div align="center">
+
+[[Homepage]](https://www.taekyung.me/online-adaptive-cbf)
+[[Arxiv]]()
+[[Video]](https://youtu.be/255IUS1f6Lo?list=PL86soRB32vYOs4nd89sSkv21nR-SI-e0o)
+[[Research Group]](https://dasc-lab.github.io/)
+
+</div>
+</div>
+
+
 ## Features
 
 - Implementation of the Probabilistic Ensemble Neural Network ([PENN](https://github.com/tkkim-robot/online_adaptive_cbf/tree/main/nn_model/penn)) which offers parallelized inference without an outer for loop. The predicted output can be interpreted as a Gaussian Mixture Model (GMM). (see [Kim et al.](https://arxiv.org/abs/2305.12240))
