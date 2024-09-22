@@ -106,7 +106,7 @@ The green point is the goal location, and the gray circles are the obstacles tha
 
 ### Safety Loss Density Function
 
-The [`safety loss density function`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/safety_loss_function.py) is designed to capture the collision risk to the obstacle. The safety loss is computed based on robot's state and the obstacle's location. 
+The [`safety loss density function`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/safety_loss_function.py) is designed to quantify the collision risk between the robot and obstacles. This safety loss is computed based on the robot's state and the obstacles' locations.
 
 |    Mean Predicted Risk Level    |
 | :-------------------------------: |
@@ -125,13 +125,13 @@ The `risk_level` refers to the maximum safety loss value recorded during the nav
 
 ### PENN Prediction
 
-Train the PENN model using [`penn/train_data.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/nn_model/train_data.py). An example of the prediction results after training is shown below:
+To train the PENN model, use the script [`penn/train_data.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/nn_model/train_data.py). An example of the prediction results after training is shown below: 
 
 |    Mean Predicted Risk Level    |
 | :-------------------------------: |
 |  <img src="https://github.com/user-attachments/assets/611dea04-93df-4635-97eb-34b93a5850ad"  height="350px"> |
 
-You can observe that as the CBF parameter increase, the distance to the obstacle is close, the velocity is high, the relative degree to the obstacle is small, the predicted risk level becomes higher. 
+You can observe that the predicted risk level becomes higher as the CBF parameter increases, the distance to the obstacle decreases, the velocity increases, and the relative degree to the obstacle becomes smaller.
 
 ### Distributionally Robust CVaR
 
