@@ -10,7 +10,7 @@ This repository contains the implementation of an online adaptive framework for 
 
 [[Homepage]](https://www.taekyung.me/online-adaptive-cbf)
 [[Arxiv]]()
-[[Video]](https://youtu.be/255IUS1f6Lo?list=PL86soRB32vYOs4nd89sSkv21nR-SI-e0o)
+[[Video]](https://youtu.be/255IUS1f6Lo)
 [[Research Group]](https://dasc-lab.github.io/)
 
 </div>
