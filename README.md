@@ -9,7 +9,7 @@ This repository contains the implementation of an online adaptive framework for 
 <div align="center">
 
 [[Homepage]](https://www.taekyung.me/online-adaptive-cbf)
-[[Arxiv]]()
+[[Arxiv]](https://arxiv.org/abs/2409.14616)
 [[Video]](https://youtu.be/255IUS1f6Lo)
 [[Research Group]](https://dasc-lab.github.io/)
 
@@ -175,7 +175,7 @@ If you find this repository useful, please consider citing our paper:
 @inproceedings{kim2024learning, 
     author    = {Taekyung Kim and Robin Inho Kee and Dimitra Panagou},
     title     = {Learning to Refine Input Constrained Control Barrier Functions via Uncertainty-Aware Online Parameter Adaptation}, 
-    booktitle = {},
+    booktitle = {{arXiv} preprint {arXiv}:2409.14616},
     shorttitle = {Online-Adaptive-CBF},
     year      = {2024}
 }
