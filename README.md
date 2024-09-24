@@ -146,7 +146,7 @@ To train the PENN model, use the script [`penn/train_data.py`](https://github.co
 | :-------------------------------: |
 |  <img src="https://github.com/user-attachments/assets/611dea04-93df-4635-97eb-34b93a5850ad"  height="350px"> |
 
-You can observe that the predicted risk level becomes higher as the CBF parameter increases, the distance to the obstacle decreases, the velocity increases, and the relative degree to the obstacle becomes smaller.
+You can observe that the predicted risk level becomes higher as the CBF parameter increases, the distance to the obstacle decreases, the velocity increases, and the relative angle to the obstacle becomes smaller.
 
 ### Distributionally Robust CVaR
 
