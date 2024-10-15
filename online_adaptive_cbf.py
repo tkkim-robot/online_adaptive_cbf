@@ -14,7 +14,7 @@ from DistributionallyRobustCVaR.distributionally_robust_cvar import Distribution
 from sklearn.preprocessing import MinMaxScaler
 
 class OnlineCBFAdapter:
-    def __init__(self, model_name, scaler_name, d_min=0.07, step_size=0.02, epistemic_threshold=0.2):
+    def __init__(self, model_name, scaler_name, d_min=0.075, step_size=0.01, epistemic_threshold=0.2):
         '''
         Initialize the adaptive CBF parameter selector
         '''
@@ -216,7 +216,7 @@ def single_agent_simulation(velocity, waypoints, known_obs, controller_name, max
 
     # Initialize OnlineCBFAdapter if adaptation is enabled
     if adapt_cbf:
-        online_cbf_adapter = OnlineCBFAdapter('nn_model/checkpoint/penn_model_0907.pth', 'nn_model/checkpoint/scaler_0907.save')
+        online_cbf_adapter = OnlineCBFAdapter('nn_model/checkpoint/penn_model_0921.pth', 'nn_model/checkpoint/scaler_0921.save')
 
     # Set initial gamma values for the CBF
     tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0

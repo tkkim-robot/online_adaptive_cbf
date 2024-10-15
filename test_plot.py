@@ -201,7 +201,7 @@ def test_plot_example(max_sim_time=20):
     env_handler = env.Env()
     
     # Initialize the real-time plotter and tracking controller
-    real_time_plotter = RealTimePlotter('nn_model/checkpoint/penn_model_0907.pth', 'nn_model/checkpoint/scaler_0907.save')
+    real_time_plotter = RealTimePlotter('nn_model/checkpoint/penn_model_0921.pth', 'nn_model/checkpoint/scaler_0921.save')
     ax_main, env_handler = real_time_plotter.initialize_plots(plot_handler, env_handler)
     
     # Set up the robot's specifications
