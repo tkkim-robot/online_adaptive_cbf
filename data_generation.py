@@ -9,12 +9,75 @@ import tqdm
 from multiprocessing import Pool
 import matplotlib
 import matplotlib.pyplot as plt
+
 from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController, InfeasibleError
 from safety_loss_function import SafetyLossFunction
 
-# Use a non-interactive backend for matplotlib to avoid display issues
+# Use a non-interactive backend to avoid display issues
 matplotlib.use('Agg')
+
+
+# Robot-specific configurations
+ROBOT_SPECS = {
+    "DynamicUnicycle2D": {
+        "spec": {
+            "model": "DynamicUnicycle2D",
+            "w_max": 0.5,
+            "a_max": 0.5,
+            "fov_angle": 70.0,
+            "cam_range": 3.0,
+            "radius": 0.3
+        },
+        "param_ranges": {
+            # distance, velocity, theta, gamma0, gamma1
+            "distance_range":  (0.55, 3.0),
+            "velocity_range":  (0.01, 1.0),
+            "theta_range":     (0.0,  np.pi),
+            "gamma0_range":    (0.01, 0.18),
+            "gamma1_range":    (0.01, 0.18)
+        }
+    },
+
+    "KinematicBicycle2D": {
+        "spec": {
+            "model": "KinematicBicycle2D",
+            "a_max": 0.5,
+            "fov_angle": 170.0,
+            "cam_range": 0.01,
+            "radius": 0.5
+        },
+        "param_ranges": {
+            # distance, velocity, theta, gamma0, gamma1
+            "distance_range":  (0.9,  3.0),
+            "velocity_range":  (0.01, 1.0),
+            "theta_range":     (0.0,  np.pi/6),
+            "gamma0_range":    (0.01, 3.0),
+            "gamma1_range":    (0.01, 3.0)
+        }
+    },
+
+    "Quad2D": {
+        "spec": {
+            "model": "Quad2D",
+            "f_min": 3.0,
+            "f_max": 10.0,
+            "sensor": "rgbd",
+            "radius": 0.25
+        },
+        "param_ranges": {
+            # distance, velocity_x, velocity_z, theta, gamma0, gamma1
+            "distance_range":   (0.62, 3.0),
+            "velocity_x_range": (0.01, 1.0),
+            "velocity_z_range": (0.01, 1.0),
+            "theta_range":      (-np.pi/6, np.pi/6),
+            "gamma0_range":     (0.01, 1.1),
+            "gamma1_range":     (0.01, 1.1)
+        }
+    }
+}
+
+
 
 # Suppress print statements during simulations
 class SuppressPrints:
@@ -51,10 +114,11 @@ def get_safety_loss_from_controller(tracking_controller, safety_metric):
     
     return safety_loss
 
-def single_agent_simulation(distance, velocity, theta, gamma0, gamma1, deadlock_threshold=0.2, max_sim_time=25):
-    '''
+def single_agent_simulation(robot_model, distance, velocity_x, velocity_z, theta, gamma0, gamma1,
+                            deadlock_threshold=0.2, max_sim_time=15):
+    """
     Run a single agent simulation to evaluate safety loss and deadlock
-    '''
+    """
     try:
         dt = 0.05
 
@@ -63,27 +127,24 @@ def single_agent_simulation(distance, velocity, theta, gamma0, gamma1, deadlock_
             [1, 2, theta],
             [8, 2, 0]
         ], dtype=np.float64)
-        x_init = np.append(waypoints[0], velocity)
-        
+        if robot_model == "Quad2D":
+            x_init = np.append(waypoints[0], [velocity_x, velocity_z, 0])
+        else:
+            x_init = np.append(waypoints[0], velocity_x)
+
         # Define known obstacles
         obstacles = [
-            [1 + distance, 2, 0.2],        
+            [1 + distance, 2, 0.2],
         ]
-        
+
         # Initialize plot and environment handlers
         plot_handler = plotting.Plotting(width=10, height=4, known_obs=obstacles)
         ax, fig = plot_handler.plot_grid("Local Tracking Controller")
         env_handler = env.Env()
 
         # Set up the robot specifications
-        robot_spec = {
-            'model': 'DynamicUnicycle2D',
-            'w_max': 0.5,
-            'a_max': 0.5,
-            'fov_angle': 70.0,
-            'cam_range': 3.0,
-            'radius': 0.3
-        }
+        robot_spec = ROBOT_SPECS[robot_model]["spec"]
+
         control_type = 'mpc_cbf'
         tracking_controller = LocalTrackingController(x_init, robot_spec,
                                                     control_type=control_type,
@@ -94,20 +155,19 @@ def single_agent_simulation(distance, velocity, theta, gamma0, gamma1, deadlock_
                                                     env=env_handler)
 
         # Adjust distance considering the radii of the robot and obstacle
-        distance = distance - obstacles[0][2] - tracking_controller.robot.robot_radius
+        distance_adjusted = distance - obstacles[0][2] - tracking_controller.robot.robot_radius
 
         # Set gamma values for CBF
         tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
         tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
 
-        # Set known obstacles
+        # Set known obstacles and waypoints
         tracking_controller.obs = np.array(obstacles)
         tracking_controller.set_waypoints(waypoints)
 
         # Initialize safety loss function
         safety_metric = SafetyLossFunction()
 
-        # Run the simulation loop
         unexpected_beh = 0
         deadlock_time = 0.0
         sim_time = 0.0
@@ -124,104 +184,191 @@ def single_agent_simulation(distance, velocity, theta, gamma0, gamma1, deadlock_
 
                 if ret == -1:
                     break
-                
+
                 # Check for deadlock
-                if np.abs(tracking_controller.robot.X[3]) < deadlock_threshold:
-                    deadlock_time += dt
+                if robot_model == "Quad2D":
+                    # For Quad2D, index 3 is x-dot, index 4 is z-dot
+                    vx = tracking_controller.robot.X[3]
+                    vz = tracking_controller.robot.X[4]
+                    if np.hypot(vx, vz) < deadlock_threshold:
+                        deadlock_time += dt
+                else:
+                    # For ground robots, index 3 is the single velocity
+                    if abs(tracking_controller.robot.X[3]) < deadlock_threshold:
+                        deadlock_time += dt
 
                 # Calculate safety loss and store the maximum safety metric encountered
-                safety_loss_new = get_safety_loss_from_controller(tracking_controller, safety_metric)
-                if safety_loss_new > safety_loss:
-                    safety_loss = safety_loss_new[0]
+                new_safety_loss = get_safety_loss_from_controller(tracking_controller, safety_metric)
+                if new_safety_loss > safety_loss:
+                    safety_loss = new_safety_loss[0]
 
-            # Handle InfeasibleError and Collision
             except InfeasibleError:
                 plt.ioff()
                 plt.close()
-                return (distance, velocity, theta, gamma0, gamma1, False, max_safety_loss, deadlock_time, sim_time)
-                
+                return (distance_adjusted, velocity_x, velocity_z, theta, gamma0, gamma1, False, max_safety_loss, deadlock_time, sim_time)
+
         plt.ioff()
         plt.close()
-        return (distance, velocity, theta, gamma0, gamma1, True, safety_loss, deadlock_time, sim_time)
+        return (distance_adjusted, velocity_x, velocity_z, theta, gamma0, gamma1, True, safety_loss, deadlock_time, sim_time)
 
     except InfeasibleError:
         plt.ioff()
         plt.close()
-        return (distance, velocity, theta, gamma0, gamma1, False, max_safety_loss, deadlock_time, sim_time)
+        return (distance, velocity_x, velocity_z, theta, gamma0, gamma1, False, max_safety_loss, 0.0, 0.0)
 
 def worker(params):
     '''
     Worker function for parallel processing
     '''
-    distance, velocity, theta, gamma0, gamma1 = params
-    with SuppressPrints():  # Suppress output during the simulation
-        result = single_agent_simulation(distance, velocity, theta, gamma0, gamma1)
-    return result
+    with SuppressPrints(): # Suppress output during the simulation
+        return single_agent_simulation(*params)
 
-def generate_data(samples_per_dimension=5, num_processes=8, batch_size=6):
+def generate_data_for_model(robot_model, samples_per_dimension=5, num_processes=8, batch_size=6):
     '''
     Generate simulation data by running simulations in parallel
     '''
-    # Define ranges for the parameter space
-    distance_range = np.linspace(0.55, 3.0, samples_per_dimension)
-    velocity_range = np.linspace(0.01, 1.0, samples_per_dimension)
-    theta_range = np.linspace(0, np.pi, samples_per_dimension)
-    gamma0_range = np.linspace(0.01, 0.18, samples_per_dimension)
-    gamma1_range = np.linspace(0.01, 0.18, samples_per_dimension)
-    parameter_space = [(d, v, theta, g1, g2) for d in distance_range
-                       for v in velocity_range
-                       for theta in theta_range
-                       for g1 in gamma0_range
-                       for g2 in gamma1_range]
+    ranges = ROBOT_SPECS[robot_model]["param_ranges"]
 
-    # Calculate total number of batches
-    total_batches = len(parameter_space) // batch_size + (1 if len(parameter_space) % batch_size != 0 else 0)
+    if robot_model in ("DynamicUnicycle2D", "KinematicBicycle2D"):
+        # 5D parameter space
+        dist_vals    = np.linspace(ranges["distance_range"][0],  ranges["distance_range"][1],  samples_per_dimension)
+        vel_vals     = np.linspace(ranges["velocity_range"][0], ranges["velocity_range"][1], samples_per_dimension)
+        theta_vals   = np.linspace(ranges["theta_range"][0],    ranges["theta_range"][1],    samples_per_dimension)
+        gamma0_vals  = np.linspace(ranges["gamma0_range"][0],   ranges["gamma0_range"][1],   samples_per_dimension)
+        gamma1_vals  = np.linspace(ranges["gamma1_range"][0],   ranges["gamma1_range"][1],   samples_per_dimension)
 
-    # Run simulations in batches using multiprocessing
-    for batch_index in range(total_batches):
-        batch_parameters = parameter_space[batch_index * batch_size:(batch_index + 1) * batch_size]
+        parameter_space = []
+        for d in dist_vals:
+            for v in vel_vals:
+                for th in theta_vals:
+                    for g0 in gamma0_vals:
+                        for g1 in gamma1_vals:
+                            parameter_space.append((
+                                # robot_model, distance, velocity_x=v, velocity_z=0.0
+                                robot_model, d, v, 0.0, th, g0, g1
+                            ))
+
+        columns = ["Distance", "Velocity", "Theta", "gamma0", "gamma1",
+                   "No Collision", "Safety Loss", "Deadlock Time", "Simulation Time"]
+
+    elif robot_model == "Quad2D":
+        # Quad2D => 6D parameter space
+        dist_vals     = np.linspace(ranges["distance_range"][0],   ranges["distance_range"][1],   samples_per_dimension)
+        velx_vals     = np.linspace(ranges["velocity_x_range"][0], ranges["velocity_x_range"][1], samples_per_dimension)
+        velz_vals     = np.linspace(ranges["velocity_z_range"][0], ranges["velocity_z_range"][1], samples_per_dimension)
+        theta_vals    = np.linspace(ranges["theta_range"][0],      ranges["theta_range"][1],      samples_per_dimension)
+        gamma0_vals   = np.linspace(ranges["gamma0_range"][0],     ranges["gamma0_range"][1],     samples_per_dimension)
+        gamma1_vals   = np.linspace(ranges["gamma1_range"][0],     ranges["gamma1_range"][1],     samples_per_dimension)
+
+        parameter_space = []
+        for d in dist_vals:
+            for vx in velx_vals:
+                for vz in velz_vals:
+                    for th in theta_vals:
+                        for g0 in gamma0_vals:
+                            for g1 in gamma1_vals:
+                                parameter_space.append((
+                                    robot_model, d, vx, vz, th, g0, g1
+                                ))
+
+        columns = ["Distance", "VelocityX", "VelocityZ", "Theta", "gamma0", "gamma1",
+                   "No Collision", "Safety Loss", "Deadlock Time", "Simulation Time"]
+
+    # Number of total points
+    total_points = len(parameter_space)
+    total_batches = total_points // batch_size + (1 if total_points % batch_size else 0)
+
+    # Run simulations in batches
+    for batch_idx in range(total_batches):
+        batch_params = parameter_space[batch_idx * batch_size : (batch_idx + 1) * batch_size]
 
         pool = Pool(processes=num_processes)
         results = []
-        # Collect results using multiprocessing
-        for result in tqdm.tqdm(pool.imap(worker, batch_parameters), total=len(batch_parameters)):
-            results.append(result)
+        # Collect results in parallel
+        for res in tqdm.tqdm(pool.imap(worker, batch_params), total=len(batch_params)):
+            results.append(res)
         pool.close()
         pool.join()
 
-        # Store results in a DataFrame and save to a CSV file
-        columns = ['Distance', 'Velocity', 'Theta', 'gamma0', 'gamma1', 'No Collision', 'Safety Loss', 'Deadlock Time', 'Simulation Time']
-        df = pd.DataFrame(results, columns=columns)
-        df.to_csv(f'data_generation_results_batch_{batch_index + 1}.csv', index=False)
+        df_raw = pd.DataFrame(results,
+                              columns=[
+                                  "Distance", "VelX_Returned", "VelZ_Returned", "Theta",
+                                  "gamma0", "gamma1", "No Collision", "Safety Loss",
+                                  "Deadlock Time", "Simulation Time"
+                              ])
+        # Transform df_raw to the final columns based on robot model
+        if robot_model in ("DynamicUnicycle2D", "KinematicBicycle2D"):
+            # For ground robots, use "Velocity" instead of VelX
+            df_final = pd.DataFrame()
+            df_final["Distance"] = df_raw["Distance"]
+            df_final["Velocity"] = df_raw["VelX_Returned"]  # single velocity
+            df_final["Theta"] = df_raw["Theta"]
+            df_final["gamma0"] = df_raw["gamma0"]
+            df_final["gamma1"] = df_raw["gamma1"]
+            df_final["No Collision"] = df_raw["No Collision"]
+            df_final["Safety Loss"] = df_raw["Safety Loss"]
+            df_final["Deadlock Time"] = df_raw["Deadlock Time"]
+            df_final["Simulation Time"] = df_raw["Simulation Time"]
+        else:
+            # Quad2D => rename columns to VelocityX, VelocityZ
+            df_final = pd.DataFrame()
+            df_final["Distance"] = df_raw["Distance"]
+            df_final["VelocityX"] = df_raw["VelX_Returned"]
+            df_final["VelocityZ"] = df_raw["VelZ_Returned"]
+            df_final["Theta"] = df_raw["Theta"]
+            df_final["gamma0"] = df_raw["gamma0"]
+            df_final["gamma1"] = df_raw["gamma1"]
+            df_final["No Collision"] = df_raw["No Collision"]
+            df_final["Safety Loss"] = df_raw["Safety Loss"]
+            df_final["Deadlock Time"] = df_raw["Deadlock Time"]
+            df_final["Simulation Time"] = df_raw["Simulation Time"]
 
-def concatenate_csv_files(output_filename, total_batches):
-    '''
+        df_final.to_csv(f"data_results_{robot_model}_batch_{batch_idx + 1}.csv", index=False)
+
+
+def concatenate_csv_files(robot_model, total_batches, output_filename):
+    """
     Concatenate multiple CSV files generated from the simulation batches
-    '''
+    for the given robot_model.
+    """
     all_data = []
-
-    # Read and concatenate batch files
     for batch_index in range(total_batches):
-        batch_file = f'data_generation_results_batch_{batch_index + 1}.csv'
-        batch_data = pd.read_csv(batch_file)
-        all_data.append(batch_data)
+        batch_file = f"data_results_{robot_model}_batch_{batch_index + 1}.csv"
+        df = pd.read_csv(batch_file)
+        all_data.append(df)
 
-    # Concatenate all data into a single DataFrame and save
     final_df = pd.concat(all_data, ignore_index=True)
     final_df.to_csv(output_filename, index=False)
     print(f"All batch files have been concatenated into {output_filename}")
 
 
+
 if __name__ == "__main__":
-    samples_per_dimension = 7   # Number of samples per dimension
-    batch_size = 6**5           # Specify the batch size
+    robot_model_list = [
+        "DynamicUnicycle2D",
+        "KinematicBicycle2D",
+        "Quad2D"
+    ]
+    robot_model = robot_model_list[2]
+
+    samples_per_dimension = 4   # Number of samples per dimension
     num_processes = 6           # Change based on the number of cores available
 
-    total_datapoints = samples_per_dimension ** 5
-    total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size != 0 else 0)
+    if robot_model in ("DynamicUnicycle2D", "KinematicBicycle2D"):
+        total_datapoints = samples_per_dimension ** 5
+        batch_size = (samples_per_dimension-1) ** 5
+    elif robot_model == "Quad2D":
+        total_datapoints = samples_per_dimension ** 6
+        batch_size = (samples_per_dimension-1) ** 6
 
-    # Generate simulation data and concatenate results
-    generate_data(samples_per_dimension, num_processes, batch_size)
-    concatenate_csv_files(f'data_generation_results_{samples_per_dimension}datapoint_0907.csv', total_batches)
+    total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size else 0)
 
-    print("Data generation complete.")
+    generate_data_for_model(robot_model,
+                            samples_per_dimension=samples_per_dimension,
+                            num_processes=num_processes,
+                            batch_size=batch_size)
+
+    output_csv = f"data_generation_{robot_model}_{samples_per_dimension}datapoint.csv"
+    concatenate_csv_files(robot_model, total_batches, output_csv)
+
+    print("Data generation complete!")
