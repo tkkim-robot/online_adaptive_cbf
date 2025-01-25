@@ -18,6 +18,7 @@ from safety_loss_function import SafetyLossFunction
 matplotlib.use('Agg')
 
 
+
 # Robot-specific configurations
 ROBOT_SPECS = {
     "DynamicUnicycle2D": {
@@ -114,7 +115,7 @@ def get_safety_loss_from_controller(tracking_controller, safety_metric):
     
     return safety_loss
 
-def single_agent_simulation(robot_model, distance, velocity_x, velocity_z, theta, gamma0, gamma1,
+def single_agent_simulation(robot_model, controller_name, distance, velocity_x, velocity_z, theta, gamma0, gamma1,
                             deadlock_threshold=0.2, max_sim_time=15):
     """
     Run a single agent simulation to evaluate safety loss and deadlock
@@ -144,8 +145,8 @@ def single_agent_simulation(robot_model, distance, velocity_x, velocity_z, theta
 
         # Set up the robot specifications
         robot_spec = ROBOT_SPECS[robot_model]["spec"]
-
-        control_type = 'mpc_cbf'
+        
+        control_type = controller_name
         tracking_controller = LocalTrackingController(x_init, robot_spec,
                                                     control_type=control_type,
                                                     dt=dt,
@@ -223,7 +224,7 @@ def worker(params):
     with SuppressPrints(): # Suppress output during the simulation
         return single_agent_simulation(*params)
 
-def generate_data_for_model(robot_model, samples_per_dimension=5, num_processes=8, batch_size=6):
+def generate_data_for_model(robot_model, controller_name, samples_per_dimension=5, num_processes=8, batch_size=6):
     '''
     Generate simulation data by running simulations in parallel
     '''
@@ -245,7 +246,7 @@ def generate_data_for_model(robot_model, samples_per_dimension=5, num_processes=
                         for g1 in gamma1_vals:
                             parameter_space.append((
                                 # robot_model, distance, velocity_x=v, velocity_z=0.0
-                                robot_model, d, v, 0.0, th, g0, g1
+                                robot_model, controller_name, d, v, 0.0, th, g0, g1
                             ))
 
         columns = ["Distance", "Velocity", "Theta", "gamma0", "gamma1",
@@ -268,7 +269,7 @@ def generate_data_for_model(robot_model, samples_per_dimension=5, num_processes=
                         for g0 in gamma0_vals:
                             for g1 in gamma1_vals:
                                 parameter_space.append((
-                                    robot_model, d, vx, vz, th, g0, g1
+                                    robot_model, controller_name, d, vx, vz, th, g0, g1
                                 ))
 
         columns = ["Distance", "VelocityX", "VelocityZ", "Theta", "gamma0", "gamma1",
@@ -323,7 +324,7 @@ def generate_data_for_model(robot_model, samples_per_dimension=5, num_processes=
             df_final["Deadlock Time"] = df_raw["Deadlock Time"]
             df_final["Simulation Time"] = df_raw["Simulation Time"]
 
-        df_final.to_csv(f"data_results_{robot_model}_batch_{batch_idx + 1}.csv", index=False)
+        df_final.to_csv(f"data_results_{robot_model}_{controller_name}_batch_{batch_idx + 1}.csv", index=False)
 
 
 def concatenate_csv_files(robot_model, total_batches, output_filename):
@@ -344,15 +345,20 @@ def concatenate_csv_files(robot_model, total_batches, output_filename):
 
 
 if __name__ == "__main__":
+    controller_list = [
+        "cbf_qp",
+        "mpc_cbf",
+    ]
     robot_model_list = [
         "DynamicUnicycle2D",
         "KinematicBicycle2D",
         "Quad2D"
     ]
-    robot_model = robot_model_list[2]
+    controller_name = controller_list[1]   
+    robot_model = robot_model_list[0]
 
-    samples_per_dimension = 4   # Number of samples per dimension
-    num_processes = 6           # Change based on the number of cores available
+    samples_per_dimension = 2   # Number of samples per dimension
+    num_processes = 3           # Change based on the number of cores available
 
     if robot_model in ("DynamicUnicycle2D", "KinematicBicycle2D"):
         total_datapoints = samples_per_dimension ** 5
@@ -363,12 +369,12 @@ if __name__ == "__main__":
 
     total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size else 0)
 
-    generate_data_for_model(robot_model,
+    generate_data_for_model(robot_model, controller_name,
                             samples_per_dimension=samples_per_dimension,
                             num_processes=num_processes,
                             batch_size=batch_size)
 
-    output_csv = f"data_generation_{robot_model}_{samples_per_dimension}datapoint.csv"
+    output_csv = f"data_generation_{robot_model}_{controller_name}_{samples_per_dimension}datapoint.csv"
     concatenate_csv_files(robot_model, total_batches, output_csv)
 
     print("Data generation complete!")
