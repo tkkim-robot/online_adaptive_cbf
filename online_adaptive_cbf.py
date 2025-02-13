@@ -206,14 +206,24 @@ def get_controller_defaults(robot_model, controller_name):
         controller_params["gamma1"]
     )
 
-def get_online_cbf_adapter(robot_model):
-    '''
-    Returns an OnlineCBFAdapter instance for the given robot_model.
-    '''
+def get_online_cbf_adapter(robot_model, controller_name):
+    """
+    Returns an OnlineCBFAdapter instance for the given robot_model
+    """
     if robot_model not in ADAPTIVE_MODELS:
         raise ValueError(f"No online adapter config found for '{robot_model}'")
 
-    cfg = ADAPTIVE_MODELS[robot_model]
+    controller_subkey_map = {
+        "Online Adaptive CBF-QP":  "online_cbf_qp",
+        "Online Adaptive MPC-CBF": "online_mpc_cbf"
+    }
+    if controller_name not in controller_subkey_map:
+        raise ValueError(f"Controller '{controller_name}' not recognized for online adaptation.")
+    subkey = controller_subkey_map[controller_name]
+    if subkey not in ADAPTIVE_MODELS[robot_model]:
+        raise ValueError(f"No config for subkey '{subkey}' in '{robot_model}'")
+
+    cfg = ADAPTIVE_MODELS[robot_model][subkey]
     return OnlineCBFAdapter(
         model_name=cfg["model_path"],
         scaler_name=cfg["scaler_path"],
@@ -222,6 +232,8 @@ def get_online_cbf_adapter(robot_model):
         upper_bound=cfg["upper_bound"],
         robot_model=robot_model
     )
+
+
 
 
 def single_agent_simulation(velocity,
@@ -276,9 +288,9 @@ def single_agent_simulation(velocity,
     tracking_controller.obs = default_obs
     tracking_controller.set_waypoints(waypoints)
 
-    # If controller is 'Online Adaptive CBF', get adapter
-    if controller_name == 'Online Adaptive CBF':
-        online_cbf_adapter = get_online_cbf_adapter(robot_model)
+    # If controller is 'Online Adaptive', get adapter
+    if controller_name in ['Online Adaptive CBF-QP', 'Online Adaptive MPC-CBF']:
+        online_cbf_adapter = get_online_cbf_adapter(robot_model, controller_name)
     else:
         online_cbf_adapter = None
 
@@ -318,7 +330,8 @@ if __name__ == "__main__":
         "MPC-CBF high fixed param",
         "Optimal Decay CBF-QP",
         "Optimal Decay MPC-CBF",
-        "Online Adaptive CBF"
+        "Online Adaptive CBF-QP",
+        "Online Adaptive MPC-CBF",
     ]
     robot_model_list = [
         "DynamicUnicycle2D",
@@ -327,8 +340,8 @@ if __name__ == "__main__":
     ]
 
     # Pick a specific controller and robot model
-    controller_name = controller_list[-1]   
-    robot_model = robot_model_list[1]       
+    controller_name = controller_list[2]   
+    robot_model = robot_model_list[0]       
 
     # Define waypoints for the simulation
     waypoints = np.array([

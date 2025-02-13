@@ -1,5 +1,9 @@
 import numpy as np
 
+
+# TODO: Add Online Adaptive CBF-QP
+# TODO: modify Online Adaptive CBF --> Online Adaptive MPC-CBF
+
 ALL_DEFAULTS = {
     "DynamicUnicycle2D": {
         "controller_params": {
@@ -23,7 +27,12 @@ ALL_DEFAULTS = {
                 "gamma0": 0.01,
                 "gamma1": 0.01
             },
-            "Online Adaptive CBF": {
+            "Online Adaptive CBF-QP": {
+                "type": "cbf_qp",
+                "gamma0": 0.5,
+                "gamma1": 0.5
+            },
+            "Online Adaptive MPC-CBF": {
                 "type": "mpc_cbf",
                 "gamma0": 0.01,
                 "gamma1": 0.01
@@ -70,7 +79,12 @@ ALL_DEFAULTS = {
                 "gamma0": 0.1,
                 "gamma1": 0.1
             },
-            "Online Adaptive CBF": {
+            "Online Adaptive CBF-QP": {
+                "type": "cbf_qp",
+                "gamma0": 0.5,
+                "gamma1": 0.5
+            },
+            "Online Adaptive MPC-CBF": {
                 "type": "mpc_cbf",
                 "gamma0": 0.01,
                 "gamma1": 0.01
@@ -115,7 +129,12 @@ ALL_DEFAULTS = {
                 "gamma0": 0.01,
                 "gamma1": 0.01
             },
-            "Online Adaptive CBF": {
+            "Online Adaptive CBF-QP": {
+                "type": "cbf_qp",
+                "gamma0": 0.5,
+                "gamma1": 0.5
+            },
+            "Online Adaptive MPC-CBF": {
                 "type": "mpc_cbf",
                 "gamma0": 0.01,
                 "gamma1": 0.01
@@ -142,24 +161,51 @@ ALL_DEFAULTS = {
 # Config for the online adapter (model file paths, step sizes, etc.)
 ADAPTIVE_MODELS = {
     "DynamicUnicycle2D": {
-        "model_path":  "nn_model/checkpoint/penn_model_0921.pth",
-        "scaler_path": "nn_model/checkpoint/scaler_0921.save",
-        "step_size":   0.01,
-        "lower_bound": 0.01,
-        "upper_bound": 0.2
+        "online_cbf_qp": {
+            "model_path":  "nn_model/checkpoint/penn_model_0128.pth",
+            "scaler_path": "nn_model/checkpoint/scaler_0128.save",
+            "step_size":   0.01,
+            "lower_bound": 0.01,
+            "upper_bound": 0.15
+        },
+        "online_mpc_cbf": {
+            "model_path":  "nn_model/checkpoint/penn_model_0921.pth",
+            "scaler_path": "nn_model/checkpoint/scaler_0921.save",
+            "step_size":   0.01,
+            "lower_bound": 0.01,
+            "upper_bound": 0.2
+        }      
     },
     "KinematicBicycle2D": {
-        "model_path":  "nn_model/checkpoint/penn_model_1204_kinbi.pth",
-        "scaler_path": "nn_model/checkpoint/scaler_1204_kinbi.save",
-        "step_size":   0.05,
-        "lower_bound": 0.01,
-        "upper_bound": 3.0
+        "online_cbf_qp": {
+            "model_path":  "nn_model/checkpoint/penn_model_qp.pth",
+            "scaler_path": "nn_model/checkpoint/scaler_qp.save",
+            "step_size":   0.01,
+            "lower_bound": 0.01,
+            "upper_bound": 0.2
+        },
+        "online_mpc_cbf": {
+            "model_path":  "nn_model/checkpoint/penn_model_1204_kinbi.pth",
+            "scaler_path": "nn_model/checkpoint/scaler_1204_kinbi.save",
+            "step_size":   0.05,
+            "lower_bound": 0.01,
+            "upper_bound": 3.0
+        }  
     },
     "Quad2D": {
-        "model_path":  "nn_model/checkpoint/penn_model_0114_quad.pth",
-        "scaler_path": "nn_model/checkpoint/scaler_0114_quad.save",
-        "step_size":   0.05,
-        "lower_bound": 0.01,
-        "upper_bound": 1.1
+        "online_cbf_qp": {
+            "model_path":  "nn_model/checkpoint/penn_model_qp.pth",
+            "scaler_path": "nn_model/checkpoint/scaler_qp.save",
+            "step_size":   0.01,
+            "lower_bound": 0.01,
+            "upper_bound": 0.2
+        },
+        "online_mpc_cbf": {
+            "model_path":  "nn_model/checkpoint/penn_model_0114_quad.pth",
+            "scaler_path": "nn_model/checkpoint/scaler_0114_quad.save",
+            "step_size":   0.05,
+            "lower_bound": 0.01,
+            "upper_bound": 1.1
+        }  
     }
 }
