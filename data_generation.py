@@ -15,7 +15,7 @@ from safe_control.tracking import LocalTrackingController, InfeasibleError
 from safety_loss_function import SafetyLossFunction
 
 # Use a non-interactive backend to avoid display issues
-matplotlib.use('Agg')
+# matplotlib.use('Agg')
 
 
 
@@ -32,11 +32,11 @@ ROBOT_SPECS = {
         },
         "param_ranges": {
             # distance, velocity, theta, gamma0, gamma1
-            "distance_range":  (0.55, 3.0),
+            "distance_range":  (0.65, 2.5),
             "velocity_range":  (0.01, 1.0),
-            "theta_range":     (0.0,  np.pi),
-            "gamma0_range":    (0.01, 0.18),
-            "gamma1_range":    (0.01, 0.18)
+            "theta_range":     (0.01,  np.pi/2),
+            "gamma0_range":    (0.5, 2.5),
+            "gamma1_range":    (0.5, 2.5)
         }
     },
 
@@ -116,7 +116,7 @@ def get_safety_loss_from_controller(tracking_controller, safety_metric):
     return safety_loss
 
 def single_agent_simulation(robot_model, controller_name, distance, velocity_x, velocity_z, theta, gamma0, gamma1,
-                            deadlock_threshold=0.2, max_sim_time=15):
+                            deadlock_threshold=0.2, max_sim_time=60, show_animation=False):
     """
     Run a single agent simulation to evaluate safety loss and deadlock
     """
@@ -147,11 +147,16 @@ def single_agent_simulation(robot_model, controller_name, distance, velocity_x, 
         robot_spec = ROBOT_SPECS[robot_model]["spec"]
         
         control_type = controller_name
+        if controller_name == "cbf_qp":
+            enable_rotation = False
+        else:
+            enable_rotation = True
         tracking_controller = LocalTrackingController(x_init, robot_spec,
                                                     control_type=control_type,
                                                     dt=dt,
-                                                    show_animation=False,
+                                                    show_animation=show_animation,
                                                     save_animation=False,
+                                                    enable_rotation=enable_rotation,
                                                     ax=ax, fig=fig,
                                                     env=env_handler)
 
@@ -207,6 +212,11 @@ def single_agent_simulation(robot_model, controller_name, distance, velocity_x, 
                 plt.ioff()
                 plt.close()
                 return (distance_adjusted, velocity_x, velocity_z, theta, gamma0, gamma1, False, max_safety_loss, deadlock_time, sim_time)
+
+        if abs(deadlock_time - sim_time) < 1.0:
+            plt.ioff()
+            plt.close()
+            return (distance_adjusted, velocity_x, velocity_z, theta, gamma0, gamma1, False, max_safety_loss, deadlock_time, sim_time)
 
         plt.ioff()
         plt.close()
@@ -326,15 +336,14 @@ def generate_data_for_model(robot_model, controller_name, samples_per_dimension=
 
         df_final.to_csv(f"data_results_{robot_model}_{controller_name}_batch_{batch_idx + 1}.csv", index=False)
 
-
-def concatenate_csv_files(robot_model, total_batches, output_filename):
+def concatenate_csv_files(robot_model, controller_name, total_batches, output_filename):
     """
     Concatenate multiple CSV files generated from the simulation batches
     for the given robot_model.
     """
     all_data = []
     for batch_index in range(total_batches):
-        batch_file = f"data_results_{robot_model}_batch_{batch_index + 1}.csv"
+        batch_file = f"data_results_{robot_model}_{controller_name}_batch_{batch_index + 1}.csv"
         df = pd.read_csv(batch_file)
         all_data.append(df)
 
@@ -354,27 +363,30 @@ if __name__ == "__main__":
         "KinematicBicycle2D",
         "Quad2D"
     ]
-    controller_name = controller_list[1]   
+    controller_name = controller_list[0]   
     robot_model = robot_model_list[0]
 
-    samples_per_dimension = 2   # Number of samples per dimension
-    num_processes = 3           # Change based on the number of cores available
+    # samples_per_dimension = 6   # Number of samples per dimension
+    # num_processes = 5           # Change based on the number of cores available
 
-    if robot_model in ("DynamicUnicycle2D", "KinematicBicycle2D"):
-        total_datapoints = samples_per_dimension ** 5
-        batch_size = (samples_per_dimension-1) ** 5
-    elif robot_model == "Quad2D":
-        total_datapoints = samples_per_dimension ** 6
-        batch_size = (samples_per_dimension-1) ** 6
+    # if robot_model in ("DynamicUnicycle2D", "KinematicBicycle2D"):
+    #     total_datapoints = samples_per_dimension ** 5
+    #     batch_size = (samples_per_dimension-1) ** 5
+    # elif robot_model == "Quad2D":
+    #     total_datapoints = samples_per_dimension ** 6
+    #     batch_size = (samples_per_dimension-1) ** 6
 
-    total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size else 0)
+    # total_batches = total_datapoints // batch_size + (1 if total_datapoints % batch_size else 0)
 
-    generate_data_for_model(robot_model, controller_name,
-                            samples_per_dimension=samples_per_dimension,
-                            num_processes=num_processes,
-                            batch_size=batch_size)
 
-    output_csv = f"data_generation_{robot_model}_{controller_name}_{samples_per_dimension}datapoint.csv"
-    concatenate_csv_files(robot_model, total_batches, output_csv)
+    # generate_data_for_model(robot_model, controller_name,
+    #                         samples_per_dimension=samples_per_dimension,
+    #                         num_processes=num_processes,
+    #                         batch_size=batch_size)
 
-    print("Data generation complete!")
+    # output_csv = f"data_generation_{robot_model}_{controller_name}_{samples_per_dimension}datapoint.csv"
+    # concatenate_csv_files(robot_model, controller_name, total_batches, output_csv)
+
+    # print("Data generation complete!")
+
+    single_agent_simulation(robot_model, controller_name, 0.85, 0, 0, 0.65, 0.5, 0.5, show_animation=True)
