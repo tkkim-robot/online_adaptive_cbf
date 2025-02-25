@@ -57,9 +57,15 @@ class OnlineCBFAdapter:
             near_obs = [100, 100, 0.2]  # Default obstacle in case of no nearby obstacle
         
         # Calculate distance, velocity, and relative angle with the obstacle
-        distance = np.linalg.norm(robot_pos - near_obs[:2]) - 0.45 + robot_radius + near_obs[2]
-        delta_theta = np.arctan2(near_obs[1] - robot_pos[1], near_obs[0] - robot_pos[0]) - robot_theta
-        delta_theta = ((delta_theta + np.pi) % (2 * np.pi)) - np.pi
+        if self.robot_model == 'VTOL2D':
+            distance = np.linalg.norm(robot_pos - near_obs[:2]) - robot_radius - near_obs[2]
+            distance = np.linalg.norm(robot_pos - near_obs[:2]) - 0.45 + robot_radius + near_obs[2] # correct the distance for mistake in the training data
+            # abuse variable name: it's just pitch angle in this scenario (since all obs are fixed)
+            delta_theta = robot_theta 
+        else:
+            distance = np.linalg.norm(robot_pos - near_obs[:2]) - 0.45 + robot_radius + near_obs[2]
+            delta_theta = np.arctan2(near_obs[1] - robot_pos[1], near_obs[0] - robot_pos[0]) - robot_theta
+            delta_theta = ((delta_theta + np.pi) % (2 * np.pi)) - np.pi  
         gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
         gamma1 = tracking_controller.pos_controller.cbf_param['alpha2']
         
@@ -68,6 +74,7 @@ class OnlineCBFAdapter:
             velocity_z = tracking_controller.robot.X[4, 0]
             return [distance, velocity_x, velocity_z, delta_theta, gamma0, gamma1]
         else:
+            # for vtol, also put x_vel only in this particular scenario (same setting for training)
             velocity = tracking_controller.robot.X[3, 0]
             return [distance, velocity, delta_theta, gamma0, gamma1]
 
@@ -129,7 +136,7 @@ class OnlineCBFAdapter:
             gmm = self.penn.create_gmm(y_pred_safety_loss)
             cvar_filter = DistributionallyRobustCVaR(gmm)
 
-            if cvar_filter.is_within_boundary(cvar_boundary):
+            if cvar_filter.is_within_boundary(cvar_boundary, alpha=0.99):
                 final_predictions.append(pred)
         return final_predictions
 
@@ -206,6 +213,21 @@ def get_controller_defaults(robot_model, controller_name):
         controller_params["gamma1"]
     )
 
+def get_env_defaults(robot_model):
+    '''
+    Returns environment configurations
+    '''
+    
+    if robot_model not in ALL_DEFAULTS:
+        raise ValueError(f"Unknown robot_model '{robot_model}'")
+
+    entry = ALL_DEFAULTS[robot_model]
+
+    env_width = entry.setdefault("env_width", 11.0)
+    env_height = entry.setdefault("env_height", 3.8)
+
+    return env_width, env_height
+
 def get_online_cbf_adapter(robot_model):
     '''
     Returns an OnlineCBFAdapter instance for the given robot_model.
@@ -220,6 +242,7 @@ def get_online_cbf_adapter(robot_model):
         step_size=cfg["step_size"],
         lower_bound=cfg["lower_bound"],
         upper_bound=cfg["upper_bound"],
+        epistemic_threshold=cfg.get("epistemic_threshold", 0.2),
         robot_model=robot_model
     )
 
@@ -238,20 +261,28 @@ def single_agent_simulation(velocity,
     # Get the robot spec & default obstacles & default controller type & gamma values
     robot_spec, default_obs = get_robot_spec_and_obs(robot_model)
     ctrl_type, gamma0, gamma1 = get_controller_defaults(robot_model, controller_name)
-    
+    env_width, env_height = get_env_defaults(robot_model)
+
     print(robot_spec, default_obs)
     print(ctrl_type, gamma0, gamma1)
+
+    if default_obs.shape[1] != 5:
+        default_obs = np.hstack((default_obs, np.zeros((default_obs.shape[0], 2)))) # Set static obs velocity 0.0 at (5, 5)
+    
 
     # Set initial state
     if robot_model == "Quad2D":
         # velocity should be [vx, vz] for Quad2D
         x_init = np.append(waypoints[0], [velocity[0], velocity[1], 0])
+    elif robot_model == "VTOL2D":
+        x_init = np.hstack((2.0, 10.0, 0.0, velocity, 0.0, 0.0))
+        plt.rcParams['figure.figsize'] = [12, 8]
     else:
         # velocity is a single scalar for 2D ground vehicles
         x_init = np.append(waypoints[0], velocity)
 
     # Set plotting and environment
-    plot_handler = plotting.Plotting(width=11.0, height=3.8, known_obs=default_obs)
+    plot_handler = plotting.Plotting(width=env_width, height=env_height, known_obs=default_obs)
     ax, fig = plot_handler.plot_grid(f"{controller_name} controller")
     env_handler = env.Env()
 
@@ -323,22 +354,31 @@ if __name__ == "__main__":
     robot_model_list = [
         "DynamicUnicycle2D",
         "KinematicBicycle2D",
-        "Quad2D"
+        "Quad2D",
+        "VTOL2D"
     ]
 
     # Pick a specific controller and robot model
     controller_name = controller_list[-1]   
-    robot_model = robot_model_list[1]       
+    robot_model = robot_model_list[3]       
 
     # Define waypoints for the simulation
-    waypoints = np.array([
-        [0.75, 2.0, 0.01],
-        [10.0, 1.5, 0.0]
-    ], dtype=np.float64)
+    if robot_model == "VTOL2D":
+        waypoints = np.array([
+                    [70, 10],
+                    [70, 0.5]
+                ], dtype=np.float64)
+    else:
+        waypoints = np.array([
+                    [0.75, 2.0, 0.01],
+                    [10.0, 1.5, 0.0]
+                ], dtype=np.float64)
 
     # For ground vehicles, velocity is a single scalar
     if robot_model == "Quad2D":
         init_vel = [0.4, 0.2]
+    elif robot_model == "VTOL2D":
+        init_vel = 20.0
     else:
         init_vel = 0.4
 
