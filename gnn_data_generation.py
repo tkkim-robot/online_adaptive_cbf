@@ -7,15 +7,13 @@ import numpy as np
 import pickle
 import tqdm
 from multiprocessing import Pool
+import matplotlib
 import matplotlib.pyplot as plt
 
 from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController, InfeasibleError
 from safety_loss_function import SafetyLossFunction
 from gnn_gcbf import GCBFModule
-
-# Use a non-interactive backend to avoid display issues
-# matplotlib.use('Agg')
 
 
 # Robot-specific configurations
@@ -29,6 +27,11 @@ ROBOT_SPECS = {
             "cam_range": 3.0,
             "radius": 0.3
         },
+        "param_ranges": {
+            "theta_range":     (-np.pi/2,  np.pi/2),
+            "gamma0_range":    (0.01, 1.0),
+            "gamma1_range":    (0.01, 1.0)
+        }
     },
     "KinematicBicycle2D": {
         "spec": {
@@ -38,6 +41,11 @@ ROBOT_SPECS = {
             "cam_range": 0.01,
             "radius": 0.5
         },
+        "param_ranges": {
+            "theta_range":     (-np.pi/2,  np.pi/2),
+            "gamma0_range":    (0.01, 1.0),
+            "gamma1_range":    (0.01, 1.0)
+        }
     },
     "Quad2D": {
         "spec": {
@@ -47,6 +55,11 @@ ROBOT_SPECS = {
             "sensor": "rgbd",
             "radius": 0.25
         },
+        "param_ranges": {
+            "theta_range":      (-np.pi/6, np.pi/6),
+            "gamma0_range":     (0.01, 1.0),
+            "gamma1_range":     (0.01, 1.0)
+        }
     }
 }
 
@@ -132,11 +145,18 @@ def single_agent_simulation_gnn(
 
     # 3) Create random known obstacles, For each obstacle => random (x, y, radius)
     obstacles = []
-    for _ in range(num_obstacles): #FIXME: should not be within the robot and goal initial position
-        ox = np.random.uniform(2.0, 6.0)
-        oy = np.random.uniform(1.0, 3.0)
-        radius = np.random.uniform(0.2, 0.4)
-        obstacles.append([ox, oy, radius])
+    for _ in range(num_obstacles):
+        while True:
+            ox = np.random.uniform(2.0, 6.0)
+            oy = np.random.uniform(1.0, 3.0)
+            radius = np.random.uniform(0.2, 0.4)
+
+            dist_robot = np.hypot(ox - 1.0, oy - 2.0)
+            dist_goal  = np.hypot(ox - 8.0, oy - 2.0)
+            # e.g., require at least 0.5 clearance from start or goal
+            if dist_robot > 0.1 and dist_goal > 0.1:
+                obstacles.append([ox, oy, radius])
+                break
 
     # Initialize plot and environment handlers
     plot_handler = plotting.Plotting(width=10, height=4, known_obs=obstacles)
@@ -211,30 +231,25 @@ def single_agent_simulation_gnn(
     plt.ioff()
     plt.close()
 
-    #FIXME: Need to figure out if this is right or wrong!!!
     
     # 6) Construct a graph for the final scenario using GCBFModule
-    # The "robot" can be: [x, y, vx, vy] from the final or initial state
-    # or some combined notion. Let's just use the initial for demonstration.
-    # The "goal" can be the second waypoint. Example below:
-    module = GCBFModule()  # or re-use a global instance if you prefer
-    # robot => [rx, ry, vx, vy]
+    # The "robot" should be the initial state and the "goal" should be the second waypoint.
+    module = GCBFModule() 
     if robot_model == "Quad2D":
-        # in that case, x_init => [rx, ry, rtheta, vx, vz, something...]
-        # We'll do a simplified approach: just store the 2D velocity as if (vx, vy).
-        # This is an approximation for demonstration.
+        # [rx, ry, rtheta, vx, vz]
         rx, ry, rtheta, vx_init, vz_init, _ = x_init
         robot_state = [rx, ry, vx_init, vz_init]
     else:
+        # [rx, ry, rtheta, vx]
         rx, ry, rtheta, velocity_init = x_init
         # Convert heading + velocity => vx, vy
         vx_init = velocity_init * np.cos(rtheta)
         vy_init = velocity_init * np.sin(rtheta)
         robot_state = [rx, ry, vx_init, vy_init]
 
-    goal = [8.0, 2.0]
+    goal_state = [8.0, 2.0]
 
-    graph_data = module.create_graph(robot=robot_state, obstacles=obstacles, goal=goal, risk=max_safety_loss)
+    graph_data = module.create_graph(robot=robot_state, obstacles=obstacles, goal=goal_state, risk=max_safety_loss)
 
     return {
         "graph_data": graph_data,
@@ -258,13 +273,17 @@ def generate_data_for_model_gnn(
     Randomly samples multiple obstacles (2~10), random robot initial states,
     random gamma0, gamma1, runs single_agent_simulation_gnn, and saves data in .pkl.
     """
-    #FIXME: Need to get the gamma, theta range for each robot dynamics just like the original data_generation script
+    param_ranges = ROBOT_SPECS[robot_model]["param_ranges"]
+    th_min, th_max = param_ranges["theta_range"]
+    g0_min, g0_max = param_ranges["gamma0_range"]
+    g1_min, g1_max = param_ranges["gamma1_range"]
+
     parameter_space = []
     for _ in range(num_samples):
-        gamma0 = np.random.uniform(0.5, 3.0)
-        gamma1 = np.random.uniform(0.5, 3.0)
-        theta = np.random.uniform(0.01, np.pi/2)
-        n_obs  = np.random.randint(obstacles_range[0], obstacles_range[1]+1)
+        gamma0 = np.random.uniform(g0_min, g0_max)
+        gamma1 = np.random.uniform(g1_min, g1_max)
+        theta = np.random.uniform(th_min, th_max)
+        n_obs  = np.random.randint(obstacles_range[0], obstacles_range[1] + 1)
         parameter_space.append((robot_model, controller_name, gamma0, gamma1, theta, n_obs))
 
     def worker(params):
@@ -297,13 +316,14 @@ def single_simulation_example(robot_model, controller_name, gamma0=0.5, gamma1=0
     """
     Demonstrates running a single simulation with random obstacles, printing the result.
     """
+    num_obstacles = np.random.randint(2, 10)
     result = single_agent_simulation_gnn(
         robot_model=robot_model,
         controller_name=controller_name,
         gamma0=gamma0, 
         gamma1=gamma1,  
         theta=theta,
-        num_obstacles=2,
+        num_obstacles=num_obstacles,
         show_animation=True
     )
     print("Single Simulation Result:")
@@ -329,18 +349,25 @@ if __name__ == "__main__":
         ]
     controller_name = controller_list[1]
     robot_model = robot_model_list[0]
-
-    # generate_data_for_model_gnn(
-    #     robot_model=robot_model,
-    #     controller_name=controller_name,
-    #     num_samples=20,       
-    #     num_processes=2,        # Change based on the number of cores available
-    #     obstacles_range=(2, 10),
-    #     output_prefix="gnn_datagen"
-    # )
-    # print("Data generation complete!")
+    TESTMODE = True
+    
+    
+    if TESTMODE:
+        single_simulation_example(robot_model, controller_name, 
+                                  gamma0=0.1, gamma1=0.1, theta=0.01)
 
 
-    single_simulation_example(robot_model, controller_name, 
-                              gamma0=0.1, gamma1=0.1, theta=0.01)
+    else:
+        # Use a non-interactive backend to avoid display issues
+        matplotlib.use('Agg')
+        
+        generate_data_for_model_gnn(
+            robot_model=robot_model,
+            controller_name=controller_name,
+            num_samples=20,       
+            num_processes=2,        # Change based on the number of cores available
+            obstacles_range=(2, 10),
+            output_prefix="gnn_datagen"
+        )
+        print("Data generation complete!")
 
