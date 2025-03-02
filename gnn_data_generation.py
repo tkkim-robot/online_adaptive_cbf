@@ -108,7 +108,7 @@ def single_agent_simulation_gnn(
         robot_model, controller_name,
         gamma0, gamma1, theta,
         num_obstacles=5,
-        max_sim_time=60.0,
+        max_sim_time=30.0,
         deadlock_threshold=0.2,
         show_animation=False
     ):
@@ -261,7 +261,14 @@ def single_agent_simulation_gnn(
     }
 
 
-
+def worker(params):
+    '''
+    Worker function for parallel processing
+    '''
+    with SuppressPrints(): # Suppress output during the simulation
+        return single_agent_simulation_gnn(*params)
+    
+    
 def generate_data_for_model_gnn(
     robot_model, controller_name,
     num_samples=10,
@@ -285,13 +292,6 @@ def generate_data_for_model_gnn(
         theta = np.random.uniform(th_min, th_max)
         n_obs  = np.random.randint(obstacles_range[0], obstacles_range[1] + 1)
         parameter_space.append((robot_model, controller_name, gamma0, gamma1, theta, n_obs))
-
-    def worker(params):
-        '''
-        Worker function for parallel processing
-        '''
-        with SuppressPrints(): # Suppress output during the simulation
-            return single_agent_simulation_gnn(*params)
 
     # Use a multiprocessing pool
     pool = Pool(processes=num_processes)
@@ -324,6 +324,7 @@ def single_simulation_example(robot_model, controller_name, gamma0=0.5, gamma1=0
         gamma1=gamma1,  
         theta=theta,
         num_obstacles=num_obstacles,
+        max_sim_time=100.0,
         show_animation=True
     )
     print("Single Simulation Result:")
@@ -349,12 +350,12 @@ if __name__ == "__main__":
         ]
     controller_name = controller_list[1]
     robot_model = robot_model_list[0]
-    TESTMODE = True
+    TESTMODE = False
     
     
     if TESTMODE:
         single_simulation_example(robot_model, controller_name, 
-                                  gamma0=0.1, gamma1=0.1, theta=0.01)
+                                  gamma0=0.05, gamma1=0.05, theta=0.01)
 
 
     else:
@@ -364,8 +365,8 @@ if __name__ == "__main__":
         generate_data_for_model_gnn(
             robot_model=robot_model,
             controller_name=controller_name,
-            num_samples=20,       
-            num_processes=2,        # Change based on the number of cores available
+            num_samples=1000,       
+            num_processes=6,        # Change based on the number of cores available
             obstacles_range=(2, 10),
             output_prefix="gnn_datagen"
         )
