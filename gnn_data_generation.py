@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController, InfeasibleError
 from safety_loss_function import SafetyLossFunction
-from gnn_gcbf import GCBFModule
+from nn_model.gnn_gcbf import GCBFModule
 
 
 # Robot-specific configurations
