@@ -119,11 +119,6 @@ def single_agent_simulation_gnn(
     Returns:
         A dictionary containing:
           - "graph_data": PyG graph
-          - "gamma0": float
-          - "gamma1": float
-          - "max_risk": float (the maximum safety loss encountered)
-          - "deadlock_time": float
-          - "success": bool
     """
     # 1) Time step
     dt = 0.05
@@ -249,15 +244,11 @@ def single_agent_simulation_gnn(
 
     goal_state = [8.0, 2.0]
 
-    graph_data = module.create_graph(robot=robot_state, obstacles=obstacles, goal=goal_state, risk=max_safety_loss)
-
+    graph_data = module.create_graph(robot=robot_state, obstacles=obstacles, goal=goal_state, deadlock=deadlock_time, risk=max_safety_loss)
+    graph_data.gamma = [[gamma0, gamma1]]
+    
     return {
         "graph_data": graph_data,
-        "gamma0": gamma0,
-        "gamma1": gamma1,
-        "max_risk": max_safety_loss,
-        "deadlock_time": deadlock_time,
-        "success": success
     }
 
 
