@@ -6,7 +6,9 @@ sys.path.append(os.path.join(project_root, 'safe_control'))
 import numpy as np
 import pickle
 import tqdm
-from multiprocessing import Pool
+# from multiprocessing import Pool
+import torch
+from torch.multiprocessing import Pool
 import matplotlib
 import matplotlib.pyplot as plt
 
@@ -252,12 +254,37 @@ def single_agent_simulation_gnn(
     }
 
 
+# def worker(params):
+#     '''
+#     Worker function for parallel processing
+#     '''
+#     with SuppressPrints(): # Suppress output during the simulation
+#         return single_agent_simulation_gnn(*params)
+
+
 def worker(params):
-    '''
-    Worker function for parallel processing
-    '''
-    with SuppressPrints(): # Suppress output during the simulation
-        return single_agent_simulation_gnn(*params)
+    with SuppressPrints():  
+        result = single_agent_simulation_gnn(*params)
+
+    # Ensure all necessary PyG fields are included
+    graph_data = result["graph_data"]
+
+    # Convert gamma to a PyTorch tensor if it's a list or NumPy array
+    if isinstance(graph_data.gamma, list) or isinstance(graph_data.gamma, np.ndarray):
+        graph_data.gamma = torch.tensor(graph_data.gamma, dtype=torch.float)
+
+    # Convert tensors to numpy before returning
+    result["graph_data"] = {
+        "x": graph_data.x.cpu().numpy(),  
+        "edge_index": graph_data.edge_index.cpu().numpy(),
+        "edge_attr": graph_data.edge_attr.cpu().numpy(),
+        "y": graph_data.y.cpu().numpy() if hasattr(graph_data, 'y') else None,  # Ensure y is stored
+        "gamma": graph_data.gamma.cpu().numpy() if hasattr(graph_data, 'gamma') else None  # Store gamma properly
+    }
+    
+    return result
+
+
     
     
 def generate_data_for_model_gnn(
@@ -342,7 +369,7 @@ if __name__ == "__main__":
     controller_name = controller_list[1]
     robot_model = robot_model_list[0]
     TESTMODE = False
-    
+     
     
     if TESTMODE:
         single_simulation_example(robot_model, controller_name, 
@@ -356,8 +383,8 @@ if __name__ == "__main__":
         generate_data_for_model_gnn(
             robot_model=robot_model,
             controller_name=controller_name,
-            num_samples=1000,       
-            num_processes=6,        # Change based on the number of cores available
+            num_samples=50000,       
+            num_processes=5,        # Change based on the number of cores available
             obstacles_range=(2, 10),
             output_prefix="gnn_datagen"
         )
