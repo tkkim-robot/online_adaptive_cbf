@@ -150,6 +150,32 @@ class GCBFModule(nn.Module):
             out_2d = self.psi4(combined)
             return out_2d
 
+        def extract_robot_embedding(self, x, edge_index, edge_attr, batch):
+            """
+            Returns the 16D robot embedding only,
+            ignoring the final psi4 layer.
+            """
+            src, dst = edge_index
+            v_i = x[src]
+            v_j = x[dst]
+            zij = torch.cat([v_i, v_j, edge_attr], dim=1)  # [E, 11]
+
+            q_ij = self.psi1(zij)  # [E,16]
+
+            raw_weights = self.psi2(q_ij).squeeze(-1)
+            attn_weights = scatter_softmax(raw_weights, src)
+            messages = self.psi3(q_ij)
+            weighted = attn_weights.unsqueeze(-1)*messages
+            node_emb = scatter_sum(weighted, src, dim=0)
+
+            # find first node => robot
+            first_nodes = torch.cat((
+                torch.tensor([0], device=node_emb.device),
+                torch.where(torch.diff(batch))[0] + 1
+            ))
+            robot_emb = node_emb[first_nodes]  # shape = [num_graphs,16]
+            return robot_emb
+
 
     def create_graph(self, robot, obstacles, goal, deadlock=0.0, risk=0.0):
         """
@@ -242,31 +268,7 @@ class GCBFModule(nn.Module):
             graph_list.append(g)
         return graph_list
 
-    def extract_robot_embedding(self, x, edge_index, edge_attr, batch):
-        """
-        Returns the 16D robot embedding only,
-        ignoring the final psi4 layer.
-        """
-        src, dst = edge_index
-        v_i = x[src]
-        v_j = x[dst]
-        zij = torch.cat([v_i, v_j, edge_attr], dim=1)  # [E, 11]
 
-        q_ij = self.psi1(zij)  # [E,16]
-
-        raw_weights = self.psi2(q_ij).squeeze(-1)
-        attn_weights = scatter_softmax(raw_weights, src)
-        messages = self.psi3(q_ij)
-        weighted = attn_weights.unsqueeze(-1)*messages
-        node_emb = scatter_sum(weighted, src, dim=0)
-
-        # find first node => robot
-        first_nodes = torch.cat((
-            torch.tensor([0], device=node_emb.device),
-            torch.where(torch.diff(batch))[0] + 1
-        ))
-        robot_emb = node_emb[first_nodes]  # shape = [num_graphs,16]
-        return robot_emb
 
     def create_dataloader(self, graphs_dataset, batch_size=32, shuffle=True):
         return DataLoader(graphs_dataset, batch_size=batch_size, shuffle=shuffle)
