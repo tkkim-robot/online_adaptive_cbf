@@ -6,7 +6,6 @@ sys.path.append(os.path.join(project_root, 'safe_control'))
 import numpy as np
 import pickle
 import tqdm
-# from multiprocessing import Pool
 import torch
 from torch.multiprocessing import Pool
 import matplotlib
@@ -116,11 +115,7 @@ def single_agent_simulation_gnn(
     ):
     """
     Run a single agent simulation with multiple random obstacles to evaluate
-    maximum safety loss and deadlock time, returning the constructed graph.
-
-    Returns:
-        A dictionary containing:
-          - "graph_data": PyG graph
+    maximum safety loss and deadlock time, returning the constructed graph (PyG graph).
     """
     # 1) Time step
     dt = 0.05
@@ -253,15 +248,6 @@ def single_agent_simulation_gnn(
         "graph_data": graph_data,
     }
 
-
-# def worker(params):
-#     '''
-#     Worker function for parallel processing
-#     '''
-#     with SuppressPrints(): # Suppress output during the simulation
-#         return single_agent_simulation_gnn(*params)
-
-
 def worker(params):
     with SuppressPrints():  
         result = single_agent_simulation_gnn(*params)
@@ -278,15 +264,13 @@ def worker(params):
         "x": graph_data.x.cpu().numpy(),  
         "edge_index": graph_data.edge_index.cpu().numpy(),
         "edge_attr": graph_data.edge_attr.cpu().numpy(),
-        "y": graph_data.y.cpu().numpy() if hasattr(graph_data, 'y') else None,  # Ensure y is stored
-        "gamma": graph_data.gamma.cpu().numpy() if hasattr(graph_data, 'gamma') else None  # Store gamma properly
+        "y": graph_data.y.cpu().numpy() if hasattr(graph_data, 'y') else None, 
+        "gamma": graph_data.gamma.cpu().numpy() if hasattr(graph_data, 'gamma') else None
     }
     
     return result
 
 
-    
-    
 def generate_data_for_model_gnn(
     robot_model, controller_name,
     num_samples=10,
@@ -329,7 +313,6 @@ def generate_data_for_model_gnn(
     print(f"Saved {len(results)} simulation results to {output_file}.")
 
 
-
 def single_simulation_example(robot_model, controller_name, gamma0=0.5, gamma1=0.5, theta=0.01):
     """
     Demonstrates running a single simulation with random obstacles, printing the result.
@@ -368,18 +351,16 @@ if __name__ == "__main__":
         ]
     controller_name = controller_list[1]
     robot_model = robot_model_list[0]
+    
     TESTMODE = False
-     
     
     if TESTMODE:
         single_simulation_example(robot_model, controller_name, 
                                   gamma0=0.05, gamma1=0.05, theta=0.01)
 
-
     else:
-        # Use a non-interactive backend to avoid display issues
-        matplotlib.use('Agg')
-        
+        matplotlib.use('Agg') # Use a non-interactive backend to avoid display issues
+
         generate_data_for_model_gnn(
             robot_model=robot_model,
             controller_name=controller_name,

@@ -37,25 +37,15 @@ class GCBFModule(nn.Module):
     """
 
     def __init__(self, robot_radius=0.05, lr=0.001, num_epochs=50, batch_size=8):
-        """
-        Args:
-          robot_radius: Radius used for collision expansions.
-          lr: Learning rate.
-          num_epochs: Number of training epochs.
-          batch_size: Training batch size for DataLoader.
-        """
         super().__init__()
         self.robot_radius = robot_radius
         self.lr = lr
         self.num_epochs = num_epochs
         self.batch_size = batch_size
-
-        # GCBF-inspired GraphNetwork producing 2D output
         self.gnn = self.GCBFGraphNetwork()
         self.criterion = nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.gnn.parameters(), lr=self.lr)
-
-
+        
     class GCBFGraphNetwork(nn.Module):
         """
         GCBF-based Graph Neural Network:
@@ -238,7 +228,6 @@ class GCBFModule(nn.Module):
         data.y = torch.tensor([[deadlock, risk]], dtype=torch.float)  # 2D label
         return data
 
-
     def wrap_dataset_to_graphs(self, dataset):
         """
         Expects each sample to have keys like:
@@ -267,8 +256,6 @@ class GCBFModule(nn.Module):
 
             graph_list.append(g)
         return graph_list
-
-
 
     def create_dataloader(self, graphs_dataset, batch_size=32, shuffle=True):
         return DataLoader(graphs_dataset, batch_size=batch_size, shuffle=shuffle)
@@ -316,7 +303,6 @@ class GCBFModule(nn.Module):
     def evaluate_model(self, data_list):
         """
         Evaluates the GNN on 2D output: [deadlock, risk].
-        We compute MSE, MAE, and R^2 for each dimension.
         """
         loader = self.create_dataloader(data_list, shuffle=False)
         self.gnn.eval()
