@@ -25,7 +25,7 @@ ACTIVATION = 'relu'
 
 # Name or model and saving path
 DATANAME = 'gnn_datagen_50000_DynamicUnicycle2D_mpc_cbf'
-MODELNAME_SAVE = 'penn_model_0314'
+MODELNAME_SAVE = 'penn_model_0314_best_gnn'
 data_file = 'data/' + DATANAME + '.csv'
 pickle_file = 'data/' + DATANAME + '.pkl'
 scaler_path = 'checkpoint/scaler_0314.save'
@@ -277,7 +277,7 @@ def train_gnn_embeddings_penn(gnn, penn, train_data, test_data, epochs=50, batch
             os.makedirs('checkpoint/', exist_ok=True)
             torch.save(penn.state_dict(), 'checkpoint/'+MODELNAME_SAVE+'_best_gnn.pth')
 
-def test_gnn_embeddings_penn(gnn, penn, graph_list, checkpoint_path, sample_idx=0, device='cpu', do_plot=True):
+def test_gnn_embeddings_penn(gnn_module, penn, graph_list, checkpoint_path, sample_idx=0, device='cpu'):
     """
     Test a trained GNN + PENN model on a single PyG graph sample.
     """    
@@ -290,6 +290,9 @@ def test_gnn_embeddings_penn(gnn, penn, graph_list, checkpoint_path, sample_idx=
     sample_data = graph_list[sample_idx]
     sample_batch = Batch.from_data_list([sample_data])
 
+    print("sample_batch")
+    print(sample_batch)
+
     x = sample_batch.x.to(device)
     edge_index = sample_batch.edge_index.to(device)
     edge_attr = sample_batch.edge_attr.to(device)
@@ -299,53 +302,32 @@ def test_gnn_embeddings_penn(gnn, penn, graph_list, checkpoint_path, sample_idx=
         robot_emb = gnn_network.extract_robot_embedding(x, edge_index, edge_attr, batch_idx)
     gamma = getattr(sample_batch, 'gamma', None)
     gamma = gamma.view(-1, 2).float().to(device)
+    
+    print("robot_emb")
+    print(robot_emb)
+    
+    y_pred_safety_loss, y_pred_deadlock_time, div_list = penn.predict_gnn(robot_emb, gamma)
 
-    # Concatenate embedding (16D) + gamma (2D) => 18D
-    X_input = torch.cat([robot_emb, gamma], dim=1).to(device)
+    print("Predicted Safety Loss:", y_pred_safety_loss)
+    print("Predicted Deadlock Time:", y_pred_deadlock_time)
+    print("Divergence List:", div_list)
 
-    with torch.no_grad():
-        ensemble_out = penn.model(X_input)
+    gmm_safety = penn.create_gmm(y_pred_safety_loss[0])
+    plot_gmm(gmm_safety)
 
-    # Combine ensemble outputs
-    mu_ensemble = []
-    log_std_ensemble = []
-    for (mu, log_std) in ensemble_out:
-        mu_ensemble.append(mu)
-        log_std_ensemble.append(log_std)
-
-    # Average predictions across ensemble => [batch_size, 2]
-    mu_stack = torch.stack(mu_ensemble, dim=0)  # [ensemble_size, batch_size, 2]
-    mu_mean = mu_stack.mean(dim=0)              # [batch_size, 2]
-
-    # For demonstration, just take predictions of the first node
-    safety_loss_pred = mu_mean[0, 0].item()
-    deadlock_time_pred = mu_mean[0, 1].item()
-
-    print("Predicted Safety Loss:", safety_loss_pred)
-    print("Predicted Deadlock Time:", deadlock_time_pred)
-
-    # Create GMM for safety loss across ensemble
-    safety_list = []
-    for mu_val in mu_ensemble:
-        safety_list.append(mu_val[0, 0].item())  # first node's safety-loss
-    if do_plot:
-        gmm_safety = penn.create_gmm(safety_list)
-        plot_gmm(gmm_safety)
 
 
 if __name__ == '__main__':
-    Test = False
+    Test = True
 
     seed = 42
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
     
-    # Initialize the model (PENN)
-    penn = ProbabilisticEnsembleNN(n_states, n_output, n_hidden, n_ensemble, device, lr=LR)
-
     if Test:
         if not USE_GNN_EMBED:
+            penn = ProbabilisticEnsembleNN(n_states, n_output, n_hidden, n_ensemble, device, lr=LR)
             penn.load_scaler(scaler_path)
             penn.load_model(model_path)
 
@@ -361,13 +343,16 @@ if __name__ == '__main__':
             
         else: # GNN + PENN approach
             n_states = 18
+            penn = ProbabilisticEnsembleNN(n_states, n_output, n_hidden, n_ensemble, device, lr=LR)
             gnn_module = GCBFModule()
             graph_list = load_graph_dataset(pickle_file)
 
-            test_gnn_embeddings_penn(gnn=gnn_module, penn=penn, graph_list=graph_list, checkpoint_path=model_path,)
+            test_gnn_embeddings_penn(gnn_module=gnn_module, penn=penn, graph_list=graph_list, checkpoint_path=model_path,)
         
     else:
         if not USE_GNN_EMBED:
+            penn = ProbabilisticEnsembleNN(n_states, n_output, n_hidden, n_ensemble, device, lr=LR)
+
             # Load and preprocess data
             train_dataX, train_dataY, test_dataX, test_dataY, scaler = load_and_preprocess_data(data_file, scaler_path, noise_percentage=3.0, robot_model=robot_model)
 
@@ -405,6 +390,7 @@ if __name__ == '__main__':
         else: # GNN + PENN approach
             # 0) 16D embedding and 2D gamma => 18D input to PENN
             n_states = 18  
+            penn = ProbabilisticEnsembleNN(n_states, n_output, n_hidden, n_ensemble, device, lr=LR)
 
             # 1) Load PyG graph dataset from pickle
             graph_list = load_graph_dataset(pickle_file)
