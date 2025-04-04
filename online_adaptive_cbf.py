@@ -430,14 +430,14 @@ def single_agent_simulation(velocity,
         x_init = np.append(waypoints[0], [velocity[0], velocity[1], 0])
     elif robot_model == "VTOL2D":
         x_init = np.hstack((2.0, 10.0, 0.0, velocity, 0.0, 0.0))
-        plt.rcParams['figure.figsize'] = [12, 8]
+        plt.rcParams['figure.figsize'] = [12, 5]
     else:
         # velocity is a single scalar for 2D ground vehicles
         x_init = np.append(waypoints[0], velocity)
 
     # Set plotting and environment
     plot_handler = plotting.Plotting(width=env_width, height=env_height, known_obs=default_obs)
-    ax, fig = plot_handler.plot_grid(f"{controller_name} controller")
+    ax, fig = plot_handler.plot_grid("")
     env_handler = env.Env()
 
     # Create the tracking controller
@@ -447,6 +447,7 @@ def single_agent_simulation(velocity,
         control_type=ctrl_type,
         dt=dt,
         show_animation=True,
+        save_animation=True,
         save_animation=True,
         ax=ax,
         fig=fig,
