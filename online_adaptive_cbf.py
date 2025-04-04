@@ -276,14 +276,14 @@ def single_agent_simulation(velocity,
         x_init = np.append(waypoints[0], [velocity[0], velocity[1], 0])
     elif robot_model == "VTOL2D":
         x_init = np.hstack((2.0, 10.0, 0.0, velocity, 0.0, 0.0))
-        plt.rcParams['figure.figsize'] = [12, 8]
+        plt.rcParams['figure.figsize'] = [12, 5]
     else:
         # velocity is a single scalar for 2D ground vehicles
         x_init = np.append(waypoints[0], velocity)
 
     # Set plotting and environment
     plot_handler = plotting.Plotting(width=env_width, height=env_height, known_obs=default_obs)
-    ax, fig = plot_handler.plot_grid(f"{controller_name} controller")
+    ax, fig = plot_handler.plot_grid("")
     env_handler = env.Env()
 
     # Create the tracking controller
@@ -293,7 +293,7 @@ def single_agent_simulation(velocity,
         control_type=ctrl_type,
         dt=dt,
         show_animation=True,
-        save_animation=False,
+        save_animation=True,
         ax=ax,
         fig=fig,
         env=env_handler
@@ -312,6 +312,13 @@ def single_agent_simulation(velocity,
         online_cbf_adapter = get_online_cbf_adapter(robot_model)
     else:
         online_cbf_adapter = None
+
+    import csv
+    # create a csv file to record the states, control inputs, and CBF parameters
+    with open('output.csv', 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['states', 'control_inputs', 'alpha1', 'alpha2'])
+
 
     # Main simulation loop
     n_steps = int(max_sim_time / dt)
@@ -335,6 +342,17 @@ def single_agent_simulation(velocity,
             if best_gamma0 is not None and best_gamma1 is not None:
                 tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma0
                 tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1
+
+        # get states of the robot
+        robot_state = tracking_controller.robot.X[:,0].flatten()
+        control_input = tracking_controller.get_control_input().flatten()
+        # print(f"Robot state: {robot_state}")
+        # print(f"Control input: {control_input}")
+
+        # append the states, control inputs, and CBF parameters by appending to csv
+        with open('output.csv', 'a', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(np.append(robot_state, np.append(control_input, [tracking_controller.pos_controller.cbf_param['alpha1'], tracking_controller.pos_controller.cbf_param['alpha2']])))
 
     tracking_controller.export_video()
     plt.ioff()
