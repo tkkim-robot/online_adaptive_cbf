@@ -13,17 +13,21 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 from penn.nn_iccbf_predict import ProbabilisticEnsembleNN
 
+WANDB_FLAG = False
+if WANDB_FLAG:
+    import wandb
+
 ACTIVATION = 'relu'
 
 # Name or model and saving path
-DATANAME = 'data_generation_results_8datapoint_kin'
-MODELNAME_SAVE = 'penn_model_1204'
+DATANAME = 'data_generation_your_name'
+MODELNAME_SAVE = 'penn_model_your_name'
 data_file = 'data/' + DATANAME + '.csv'
-scaler_path = 'checkpoint/scaler_1204.save'
+scaler_path = 'checkpoint/scaler_your_name.save'
 model_path = 'checkpoint/' + MODELNAME_SAVE + '.pth'
 
-robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D', 'Quad2D']
-robot_model = robot_model_list[2]
+robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D', 'Quad2D', 'VTOL2D']
+robot_model = robot_model_list[3]
 
 # Neural Network Paramters
 if robot_model == 'Quad2D':
@@ -39,6 +43,12 @@ LR = 0.0001
 BATCHSIZE = 32
 EPOCH = 2000
 
+if WANDB_FLAG:
+    wandb.init(project="your name", config={
+        "learning_rate": LR,
+        "epochs": EPOCH,
+        "batch_size": BATCHSIZE
+    })
 
 def load_and_preprocess_data(data_file, scaler_path=None, noise_percentage=0.0, robot_model=None):
     # Load data
@@ -134,6 +144,9 @@ if __name__ == '__main__':
 
         # Assign the scaler to the model
         penn.scaler = scaler
+
+        if WANDB_FLAG:
+            wandb.watch(penn, log="all", log_freq=100)
         
         # Create datasets and dataloaders
         train_dataset = module.CustomDataset(train_dataX, train_dataY)
@@ -147,6 +160,10 @@ if __name__ == '__main__':
         for epoch in range(start_epoch, start_epoch + EPOCH):
             train_loss = penn.train(train_loader, epoch)
             test_loss, bool_best, test_rmse = penn.test(test_loader, epoch)
+
+            if WANDB_FLAG:
+                wandb.log({"train_loss": train_loss, "test_loss": test_loss, "test_rmse": test_rmse, "epoch": epoch})
+
             if test_rmse < best_test_rmse:
                 best_test_rmse = test_rmse
                 print('Saving... \n')
