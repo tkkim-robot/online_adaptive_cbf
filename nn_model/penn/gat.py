@@ -35,9 +35,9 @@ class GATModule(nn.Module):
         self.lr = lr
         self.num_epochs = num_epochs
         self.batch_size = batch_size
-        self.gnn = self.GATGraphNetwork()
+        self.gat = self.GATGraphNetwork()
         self.criterion = nn.MSELoss()
-        self.optimizer = torch.optim.Adam(self.gnn.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.Adam(self.gat.parameters(), lr=self.lr)
         
     class GATGraphNetwork(nn.Module):
         """
@@ -261,7 +261,7 @@ class GATModule(nn.Module):
         test_loader  = self.create_dataloader(test_data, shuffle=False)
 
         for epoch in range(self.num_epochs):
-            self.gnn.train()
+            self.gat.train()
             total_loss = 0.0
             for batch in train_loader:
                 # batch: a collated PyG Data object
@@ -270,7 +270,7 @@ class GATModule(nn.Module):
                 )
                 # gammas => shape [num_graphs,2]
                 gammas = getattr(batch, 'gamma', None)
-                pred_2d = self.gnn(x, edge_index, edge_attr, batch_vec, gammas)
+                pred_2d = self.gat(x, edge_index, edge_attr, batch_vec, gammas)
 
                 loss = self.criterion(pred_2d, y)
                 self.optimizer.zero_grad()
@@ -279,7 +279,7 @@ class GATModule(nn.Module):
                 total_loss += loss.item()
 
             # validation
-            self.gnn.eval()
+            self.gat.eval()
             val_loss = 0.0
             with torch.no_grad():
                 for batch in test_loader:
@@ -287,7 +287,7 @@ class GATModule(nn.Module):
                         batch.x, batch.edge_index, batch.edge_attr, batch.y, batch.batch
                     )
                     gammas = getattr(batch, 'gamma', None)
-                    pred_2d = self.gnn(x, edge_index, edge_attr, batch_vec, gammas)
+                    pred_2d = self.gat(x, edge_index, edge_attr, batch_vec, gammas)
                     val_loss += self.criterion(pred_2d, y).item()
 
             print(f"Epoch {epoch+1}/{self.num_epochs} | Train Loss: {total_loss:.4f} | Val Loss: {val_loss:.4f}")
@@ -297,7 +297,7 @@ class GATModule(nn.Module):
         Evaluates the GAT on 2D output: [deadlock, risk].
         """
         loader = self.create_dataloader(data_list, shuffle=False)
-        self.gnn.eval()
+        self.gat.eval()
 
         preds_list, targets_list = [], []
         with torch.no_grad():
@@ -306,7 +306,7 @@ class GATModule(nn.Module):
                     batch.x, batch.edge_index, batch.edge_attr, batch.y, batch.batch
                 )
                 gammas = getattr(batch, 'gamma', None)
-                pred_2d = self.gnn(x, edge_index, edge_attr, batch_vec, gammas)
+                pred_2d = self.gat(x, edge_index, edge_attr, batch_vec, gammas)
                 preds_list.append(pred_2d.cpu().numpy())
                 targets_list.append(y.cpu().numpy())
 
