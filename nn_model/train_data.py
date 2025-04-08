@@ -13,6 +13,10 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 from penn.nn_iccbf_predict import ProbabilisticEnsembleNN  
 
+WANDB_FLAG = False
+if WANDB_FLAG:
+    import wandb
+
 import pickle
 from torch_geometric.loader import DataLoader as GeoDataLoader
 from torch_geometric.data import Batch
@@ -29,7 +33,7 @@ pickle_file = 'data/' + DATANAME + '.pkl'
 scaler_path = 'checkpoint/scaler_0314.save'
 model_path = 'checkpoint/' + MODELNAME_SAVE + '.pth'
 
-robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D', 'Quad2D']
+robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D', 'Quad2D', 'VTOL2D']
 robot_model = robot_model_list[0]
 
 # PENN Parameters
@@ -50,6 +54,15 @@ EPOCH = 2000
 TEST_ONLY = False      # If True, just do inference; if False, train then test
 USE_GAT_EMBED = True   # False => MLP-only PENN, True => GAT+PENN
 
+TEST_ONLY = False      # If True, just do inference; if False, train then test
+USE_GAT_EMBED = True   # False => MLP-only PENN, True => GAT+PENN
+
+if WANDB_FLAG:
+    wandb.init(project="your name", config={
+        "learning_rate": LR,
+        "epochs": EPOCH,
+        "batch_size": BATCHSIZE
+    })
 
 def load_and_preprocess_data(data_file, scaler_path=None, noise_percentage=0.0, robot_model=None):
     dataset = pd.read_csv(data_file)
@@ -179,6 +192,9 @@ if __name__ == '__main__':
             )
             penn.scaler = scaler
 
+            if WANDB_FLAG:
+                wandb.watch(penn, log="all", log_freq=100)
+
             # Create datasets and dataloaders
             train_dataset = module.CustomDataset(train_dataX, train_dataY)
             test_dataset = module.CustomDataset(test_dataX, test_dataY)
@@ -192,6 +208,10 @@ if __name__ == '__main__':
             for epoch in range(start_epoch, start_epoch + EPOCH):
                 train_loss = penn.train(train_loader, epoch)
                 test_loss, bool_best, test_rmse = penn.test(test_loader, epoch)
+                
+                if WANDB_FLAG:
+                    wandb.log({"train_loss": train_loss, "test_loss": test_loss, "test_rmse": test_rmse, "epoch": epoch})
+                
                 if test_rmse < best_test_rmse:
                     best_test_rmse = test_rmse
                     print('Saving...\n')
@@ -228,6 +248,9 @@ if __name__ == '__main__':
             plot_gmm(gmm_safety)
 
         else:
+            if WANDB_FLAG:
+                wandb.watch(penn_gat, log="all", log_freq=100)
+            
             train_loader = GeoDataLoader(train_g, batch_size=BATCHSIZE, shuffle=True)
             test_loader = GeoDataLoader(test_g, batch_size=BATCHSIZE, shuffle=False)
 
@@ -237,6 +260,10 @@ if __name__ == '__main__':
             for epoch in range(EPOCH):
                 train_loss = penn_gat.train(train_loader, epoch)
                 test_loss, test_rmse = penn_gat.test(test_loader, epoch)
+                
+                if WANDB_FLAG:
+                    wandb.log({"train_loss": train_loss, "test_loss": test_loss, "test_rmse": test_rmse, "epoch": epoch})
+                
                 if test_rmse < best_test_rmse:
                     best_test_rmse = test_rmse
                     print('Saving...\n')
