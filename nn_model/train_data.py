@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
-from module import module
+from module import module  
 import random
 import math
 import matplotlib.pyplot as plt
@@ -11,46 +11,57 @@ import joblib
 from sklearn.preprocessing import StandardScaler
 
 from torch.utils.data import DataLoader
-from penn.nn_iccbf_predict import ProbabilisticEnsembleNN
+from penn.nn_iccbf_predict import ProbabilisticEnsembleNN  
 
-ACTIVATION = 'relu'
+import pickle
+from torch_geometric.loader import DataLoader as GeoDataLoader
+from torch_geometric.data import Batch
+from torch_geometric.data import Data
+from penn.gat import GATModule
+from penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT  
+
 
 # Name or model and saving path
-DATANAME = 'data_generation_results_8datapoint_kin'
-MODELNAME_SAVE = 'penn_model_1204'
+DATANAME = 'gat_datagen_10000_DynamicUnicycle2D_mpc_cbf'
+MODELNAME_SAVE = 'penn_model_0314_best_gat'
 data_file = 'data/' + DATANAME + '.csv'
-scaler_path = 'checkpoint/scaler_1204.save'
+pickle_file = 'data/' + DATANAME + '.pkl'
+scaler_path = 'checkpoint/scaler_0314.save'
 model_path = 'checkpoint/' + MODELNAME_SAVE + '.pth'
 
 robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D', 'Quad2D']
-robot_model = robot_model_list[2]
+robot_model = robot_model_list[0]
 
-# Neural Network Paramters
+# PENN Parameters
 if robot_model == 'Quad2D':
-    n_states = 7
+    n_states = 7  
 else:
-    n_states = 6
+    n_states = 6  
 n_output = 2
 n_hidden = 40
 n_ensemble = 3
-device = 'cpu'
+device = 'cpu'  
 
-LR = 0.0001
+ACTIVATION = 'relu'
+LR = 0.00005
 BATCHSIZE = 32
 EPOCH = 2000
 
+TEST_ONLY = False      # If True, just do inference; if False, train then test
+USE_GAT_EMBED = True   # False => MLP-only PENN, True => GAT+PENN
+
 
 def load_and_preprocess_data(data_file, scaler_path=None, noise_percentage=0.0, robot_model=None):
-    # Load data
     dataset = pd.read_csv(data_file)
 
-    # Define input features and outputs
+    # Prepare X, y depending on robot model
     if robot_model == 'Quad2D':
         X = dataset[['Distance', 'VelocityX', 'VelocityZ', 'Theta', 'gamma0', 'gamma1']].values
         extra_states = 1
     else:
         X = dataset[['Distance', 'Velocity', 'Theta', 'gamma0', 'gamma1']].values
         extra_states = 0
+
     y = dataset[['Safety Loss', 'Deadlock Time']].values 
 
     # Apply noise to Distance, Velocity, and Theta
@@ -61,7 +72,7 @@ def load_and_preprocess_data(data_file, scaler_path=None, noise_percentage=0.0, 
     Theta = X[:, 2+extra_states]
     X_transformed = np.column_stack((X[:, :2+extra_states], np.sin(Theta), np.cos(Theta), X[:, 3+extra_states:]))
 
-    # Initialize the scaler
+   # Initialize the scaler
     scaler = StandardScaler()
     
     # Normalize the inputs
@@ -69,7 +80,7 @@ def load_and_preprocess_data(data_file, scaler_path=None, noise_percentage=0.0, 
         scaler = joblib.load(scaler_path)  # Load existing scaler
     else:
         scaler.fit(X_transformed)  # Fit new scaler
-
+        
     X_scaled = scaler.transform(X_transformed)
 
     # Save the scaler for later use
@@ -83,9 +94,37 @@ def load_and_preprocess_data(data_file, scaler_path=None, noise_percentage=0.0, 
 
     return train_dataX, train_dataY, test_dataX, test_dataY, scaler
 
+
+def load_graph_dataset(pickle_file):
+    with open(pickle_file, 'rb') as f:
+        results = pickle.load(f)
+
+    data_list = []
+    for item in results:
+        graph_dict = item["graph_data"]
+        
+        graph_data = Data(
+            x=torch.tensor(graph_dict["x"], dtype=torch.float),
+            edge_index=torch.tensor(graph_dict["edge_index"], dtype=torch.long),
+            edge_attr=torch.tensor(graph_dict["edge_attr"], dtype=torch.float)
+        )
+        
+        if "gamma" in graph_dict:
+            graph_data.gamma = torch.tensor(graph_dict["gamma"], dtype=torch.float)
+
+        if "y" in graph_dict and graph_dict["y"] is not None:
+            graph_data.y = torch.tensor(graph_dict["y"], dtype=torch.float)
+        else:
+            print("Missing y values in dataset. Assigning default zeros.")
+            graph_data.y = torch.zeros((graph_data.x.shape[0], 2), dtype=torch.float)
+
+        data_list.append(graph_data)
+        
+    return data_list
+
+
 def plot_gmm(gmm):
-    x = np.linspace(gmm.means_.min() - 3, gmm.means_.max() +
-                    3, 1000).reshape(-1, 1)
+    x = np.linspace(gmm.means_.min() - 3, gmm.means_.max() + 3, 1000).reshape(-1, 1)
     logprob = gmm.score_samples(x)
     responsibilities = gmm.predict_proba(x)
     pdf = np.exp(logprob)
@@ -103,62 +142,106 @@ def plot_gmm(gmm):
     plt.legend()
     plt.show()
 
+
+
+
+
+
 if __name__ == '__main__':
-    Test = False
-    
     seed = 42
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    
-    # Initialize the model
-    penn = ProbabilisticEnsembleNN(n_states, n_output, n_hidden, n_ensemble, device, lr=LR)
 
-    if Test:
-        penn.load_scaler(scaler_path)
-        penn.load_model(model_path)
-        
-        # Example input array [distance, velocity, theta, gamma1, gamma2
-        input_data = [2.55, 0.01, 0.001, 0.005, 0.005]
-        y_pred_safety_loss, y_pred_deadlock_time, div = penn.predict(input_data)
-        print("Predicted Safety Loss:", y_pred_safety_loss)
-        print("Predicted Deadlock Time:", y_pred_deadlock_time)
-        
-        # Create GMM for safety loss predictions
-        gmm_safety = penn.create_gmm(y_pred_safety_loss)
-        plot_gmm(gmm_safety)
-        
+    if not USE_GAT_EMBED:
+        # ============= MLP-based (no GAT) approach =============
+        penn = ProbabilisticEnsembleNN(n_states, n_output, n_hidden, n_ensemble, device, lr=LR)
+
+        if TEST_ONLY:
+            # Load scaler and model, then do predictions
+            penn.load_scaler(scaler_path)
+            penn.load_model(model_path)
+
+            # Example input array [distance, velocity, theta, gamma1, gamma2]
+            input_data = [2.55, 0.01, 0.001, 0.005, 0.005]
+            y_pred_safety_loss, y_pred_deadlock_time, div = penn.predict(input_data)
+            print("Predicted Safety Loss:", y_pred_safety_loss)
+            print("Predicted Deadlock Time:", y_pred_deadlock_time)
+
+            # Plot GMM for safety predictions
+            gmm_safety = penn.create_gmm(y_pred_safety_loss)
+            plot_gmm(gmm_safety)
+
+        else:
+            # Load and preprocess data
+            train_dataX, train_dataY, test_dataX, test_dataY, scaler = load_and_preprocess_data(
+                data_file, scaler_path, noise_percentage=3.0, robot_model=robot_model
+            )
+            penn.scaler = scaler
+
+            # Create datasets and dataloaders
+            train_dataset = module.CustomDataset(train_dataX, train_dataY)
+            test_dataset = module.CustomDataset(test_dataX, test_dataY)
+            train_loader = DataLoader(train_dataset, batch_size=BATCHSIZE, shuffle=True, num_workers=1, pin_memory=True)
+            test_loader  = DataLoader(test_dataset, batch_size=BATCHSIZE, shuffle=False)
+
+            start_epoch = 0
+            best_test_rmse = 1000000
+            start_time = time.time()
+
+            for epoch in range(start_epoch, start_epoch + EPOCH):
+                train_loss = penn.train(train_loader, epoch)
+                test_loss, bool_best, test_rmse = penn.test(test_loader, epoch)
+                if test_rmse < best_test_rmse:
+                    best_test_rmse = test_rmse
+                    print('Saving...\n')
+                    os.makedirs('checkpoint/', exist_ok=True)
+                    torch.save(penn.state_dict(), 'checkpoint/' + MODELNAME_SAVE + '.pth')
+
+            end_time = time.time()
+            print('Learning Time: {:.1f} min'.format((end_time - start_time) / 60))
+
     else:
-        # Load and preprocess data
-        train_dataX, train_dataY, test_dataX, test_dataY, scaler = load_and_preprocess_data(data_file, scaler_path, noise_percentage=3.0, robot_model=robot_model)
+        # ============= GAT + PENN approach =============
+        graph_list = load_graph_dataset(pickle_file)
+        gat_module = GATModule()  
+        gat_network = gat_module.gat
+        penn_gat = ProbabilisticEnsembleGAT(gat_network, n_output, n_hidden, n_ensemble, 
+                                            device, LR, ACTIVATION).to(device)
 
-        # Assign the scaler to the model
-        penn.scaler = scaler
-        
-        # Create datasets and dataloaders
-        train_dataset = module.CustomDataset(train_dataX, train_dataY)
-        test_dataset = module.CustomDataset(test_dataX, test_dataY)
-        train_loader = DataLoader(train_dataset, batch_size=BATCHSIZE, shuffle=True, num_workers=1, pin_memory=True)
-        test_loader = DataLoader(test_dataset, batch_size=BATCHSIZE, shuffle=False)
+        n_tot = len(graph_list)
+        n_trn = int(0.8 * n_tot)
+        train_g, test_g = torch.utils.data.random_split(graph_list, [n_trn, n_tot - n_trn])
 
-        start_epoch = 0
-        best_test_rmse = 1000000
-        start_time = time.time()
-        for epoch in range(start_epoch, start_epoch + EPOCH):
-            train_loss = penn.train(train_loader, epoch)
-            test_loss, bool_best, test_rmse = penn.test(test_loader, epoch)
-            if test_rmse < best_test_rmse:
-                best_test_rmse = test_rmse
-                print('Saving... \n')
-                state = {
-                    'model': penn.state_dict(),
-                    'test_rmse': test_rmse,
-                    'epoch': epoch,
-                    'input_state': n_states,
-                }
-                os.makedirs('checkpoint/', exist_ok=True)
-                torch.save(penn.state_dict(
-                ), 'checkpoint/' + MODELNAME_SAVE + '.pth')
+        if TEST_ONLY:
+            penn_gat.load_model(model_path)
 
-        end_time = time.time()
-        print('Learnig Time: {:.1f} min'.format((end_time-start_time)/60))
+            sample_data = [test_g[0]]  # must wrap in a list for .predict
+            y_safety, y_deadlock, divs = penn_gat.predict(sample_data)
+
+            print("Predicted Safety Loss:", y_safety)
+            print("Predicted Deadlock Time:", y_deadlock)
+            print("Divergences:", divs)
+
+            # Build GMM for safety loss
+            gmm_safety = penn_gat.create_gmm(y_safety[0])
+            plot_gmm(gmm_safety)
+
+        else:
+            train_loader = GeoDataLoader(train_g, batch_size=BATCHSIZE, shuffle=True)
+            test_loader = GeoDataLoader(test_g, batch_size=BATCHSIZE, shuffle=False)
+
+            best_test_rmse = 1000000
+            start_time = time.time()
+            
+            for epoch in range(EPOCH):
+                train_loss = penn_gat.train(train_loader, epoch)
+                test_loss, test_rmse = penn_gat.test(test_loader, epoch)
+                if test_rmse < best_test_rmse:
+                    best_test_rmse = test_rmse
+                    print('Saving...\n')
+                    os.makedirs('checkpoint/', exist_ok=True)
+                    torch.save(penn_gat.state_dict(), 'checkpoint/' + MODELNAME_SAVE + '.pth')
+
+            end_time = time.time()
+            print('Training Time: {:.1f} min'.format((end_time - start_time) / 60))
