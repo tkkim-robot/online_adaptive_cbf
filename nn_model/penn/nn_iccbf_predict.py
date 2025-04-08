@@ -32,7 +32,6 @@ class ProbabilisticEnsembleNN(nn.Module):
                                                 residual=True)
 
         self.model = self.model.to(device)
-
         if device == 'cuda':
             self.model = nn.DataParallel(self.model)
             torch.backends.cudnn.benchmark = True
@@ -89,53 +88,6 @@ class ProbabilisticEnsembleNN(nn.Module):
 
             # Extract divergence value for each input
             div = ensemble_outputs[-1][i].cpu().numpy()[0] 
-            div_list.append(div)
-
-        return y_pred_safety_loss, y_pred_deadlock_time, div_list
-
-    def predict_gnn(self, robot_emb, gamma):
-        """
-        GNN-based prediction with a precomputed embedding (16D) + gamma (2D).
-        """
-        self.model.eval()
-
-        # Concatenate the embeddings to form [batch_size, 18]
-        X_input = torch.cat([robot_emb, gamma], dim=1).to(self.device)
-
-        # Forward pass through the ensemble
-        with torch.no_grad():
-            ensemble_out = self.model(X_input)
-
-        # The model returns n_ensemble + 1 items:
-        # the first n_ensemble are (mu, log_std) pairs, the last is divergence
-        ensemble_members = ensemble_out[:-1]
-        divergence_tensor = ensemble_out[-1]
-
-        # Build outputs matching predict(...) structure
-        y_pred_safety_loss = []
-        y_pred_deadlock_time = []
-        div_list = []
-
-        for b_idx in range(X_input.shape[0]):
-            # One sample's ensemble predictions
-            safety_ensembles = []
-            deadlock_ensembles = []
-
-            for (mu, log_std) in ensemble_members:
-                # Each is shape [batch_size, 2]
-                mu_val = mu[b_idx]
-                log_std_val = log_std[b_idx]
-                sigma_sq_val = torch.square(torch.exp(log_std_val))
-
-                # Store [mu, sigma_sq] for each output
-                safety_ensembles.append([mu_val[0].item(), sigma_sq_val[0].item()])
-                deadlock_ensembles.append([mu_val[1].item(), sigma_sq_val[1].item()])
-
-            y_pred_safety_loss.append(safety_ensembles)
-            y_pred_deadlock_time.append(deadlock_ensembles)
-
-            # Divergence is shape [batch_size, 1], so index b_idx, then [0]
-            div = divergence_tensor[b_idx, 0].item()
             div_list.append(div)
 
         return y_pred_safety_loss, y_pred_deadlock_time, div_list
@@ -277,7 +229,6 @@ class ProbabilisticEnsembleNN(nn.Module):
                 checkpoint = new_state_dict
             self.model.load_state_dict(checkpoint)       
             
-            # self.model.load_state_dict(checkpoint)
         else:
             print("Model path does not exist. Check the provided path.")
             

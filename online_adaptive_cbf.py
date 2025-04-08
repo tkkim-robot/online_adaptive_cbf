@@ -12,7 +12,7 @@ from torch_geometric.data import Batch
 from sklearn.preprocessing import MinMaxScaler
 from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController
-from nn_model.gnn_gcbf import GCBFModule
+from nn_model.penn.gat import GATModule
 from nn_model.penn.nn_iccbf_predict import ProbabilisticEnsembleNN
 from DistributionallyRobustCVaR.distributionally_robust_cvar import DistributionallyRobustCVaR
 from online_cbf_config import ALL_DEFAULTS, ADAPTIVE_MODELS
@@ -26,7 +26,7 @@ class OnlineCBFAdapter:
         Initialize the adaptive CBF parameter selector
         """
         self.robot_model = robot_model
-        if self.robot_model == 'Quad2D':
+        if self.robot_model == 'Quad2D': #TODO: make state dic
             self.extra_state = 1
         else:
             self.extra_state = 0
@@ -39,7 +39,7 @@ class OnlineCBFAdapter:
 
         self.gnn_module = None
         if self.use_gnn:
-            self.gnn_module = GCBFModule()
+            self.gnn_module = GATModule()
 
         self.penn = ProbabilisticEnsembleNN(n_states=self.n_states)
         self.penn.load_model(model_name)
@@ -138,7 +138,7 @@ class OnlineCBFAdapter:
         final_waypoint = tracking_controller.waypoints[-1]
         goal = [final_waypoint[0], final_waypoint[1]]
 
-        # Build the graph using the GCBFModule
+        # Build the graph using the GATModule
         gdata = self.gnn_module.create_graph(
             robot=robot_state,
             obstacles=obstacles,

@@ -13,27 +13,20 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 
-class GCBFModule(nn.Module):
+class GATModule(nn.Module):
     """
-    An extended GCBF-based GNN module that:
-      1) Builds and wraps PyTorch Geometric graphs.
-      2) Uses a GCBF-inspired network to encode each graph.
-      3) Concatenates (robot embedding + gamma0 + gamma1) to produce
-         a final 2D output: [deadlock_time, risk].
-
-    Usage:
-      - Create a dataset of dict items: {
-            'robot': [x, y, vx, vy],
-            'obstacles': [...],
-            'goal': [gx, gy],
-            'deadlock_time': float,
-            'risk': float,
-            'gamma0': float,
-            'gamma1': float
-        }
-      - Wrap them via wrap_dataset_to_graphs(...).
-      - Train with train_model(...).
-      - Evaluate with evaluate_model(...).
+    - Create a dataset of dict items: {
+        'robot': [x, y, vx, vy],
+        'obstacles': [...],
+        'goal': [gx, gy],
+        'deadlock_time': float,
+        'risk': float,
+        'gamma0': float,
+        'gamma1': float
+    }
+    - Wrap them via wrap_dataset_to_graphs(...).
+    - Train with train_model(...).
+    - Evaluate with evaluate_model(...).
     """
 
     def __init__(self, robot_radius=0.05, lr=0.001, num_epochs=50, batch_size=8):
@@ -42,17 +35,16 @@ class GCBFModule(nn.Module):
         self.lr = lr
         self.num_epochs = num_epochs
         self.batch_size = batch_size
-        self.gnn = self.GCBFGraphNetwork()
+        self.gnn = self.GATGraphNetwork()
         self.criterion = nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.gnn.parameters(), lr=self.lr)
         
-    class GCBFGraphNetwork(nn.Module):
+    class GATGraphNetwork(nn.Module):
         """
-        GCBF-based Graph Neural Network:
-          - z_ij = [v_i, v_j, e_ij]
-          - Gains an attention-based node embedding
-          - Final layer (psi4) is fed by:
-              [robot_embedding(16) + gamma(2)] => 18 => 2D output => [deadlock time, risk level]
+        - z_ij = [v_i, v_j, e_ij]
+        - Gains an attention-based node embedding
+        - Final layer (psi4) is fed by:
+            [robot_embedding(16) + gamma(2)] => 18 => 2D output => [deadlock time, risk level]
         """
         def __init__(self):
             super().__init__()
@@ -262,7 +254,7 @@ class GCBFModule(nn.Module):
 
     def train_model(self, train_data, test_data):
         """
-        Trains the GNN for 2D output: [deadlock, risk].
+        Trains the GAT for 2D output: [deadlock, risk].
         We also feed each graph's gamma0,gamma1 into the forward pass.
         """
         train_loader = self.create_dataloader(train_data, shuffle=True)
@@ -302,7 +294,7 @@ class GCBFModule(nn.Module):
 
     def evaluate_model(self, data_list):
         """
-        Evaluates the GNN on 2D output: [deadlock, risk].
+        Evaluates the GAT on 2D output: [deadlock, risk].
         """
         loader = self.create_dataloader(data_list, shuffle=False)
         self.gnn.eval()
@@ -357,12 +349,12 @@ class GCBFModule(nn.Module):
 
 def demo():
     """
-    Demonstrates usage of the revised GCBFModule:
+    Demonstrates usage of the revised GATModule:
       - Each sample has deadlock_time, risk, gamma0, gamma1
-      - GNN predicts 2D: [deadlock, risk]
+      - GAT predicts 2D: [deadlock, risk]
       - gamma0, gamma1 are concatenated with the robot embedding
     """
-    module = GCBFModule(lr=0.00005, num_epochs=2000, batch_size=32)
+    module = GATModule(lr=0.00005, num_epochs=2000, batch_size=32)
 
     # Build a small random dataset
     dataset = []

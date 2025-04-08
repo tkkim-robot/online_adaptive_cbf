@@ -14,8 +14,11 @@ import matplotlib.pyplot as plt
 from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController, InfeasibleError
 from safety_loss_function import SafetyLossFunction
-from nn_model.gnn_gcbf import GCBFModule
+from nn_model.penn.gat import GATModule
 
+
+# sample gamma 0.01-0.35 MPC
+# 0.1-3.0 QP need to check
 
 # Robot-specific configurations
 ROBOT_SPECS = {
@@ -24,14 +27,12 @@ ROBOT_SPECS = {
             "model": "DynamicUnicycle2D",
             "w_max": 0.5,
             "a_max": 0.5,
-            "fov_angle": 70.0,
-            "cam_range": 3.0,
             "radius": 0.3
         },
         "param_ranges": {
             "theta_range":     (-np.pi/2,  np.pi/2),
-            "gamma0_range":    (0.01, 1.0),
-            "gamma1_range":    (0.01, 1.0)
+            "gamma0_range":    (0.01, 0.35),
+            "gamma1_range":    (0.01, 0.35)
         }
     },
     "KinematicBicycle2D": {
@@ -105,7 +106,7 @@ def get_safety_loss_from_controller(tracking_controller, safety_metric):
     )
     return safety_loss
 
-def single_agent_simulation_gnn(
+def single_agent_simulation_gat(
         robot_model, controller_name,
         gamma0, gamma1, theta,
         num_obstacles=5,
@@ -140,7 +141,7 @@ def single_agent_simulation_gnn(
     for _ in range(num_obstacles):
         while True:
             ox = np.random.uniform(2.0, 6.0)
-            oy = np.random.uniform(1.0, 3.0)
+            oy = np.random.uniform(0.5, 3.5)
             radius = np.random.uniform(0.2, 0.4)
 
             dist_robot = np.hypot(ox - 1.0, oy - 2.0)
@@ -224,9 +225,9 @@ def single_agent_simulation_gnn(
     plt.close()
 
     
-    # 6) Construct a graph for the final scenario using GCBFModule
+    # 6) Construct a graph for the final scenario using GATModule
     # The "robot" should be the initial state and the "goal" should be the second waypoint.
-    module = GCBFModule() 
+    module = GATModule() 
     if robot_model == "Quad2D":
         # [rx, ry, rtheta, vx, vz]
         rx, ry, rtheta, vx_init, vz_init, _ = x_init
@@ -250,7 +251,7 @@ def single_agent_simulation_gnn(
 
 def worker(params):
     with SuppressPrints():  
-        result = single_agent_simulation_gnn(*params)
+        result = single_agent_simulation_gat(*params)
 
     # Ensure all necessary PyG fields are included
     graph_data = result["graph_data"]
@@ -271,16 +272,16 @@ def worker(params):
     return result
 
 
-def generate_data_for_model_gnn(
+def generate_data_for_model_gat(
     robot_model, controller_name,
     num_samples=10,
     num_processes=1,
     obstacles_range=(2, 10),
-    output_prefix="gnn_datagen"
+    output_prefix="gat_datagen"
 ):
     """
     Randomly samples multiple obstacles (2~10), random robot initial states,
-    random gamma0, gamma1, runs single_agent_simulation_gnn, and saves data in .pkl.
+    random gamma0, gamma1, runs single_agent_simulation_gat, and saves data in .pkl.
     """
     param_ranges = ROBOT_SPECS[robot_model]["param_ranges"]
     th_min, th_max = param_ranges["theta_range"]
@@ -318,7 +319,7 @@ def single_simulation_example(robot_model, controller_name, gamma0=0.5, gamma1=0
     Demonstrates running a single simulation with random obstacles, printing the result.
     """
     num_obstacles = np.random.randint(2, 10)
-    result = single_agent_simulation_gnn(
+    result = single_agent_simulation_gat(
         robot_model=robot_model,
         controller_name=controller_name,
         gamma0=gamma0, 
@@ -361,13 +362,13 @@ if __name__ == "__main__":
     else:
         matplotlib.use('Agg') # Use a non-interactive backend to avoid display issues
 
-        generate_data_for_model_gnn(
+        generate_data_for_model_gat(
             robot_model=robot_model,
             controller_name=controller_name,
-            num_samples=50000,       
+            num_samples=10000,       
             num_processes=5,        # Change based on the number of cores available
             obstacles_range=(2, 10),
-            output_prefix="gnn_datagen"
+            output_prefix="gat_datagen"
         )
         print("Data generation complete!")
 
