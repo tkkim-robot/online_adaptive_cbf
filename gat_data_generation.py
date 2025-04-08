@@ -152,7 +152,7 @@ def single_agent_simulation_gat(
                 break
 
     # Initialize plot and environment handlers
-    plot_handler = plotting.Plotting(width=10, height=4, known_obs=obstacles)
+    plot_handler = plotting.Plotting(width=10, height=4, known_obs=np.array(obstacles))
     ax, fig = plot_handler.plot_grid("Local Tracking Controller")
     env_handler = env.Env()
 
@@ -241,7 +241,6 @@ def single_agent_simulation_gat(
         robot_state = [rx, ry, vx_init, vy_init]
 
     goal_state = [8.0, 2.0]
-
     graph_data = module.create_graph(robot=robot_state, obstacles=obstacles, goal=goal_state, deadlock=deadlock_time, risk=max_safety_loss)
     graph_data.gamma = [[gamma0, gamma1]]
     
