@@ -110,7 +110,7 @@ def single_agent_simulation_gat(
         robot_model, controller_name,
         gamma0, gamma1, theta,
         num_obstacles=5,
-        max_sim_time=30.0,
+        max_sim_time=20.0,
         deadlock_threshold=0.2,
         show_animation=False
     ):
@@ -137,19 +137,37 @@ def single_agent_simulation_gat(
         x_init = np.append(waypoints[0], velocity_init)
 
     # 3) Create random known obstacles, For each obstacle => random (x, y, radius)
+    robot_spec = ROBOT_SPECS[robot_model]["spec"]
+    robot_radius = robot_spec["radius"]
+    min_gap = robot_radius * 2.0  # Required clearance between obstacles
     obstacles = []
-    for _ in range(num_obstacles):
-        while True:
-            ox = np.random.uniform(2.0, 6.0)
-            oy = np.random.uniform(0.5, 3.5)
-            radius = np.random.uniform(0.2, 0.4)
+    max_attempts = 500
+    attempts = 0
 
-            dist_robot = np.hypot(ox - 1.0, oy - 2.0)
-            dist_goal  = np.hypot(ox - 8.0, oy - 2.0)
-            # e.g., require at least 0.5 clearance from start or goal
-            if dist_robot > 0.1 and dist_goal > 0.1:
-                obstacles.append([ox, oy, radius])
+    while len(obstacles) < num_obstacles and attempts < max_attempts:
+        ox = np.random.uniform(2.0, 6.0)
+        oy = np.random.uniform(0.5, 3.5)
+        radius = np.random.uniform(0.2, 0.4)
+
+        # Skip if too close to start or goal
+        dist_robot = np.hypot(ox - 1.0, oy - 2.0)
+        dist_goal  = np.hypot(ox - 8.0, oy - 2.0)
+        if dist_robot < 0.1 or dist_goal < 0.1:
+            attempts += 1
+            continue
+
+        # Ensure this obstacle has enough gap to all existing ones
+        valid = True
+        for existing in obstacles:
+            ex, ey, er = existing
+            center_dist = np.hypot(ox - ex, oy - ey)
+            min_clearance = er + radius + min_gap
+            if center_dist < min_clearance:
+                valid = False
                 break
+        if valid:
+            obstacles.append([ox, oy, radius])
+        attempts += 1
 
     # Initialize plot and environment handlers
     plot_handler = plotting.Plotting(width=10, height=4, known_obs=np.array(obstacles))
@@ -186,7 +204,8 @@ def single_agent_simulation_gat(
     safety_metric = SafetyLossFunction()
     sim_time = 0.0
     deadlock_time = 0.0
-    max_safety_loss = 1.0 # tuned to be twice amount of the maximum safety loss without collision
+    safety_loss_upper_bound = 1.0 # tuned to be twice amount of the maximum safety loss without collision
+    max_safety_loss = 0.0
     success = True
 
     for _ in range(int(max_sim_time / dt)):
@@ -197,7 +216,12 @@ def single_agent_simulation_gat(
             sim_time += dt
 
             if ret == -1:
+                print("Arrived to goal successfully.")
                 success = True
+                break
+            if ret == -2:
+                print("Collision detected.")
+                success = False
                 break
 
             # Check deadlock
@@ -214,12 +238,20 @@ def single_agent_simulation_gat(
 
             # Calculate safety loss
             new_safety_loss = get_safety_loss_from_controller(tracking_controller, safety_metric)
+            if new_safety_loss[0] > safety_loss_upper_bound:
+                max_safety_loss = new_safety_loss[0]
             if new_safety_loss[0] > max_safety_loss:
                 max_safety_loss = new_safety_loss[0]
+            # print(new_safety_loss, max_safety_loss, deadlock_time)
 
         except InfeasibleError:
             success = False
+            max_safety_loss = safety_loss_upper_bound
             break
+
+    if ret != -1:
+        success = False
+        max_safety_loss = safety_loss_upper_bound
 
     plt.ioff()
     plt.close()
@@ -325,16 +357,15 @@ def single_simulation_example(robot_model, controller_name, gamma0=0.5, gamma1=0
         gamma1=gamma1,  
         theta=theta,
         num_obstacles=num_obstacles,
-        max_sim_time=100.0,
+        max_sim_time=20.0,
         show_animation=True
     )
     print("Single Simulation Result:")
-    print("Gamma0:", result["gamma0"])
-    print("Gamma1:", result["gamma1"])
-    print("Max Risk:", result["max_risk"])
-    print("Deadlock Time:", result["deadlock_time"])
-    print("Success?", result["success"])
     print("Graph Data:", result["graph_data"])
+    print("Gamma0:", result["graph_data"].gamma[0][0])
+    print("Gamma1:", result["graph_data"].gamma[0][1])
+    print("Max Risk:", result["graph_data"].y[0][1])
+    print("Deadlock Time:", result["graph_data"].y[0][0])
 
 
 
@@ -356,7 +387,7 @@ if __name__ == "__main__":
     
     if TESTMODE:
         single_simulation_example(robot_model, controller_name, 
-                                  gamma0=0.05, gamma1=0.05, theta=0.01)
+                                  gamma0=0.05, gamma1=0.07, theta=0.01)
 
     else:
         matplotlib.use('Agg') # Use a non-interactive backend to avoid display issues
@@ -364,7 +395,7 @@ if __name__ == "__main__":
         generate_data_for_model_gat(
             robot_model=robot_model,
             controller_name=controller_name,
-            num_samples=10000,       
+            num_samples=1000,       
             num_processes=5,        # Change based on the number of cores available
             obstacles_range=(2, 10),
             output_prefix="gat_datagen"
