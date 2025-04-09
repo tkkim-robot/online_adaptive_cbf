@@ -13,10 +13,6 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 from penn.nn_iccbf_predict import ProbabilisticEnsembleNN  
 
-WANDB_FLAG = False
-if WANDB_FLAG:
-    import wandb
-
 import pickle
 from torch_geometric.loader import DataLoader as GeoDataLoader
 from torch_geometric.data import Batch
@@ -28,6 +24,8 @@ from penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
 # Name or model and saving path
 DATANAME = 'data_generation_your_name'
 MODELNAME_SAVE = 'penn_model_your_name'
+DATANAME = 'gat_datagen_100000_DynamicUnicycle2D_mpc_cbf'
+MODELNAME_SAVE = 'penn_model_0314_best_gat'
 data_file = 'data/' + DATANAME + '.csv'
 scaler_path = 'checkpoint/scaler_your_name.save'
 model_path = 'checkpoint/' + MODELNAME_SAVE + '.pth'
@@ -53,7 +51,9 @@ EPOCH = 2000
 TEST_ONLY = False      # If True, just do inference; if False, train then test
 USE_GAT_EMBED = True   # False => MLP-only PENN, True => GAT+PENN
 
+WANDB_FLAG = True
 if WANDB_FLAG:
+    import wandb
     wandb.init(project="your name", config={
         "learning_rate": LR,
         "epochs": EPOCH,
