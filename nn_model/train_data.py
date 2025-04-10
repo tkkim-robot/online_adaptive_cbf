@@ -24,10 +24,11 @@ from penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
 # Name or model and saving path
 DATANAME = 'data_generation_your_name'
 MODELNAME_SAVE = 'penn_model_your_name'
-DATANAME = 'gat_datagen_100000_DynamicUnicycle2D_mpc_cbf'
-MODELNAME_SAVE = 'penn_model_0314_best_gat'
+DATANAME = 'gat_datagen_10000_DynamicUnicycle2D_mpc_cbf'
+MODELNAME_SAVE = 'penn_model_0409_test'
 data_file = 'data/' + DATANAME + '.csv'
-scaler_path = 'checkpoint/scaler_your_name.save'
+pickle_file = 'data/' + DATANAME + '.pkl'
+scaler_path = 'checkpoint/scaler_0409_test.save'
 model_path = 'checkpoint/' + MODELNAME_SAVE + '.pth'
 
 robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D', 'Quad2D', 'VTOL2D']
@@ -41,12 +42,13 @@ else:
 n_output = 2
 n_hidden = 40
 n_ensemble = 3
-device = 'cpu'  
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"Using device: {device}")
 
 ACTIVATION = 'relu'
-LR = 0.00005
+LR = 0.0001
 BATCHSIZE = 32
-EPOCH = 2000
+EPOCH = 10000
 
 TEST_ONLY = False      # If True, just do inference; if False, train then test
 USE_GAT_EMBED = True   # False => MLP-only PENN, True => GAT+PENN
@@ -54,7 +56,7 @@ USE_GAT_EMBED = True   # False => MLP-only PENN, True => GAT+PENN
 WANDB_FLAG = True
 if WANDB_FLAG:
     import wandb
-    wandb.init(project="your name", config={
+    wandb.init(project="penn_compare_0409_10000", config={
         "learning_rate": LR,
         "epochs": EPOCH,
         "batch_size": BATCHSIZE
@@ -220,7 +222,7 @@ if __name__ == '__main__':
     else:
         # ============= GAT + PENN approach =============
         graph_list = load_graph_dataset(pickle_file)
-        gat_module = GATModule()  
+        gat_module = GATModule(device=device).to(device)
         gat_network = gat_module.gat
         penn_gat = ProbabilisticEnsembleGAT(gat_network, n_output, n_hidden, n_ensemble, 
                                             device, LR, ACTIVATION).to(device)

@@ -29,13 +29,14 @@ class GATModule(nn.Module):
     - Evaluate with evaluate_model(...).
     """
 
-    def __init__(self, robot_radius=0.05, lr=0.001, num_epochs=50, batch_size=8):
+    def __init__(self, robot_radius=0.3, lr=0.001, num_epochs=50, batch_size=8, device='cpu'):
         super().__init__()
         self.robot_radius = robot_radius
         self.lr = lr
         self.num_epochs = num_epochs
         self.batch_size = batch_size
-        self.gat = self.GATGraphNetwork()
+        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.gat = self.GATGraphNetwork().to(self.device)
         self.criterion = nn.MSELoss()
         self.optimizer = torch.optim.Adam(self.gat.parameters(), lr=self.lr)
         
@@ -93,11 +94,17 @@ class GATModule(nn.Module):
 
             Returns: [num_graphs, 2] => (deadlock_time, risk level).
             """
+            device = next(self.parameters()).device  # 또는 x.device로 써도 됨
+            x = x.to(device)
+            edge_index = edge_index.to(device)
+            edge_attr = edge_attr.to(device)
+            batch = batch.to(device)
+            
             src, dst = edge_index
             v_i = x[src]
             v_j = x[dst]
             # Build z_ij => [num_edges, 11]
-            zij = torch.cat([v_i, v_j, edge_attr], dim=1)
+            zij = torch.cat([v_i, v_j, edge_attr], dim=1).to(device)
 
             # 1) psi1 => 16-dim edge embeddings
             q_ij = self.psi1(zij)
@@ -114,19 +121,19 @@ class GATModule(nn.Module):
             node_emb = scatter_sum(weighted, src, dim=0)
 
             # find the "robot node" index for each sub-graph => first node in each group
+            batch = batch.to(device)
             first_nodes = torch.cat((
-                torch.tensor([0], device=node_emb.device),
-                torch.where(torch.diff(batch))[0] + 1
-            ))
+                torch.tensor([0], device=device),
+                (torch.where(torch.diff(batch))[0] + 1).to(device)
+            ))            
+            # first_nodes = torch.cat((
+            #     torch.tensor([0], device=device),
+            #     torch.where(torch.diff(batch))[0] + 1
+            # ))
             robot_q = node_emb[first_nodes]  # [num_graphs, 16]
 
-            if gammas is not None:
-                # if we have gamma => concat => shape [num_graphs, 18]
-                combined = torch.cat([robot_q, gammas], dim=1)  # [num_graphs, 18]
-            else:
-                # if no gamma is provided, fallback to zero
-                zero_gamma = torch.zeros(robot_q.size(0), 2, device=robot_q.device)
-                combined = torch.cat([robot_q, zero_gamma], dim=1)
+            gammas = gammas.to(device)
+            combined = torch.cat([robot_q, gammas], dim=1)
 
             # 4) final => 2D => [deadlock, risk]
             out_2d = self.psi4(combined)
@@ -137,10 +144,16 @@ class GATModule(nn.Module):
             Returns the 16D robot embedding only,
             ignoring the final psi4 layer.
             """
+            device = next(self.parameters()).device  # 또는 x.device로 써도 됨
+            x = x.to(device)
+            edge_index = edge_index.to(device)
+            edge_attr = edge_attr.to(device)
+            batch = batch.to(device)
+            
             src, dst = edge_index
             v_i = x[src]
             v_j = x[dst]
-            zij = torch.cat([v_i, v_j, edge_attr], dim=1)  # [E, 11]
+            zij = torch.cat([v_i, v_j, edge_attr], dim=1).to(device)  # [E, 11]
 
             q_ij = self.psi1(zij)  # [E,16]
 
@@ -151,10 +164,17 @@ class GATModule(nn.Module):
             node_emb = scatter_sum(weighted, src, dim=0)
 
             # find first node => robot
+            batch = batch.to(device)
             first_nodes = torch.cat((
-                torch.tensor([0], device=node_emb.device),
-                torch.where(torch.diff(batch))[0] + 1
+                torch.tensor([0], device=device),
+                (torch.where(torch.diff(batch))[0] + 1).to(device)
             ))
+            
+            # first_nodes = torch.cat((
+            #     torch.tensor([0], device=node_emb.device),
+            #     torch.where(torch.diff(batch))[0] + 1
+            # ))
+            
             robot_emb = node_emb[first_nodes]  # shape = [num_graphs,16]
             return robot_emb
 
@@ -264,12 +284,21 @@ class GATModule(nn.Module):
             self.gat.train()
             total_loss = 0.0
             for batch in train_loader:
-                # batch: a collated PyG Data object
-                x, edge_index, edge_attr, y, batch_vec = (
-                    batch.x, batch.edge_index, batch.edge_attr, batch.y, batch.batch
-                )
-                # gammas => shape [num_graphs,2]
+                # # batch: a collated PyG Data object
+                # x, edge_index, edge_attr, y, batch_vec = (
+                #     batch.x, batch.edge_index, batch.edge_attr, batch.y, batch.batch
+                # )
+                # # gammas => shape [num_graphs,2]
+                # gammas = getattr(batch, 'gamma', None)
+                
+                x = batch.x.to(self.device)
+                edge_index = batch.edge_index.to(self.device)
+                edge_attr = batch.edge_attr.to(self.device)
+                y = batch.y.to(self.device)
+                batch_vec = batch.batch.to(self.device)
                 gammas = getattr(batch, 'gamma', None)
+                gammas = gammas.to(self.device)
+                
                 pred_2d = self.gat(x, edge_index, edge_attr, batch_vec, gammas)
 
                 loss = self.criterion(pred_2d, y)
@@ -283,10 +312,19 @@ class GATModule(nn.Module):
             val_loss = 0.0
             with torch.no_grad():
                 for batch in test_loader:
-                    x, edge_index, edge_attr, y, batch_vec = (
-                        batch.x, batch.edge_index, batch.edge_attr, batch.y, batch.batch
-                    )
+                    # x, edge_index, edge_attr, y, batch_vec = (
+                    #     batch.x, batch.edge_index, batch.edge_attr, batch.y, batch.batch
+                    # )
+                    # gammas = getattr(batch, 'gamma', None)
+                    
+                    x = batch.x.to(self.device)
+                    edge_index = batch.edge_index.to(self.device)
+                    edge_attr = batch.edge_attr.to(self.device)
+                    y = batch.y.to(self.device)
+                    batch_vec = batch.batch.to(self.device)
                     gammas = getattr(batch, 'gamma', None)
+                    gammas = gammas.to(self.device)
+                    
                     pred_2d = self.gat(x, edge_index, edge_attr, batch_vec, gammas)
                     val_loss += self.criterion(pred_2d, y).item()
 
@@ -302,10 +340,19 @@ class GATModule(nn.Module):
         preds_list, targets_list = [], []
         with torch.no_grad():
             for batch in loader:
-                x, edge_index, edge_attr, y, batch_vec = (
-                    batch.x, batch.edge_index, batch.edge_attr, batch.y, batch.batch
-                )
+                # x, edge_index, edge_attr, y, batch_vec = (
+                #     batch.x, batch.edge_index, batch.edge_attr, batch.y, batch.batch
+                # )
+                # gammas = getattr(batch, 'gamma', None)
+                
+                x = batch.x.to(self.device)
+                edge_index = batch.edge_index.to(self.device)
+                edge_attr = batch.edge_attr.to(self.device)
+                y = batch.y.to(self.device)
+                batch_vec = batch.batch.to(self.device)
                 gammas = getattr(batch, 'gamma', None)
+                gammas = gammas.to(self.device)                
+                
                 pred_2d = self.gat(x, edge_index, edge_attr, batch_vec, gammas)
                 preds_list.append(pred_2d.cpu().numpy())
                 targets_list.append(y.cpu().numpy())
