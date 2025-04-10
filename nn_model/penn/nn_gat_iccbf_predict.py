@@ -22,6 +22,7 @@ class ProbabilisticEnsembleGAT(nn.Module):
         
         self.gat_model = gat_model  
         self.gat_model.eval()       
+        self.gat_model = self.gat_model.to(self.device)
 
         try:
             from penn.penn import EnsembleStochasticLinear
@@ -36,7 +37,8 @@ class ProbabilisticEnsembleGAT(nn.Module):
                                                 residual=True)
 
         self.model = self.model.to(device)
-        if device == 'cuda':
+        if device == 'cuda' and torch.cuda.device_count() > 1:
+            print("Using", torch.cuda.device_count(), "GPUs for DataParallel")            
             self.model = nn.DataParallel(self.model)
             torch.backends.cudnn.benchmark = True
 

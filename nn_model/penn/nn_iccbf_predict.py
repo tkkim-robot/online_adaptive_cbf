@@ -32,7 +32,8 @@ class ProbabilisticEnsembleNN(nn.Module):
                                                 residual=True)
 
         self.model = self.model.to(device)
-        if device == 'cuda':
+        if device == 'cuda' and torch.cuda.device_count() > 1:
+            print("Using", torch.cuda.device_count(), "GPUs for DataParallel")
             self.model = nn.DataParallel(self.model)
             torch.backends.cudnn.benchmark = True
 
@@ -129,7 +130,7 @@ class ProbabilisticEnsembleNN(nn.Module):
 
         err_list = []
         # print('\nEpoch: %d' % epoch)
-        train_loss = torch.FloatTensor([0])
+        train_loss = torch.FloatTensor([0]).to(self.device)
         for batch_idx, samples in enumerate(train_loader):
             x_train, y_train = samples
             x_train, y_train = x_train.to(self.device), y_train.to(self.device)
@@ -154,8 +155,8 @@ class ProbabilisticEnsembleNN(nn.Module):
 
     def test(self, test_loader, epoch):
         self.model.eval()
-        test_loss = torch.FloatTensor([0])
-        test_mse = torch.FloatTensor([0])
+        test_loss = torch.FloatTensor([0]).to(self.device)
+        test_mse = torch.FloatTensor([0]).to(self.device)
 
         with torch.no_grad():
             for batch_idx, samples in enumerate(test_loader):
@@ -164,8 +165,8 @@ class ProbabilisticEnsembleNN(nn.Module):
                 ensemble_outputs = self.model(x_test)
 
                 # Initialize variables for ensemble loss and MSE
-                ensemble_loss = 0
-                ensemble_mse = 0
+                ensemble_loss = torch.FloatTensor([0]).to(self.device)
+                ensemble_mse = torch.FloatTensor([0]).to(self.device)
 
                 # Loop through each ensemble
                 for ensemble_idx in range(self.n_ensemble):
@@ -218,7 +219,7 @@ class ProbabilisticEnsembleNN(nn.Module):
 
     def load_model(self, model_path):
         if os.path.exists(model_path):
-            checkpoint = torch.load(model_path)
+            checkpoint = torch.load(model_path, map_location=self.device)
             
             # Adjust the state_dict keys if they have 'model.' prefix
             if "model." in list(checkpoint.keys())[0]:
@@ -228,7 +229,8 @@ class ProbabilisticEnsembleNN(nn.Module):
                     new_state_dict[name] = v
                 checkpoint = new_state_dict
             self.model.load_state_dict(checkpoint)       
-            
+            self.model.to(self.device)  
+
         else:
             print("Model path does not exist. Check the provided path.")
             
