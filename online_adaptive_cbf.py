@@ -78,9 +78,15 @@ class OnlineCBFAdapter:
             # abuse variable name: it's just pitch angle in this scenario (since all obs are fixed)
             delta_theta = robot_theta 
         else:
+            if self.robot_model == 'VTOL2D':
+                distance = np.linalg.norm(robot_pos - near_obs[:2]) - robot_radius - near_obs[2]
+            distance = np.linalg.norm(robot_pos - near_obs[:2]) - 0.45 + robot_radius + near_obs[2] # correct the distance for mistake in the training data
+            # abuse variable name: it's just pitch angle in this scenario (since all obs are fixed)
+            delta_theta = robot_theta 
+        else:
             distance = np.linalg.norm(robot_pos - near_obs[:2]) - 0.45 + robot_radius + near_obs[2]
-            delta_theta = np.arctan2(near_obs[1] - robot_pos[1], near_obs[0] - robot_pos[0]) - robot_theta
-            delta_theta = ((delta_theta + np.pi) % (2 * np.pi)) - np.pi  
+                delta_theta = np.arctan2(near_obs[1] - robot_pos[1], near_obs[0] - robot_pos[0]) - robot_theta
+                delta_theta = ((delta_theta + np.pi) % (2 * np.pi)) - np.pi    
         gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
         gamma1 = tracking_controller.pos_controller.cbf_param['alpha2']
 
@@ -90,6 +96,7 @@ class OnlineCBFAdapter:
             velocity_z = tracking_controller.robot.X[4, 0]
             return [distance, velocity_x, velocity_z, delta_theta, gamma0, gamma1]
         else:
+            # for vtol, also put x_vel only in this particular scenario (same setting for training)
             # 2D ground => velocity is single scalar
             # for vtol, also put x_vel only in this particular scenario (same setting for training)
             velocity = tracking_controller.robot.X[3, 0]
@@ -347,10 +354,25 @@ def get_env_defaults(robot_model):
 
     return env_width, env_height
 
-def get_online_cbf_adapter(robot_model):
+def get_env_defaults(robot_model):
     '''
-    Returns an OnlineCBFAdapter instance for the given robot_model.
+    Returns environment configurations
     '''
+    
+    if robot_model not in ALL_DEFAULTS:
+        raise ValueError(f"Unknown robot_model '{robot_model}'")
+
+    entry = ALL_DEFAULTS[robot_model]
+
+    env_width = entry.setdefault("env_width", 11.0)
+    env_height = entry.setdefault("env_height", 3.8)
+
+    return env_width, env_height
+
+def get_online_cbf_adapter(robot_model, controller_name):
+    """
+    Returns an OnlineCBFAdapter instance for the given robot_model
+    """
     if robot_model not in ADAPTIVE_MODELS:
         raise ValueError(f"No online adapter config found for '{robot_model}'")
 
@@ -372,6 +394,7 @@ def get_online_cbf_adapter(robot_model):
         lower_bound=cfg["lower_bound"],
         upper_bound=cfg["upper_bound"],
         epistemic_threshold=cfg.get("epistemic_threshold", 0.2),
+        epistemic_threshold=cfg.get("epistemic_threshold", 0.2),
         robot_model=robot_model,
         use_gnn=True # TODO: 
     )
@@ -390,6 +413,8 @@ def single_agent_simulation(velocity,
     # Get the robot spec & default obstacles & default controller type & gamma values
     robot_spec, default_obs = get_robot_spec_and_obs(robot_model)
     ctrl_type, gamma0, gamma1 = get_controller_defaults(robot_model, controller_name)
+    env_width, env_height = get_env_defaults(robot_model)
+
     env_width, env_height = get_env_defaults(robot_model)
 
     print(robot_spec, default_obs)
@@ -422,6 +447,7 @@ def single_agent_simulation(velocity,
         control_type=ctrl_type,
         dt=dt,
         show_animation=True,
+        save_animation=True,
         save_animation=True,
         ax=ax,
         fig=fig,
@@ -505,8 +531,8 @@ if __name__ == "__main__":
 
     # Pick a specific controller and robot model
     controller_name = controller_list[-1]   
-    robot_model = robot_model_list[0]       
-    
+    robot_model = robot_model_list[3]       
+
     # Define waypoints for the simulation
     if robot_model == "VTOL2D":
         waypoints = np.array([
@@ -514,14 +540,22 @@ if __name__ == "__main__":
                     [70, 0.5]
                 ], dtype=np.float64)
     else:
-        waypoints = np.array([
-                    [0.75, 2.0, 0.01],
-                    [10.0, 1.5, 0.0]
+        if robot_model == "VTOL2D":
+            waypoints = np.array([
+                    [70, 10],
+                    [70, 0.5]
                 ], dtype=np.float64)
+    else:
+        waypoints = np.array([
+                                [0.75, 2.0, 0.01],
+                                [10.0, 1.5, 0.0]
+                            ], dtype=np.float64)
 
     # For ground vehicles, velocity is a single scalar
     if robot_model == "Quad2D":
         init_vel = [0.4, 0.2]
+    elif robot_model == "VTOL2D":
+        init_vel = 20.0
     elif robot_model == "VTOL2D":
         init_vel = 20.0
     else:

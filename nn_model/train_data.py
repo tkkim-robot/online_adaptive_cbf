@@ -22,6 +22,8 @@ from penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
 
 
 # Name or model and saving path
+DATANAME = 'data_generation_your_name'
+MODELNAME_SAVE = 'penn_model_your_name'
 DATANAME = 'gat_datagen_10000_DynamicUnicycle2D_mpc_cbf'
 MODELNAME_SAVE = 'penn_model_0409_test'
 data_file = 'data/' + DATANAME + '.csv'
@@ -30,7 +32,7 @@ scaler_path = 'checkpoint/scaler_0409_test.save'
 model_path = 'checkpoint/' + MODELNAME_SAVE + '.pth'
 
 robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D', 'Quad2D', 'VTOL2D']
-robot_model = robot_model_list[0]
+robot_model = robot_model_list[3]
 
 # PENN Parameters
 if robot_model == 'Quad2D':
@@ -188,8 +190,8 @@ if __name__ == '__main__':
             )
             penn.scaler = scaler
 
-            if WANDB_FLAG:
-                wandb.watch(penn, log="all", log_freq=100)
+        if WANDB_FLAG:
+            wandb.watch(penn, log="all", log_freq=100)
 
             # Create datasets and dataloaders
             train_dataset = module.CustomDataset(train_dataX, train_dataY)
@@ -204,11 +206,11 @@ if __name__ == '__main__':
             for epoch in range(start_epoch, start_epoch + EPOCH):
                 train_loss = penn.train(train_loader, epoch)
                 test_loss, bool_best, test_rmse = penn.test(test_loader, epoch)
-                
-                if WANDB_FLAG:
-                    wandb.log({"train_loss": train_loss, "test_loss": test_loss, "test_rmse": test_rmse, "epoch": epoch})
-                
-                if test_rmse < best_test_rmse:
+    
+            if WANDB_FLAG:
+                wandb.log({"train_loss": train_loss, "test_loss": test_loss, "test_rmse": test_rmse, "epoch": epoch})
+
+            if test_rmse < best_test_rmse:
                     best_test_rmse = test_rmse
                     print('Saving...\n')
                     os.makedirs('checkpoint/', exist_ok=True)
