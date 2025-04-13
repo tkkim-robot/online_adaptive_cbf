@@ -1,9 +1,5 @@
 import numpy as np
 
-
-# TODO: Add Online Adaptive CBF-QP
-# TODO: modify Online Adaptive CBF --> Online Adaptive MPC-CBF
-
 pillar_1_x = 67.0
 pillar_2_x = 73.0
 
