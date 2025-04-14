@@ -31,7 +31,12 @@ ALL_DEFAULTS = {
                 "gamma0": 0.5,
                 "gamma1": 0.5
             },
-            "Online Adaptive MPC-CBF": {
+            "Online Adaptive MPC-CBF MLP": {
+                "type": "mpc_cbf",
+                "gamma0": 0.01,
+                "gamma1": 0.01
+            },
+            "Online Adaptive MPC-CBF GAT": {
                 "type": "mpc_cbf",
                 "gamma0": 0.01,
                 "gamma1": 0.01
@@ -83,7 +88,12 @@ ALL_DEFAULTS = {
                 "gamma0": 0.5,
                 "gamma1": 0.5
             },
-            "Online Adaptive MPC-CBF": {
+            "Online Adaptive MPC-CBF MLP": {
+                "type": "mpc_cbf",
+                "gamma0": 0.01,
+                "gamma1": 0.01
+            },
+            "Online Adaptive MPC-CBF GAT": {
                 "type": "mpc_cbf",
                 "gamma0": 0.01,
                 "gamma1": 0.01
@@ -133,7 +143,12 @@ ALL_DEFAULTS = {
                 "gamma0": 0.5,
                 "gamma1": 0.5
             },
-            "Online Adaptive MPC-CBF": {
+            "Online Adaptive MPC-CBF MLP": {
+                "type": "mpc_cbf",
+                "gamma0": 0.01,
+                "gamma1": 0.01
+            },
+            "Online Adaptive MPC-CBF GAT": {
                 "type": "mpc_cbf",
                 "gamma0": 0.01,
                 "gamma1": 0.01
@@ -178,7 +193,7 @@ ALL_DEFAULTS = {
                 "gamma0": 0.05,
                 "gamma1": 0.05
             },
-            "Online Adaptive CBF": {
+            "Online Adaptive CBF MLP": {
                 "type": "mpc_cbf",
                 "gamma0": 0.05,
                 "gamma1": 0.05
@@ -227,12 +242,19 @@ ADAPTIVE_MODELS = {
             "lower_bound": 0.01,
             "upper_bound": 0.15
         },
-        "online_mpc_cbf": {
+        "online_mpc_cbf_mlp": {
             "model_path":  "nn_model/checkpoint/penn_model_0921.pth",
             "scaler_path": "nn_model/checkpoint/scaler_0921.save",
             "step_size":   0.01,
             "lower_bound": 0.01,
             "upper_bound": 0.2
+        },      
+        "online_mpc_cbf_gat": {
+            "model_path":  "nn_model/checkpoint/penn_model_0921.pth",
+            "scaler_path": "nn_model/checkpoint/scaler_0921.save",
+            "step_size":   0.01,
+            "lower_bound": 0.01,
+            "upper_bound": 0.35
         }      
     },
     "KinematicBicycle2D": {
@@ -243,7 +265,14 @@ ADAPTIVE_MODELS = {
             "lower_bound": 0.01,
             "upper_bound": 0.2
         },
-        "online_mpc_cbf": {
+        "online_mpc_cbf_mlp": {
+            "model_path":  "nn_model/checkpoint/penn_model_1204_kinbi.pth",
+            "scaler_path": "nn_model/checkpoint/scaler_1204_kinbi.save",
+            "step_size":   0.05,
+            "lower_bound": 0.01,
+            "upper_bound": 3.0
+        },
+        "online_mpc_cbf_gat": {
             "model_path":  "nn_model/checkpoint/penn_model_1204_kinbi.pth",
             "scaler_path": "nn_model/checkpoint/scaler_1204_kinbi.save",
             "step_size":   0.05,
@@ -259,13 +288,20 @@ ADAPTIVE_MODELS = {
             "lower_bound": 0.01,
             "upper_bound": 0.2
         },
-        "online_mpc_cbf": {
+        "online_mpc_cbf_mlp": {
             "model_path":  "nn_model/checkpoint/penn_model_0114_quad.pth",
             "scaler_path": "nn_model/checkpoint/scaler_0114_quad.save",
             "step_size":   0.05,
             "lower_bound": 0.01,
             "upper_bound": 1.1
-        }  
+        },  
+        "online_mpc_cbf_gat": {
+            "model_path":  "nn_model/checkpoint/penn_model_0114_quad.pth",
+            "scaler_path": "nn_model/checkpoint/scaler_0114_quad.save",
+            "step_size":   0.05,
+            "lower_bound": 0.01,
+            "upper_bound": 1.1
+        },
     },
     "VTOL2D": {
         "model_path":  "nn_model/checkpoint/penn_model_vtol_0224.pth",

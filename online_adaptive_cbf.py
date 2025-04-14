@@ -21,7 +21,7 @@ from online_cbf_config import ALL_DEFAULTS, ADAPTIVE_MODELS
 class OnlineCBFAdapter:
     def __init__(self, model_name, scaler_name=None, d_min=0.075, step_size=0.05,
                  epistemic_threshold=0.2, lower_bound=0.01, upper_bound=1.0,
-                 robot_model=None, use_gnn=True):
+                 robot_model=None, use_gat=False):
         """
         Initialize the adaptive CBF parameter selector
         """
@@ -31,15 +31,15 @@ class OnlineCBFAdapter:
         else:
             self.extra_state = 0
 
-        self.use_gnn = use_gnn
-        if self.use_gnn:
+        self.use_gat = use_gat
+        if self.use_gat:
             self.n_states = 18
         else:
             self.n_states = 6 + self.extra_state
 
-        self.gnn_module = None
-        if self.use_gnn:
-            self.gnn_module = GATModule()
+        self.gat_module = None
+        if self.use_gat:
+            self.gat_module = GATModule()
 
         self.penn = ProbabilisticEnsembleNN(n_states=self.n_states)
         self.penn.load_model(model_name)
@@ -55,8 +55,8 @@ class OnlineCBFAdapter:
         '''
         Sample CBF parameters (gamma0 and gamma1) within a specified range
         '''
-        gamma0_range = np.arange(max(self.lower_bound, current_gamma0 - 2.5), min(self.upper_bound, current_gamma0 + 2.5 + self.step_size), self.step_size)
-        gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 2.5), min(self.upper_bound, current_gamma1 + 2.5 + self.step_size), self.step_size)
+        gamma0_range = np.arange(max(self.lower_bound, current_gamma0 - 1.0), min(self.upper_bound, current_gamma0 + 1.0 + self.step_size), self.step_size)
+        gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 1.0), min(self.upper_bound, current_gamma1 + 1.0 + self.step_size), self.step_size)
         return gamma0_range, gamma1_range
 
     def get_rel_state_wt_obs(self, tracking_controller):
@@ -147,7 +147,7 @@ class OnlineCBFAdapter:
         goal = [final_waypoint[0], final_waypoint[1]]
 
         # Build the graph using the GATModule
-        gdata = self.gnn_module.create_graph(
+        gdata = self.gat_module.create_graph(
             robot=robot_state,
             obstacles=obstacles,
             goal=goal,
@@ -156,7 +156,7 @@ class OnlineCBFAdapter:
         )
         return gdata
     
-    def predict_with_gnn_penn(self, tracking_controller, gamma0_range, gamma1_range):
+    def predict_with_gat_penn(self, tracking_controller, gamma0_range, gamma1_range):
         """
         Predict safety loss, deadlock time, and epistemic uncertainty 
         using the Probabilistic Ensemble Neural Network
@@ -164,10 +164,10 @@ class OnlineCBFAdapter:
         graph_data = self.build_graph_from_env(tracking_controller)
         batch_data = Batch.from_data_list([graph_data])
 
-        # Extract the 16D robot embedding from the GNN
-        self.gnn_module.gnn.eval()
+        # Extract the 16D robot embedding from the GAT
+        self.gat_module.gat.eval()
         with torch.no_grad():
-            robot_emb = self.gnn_module.gnn.extract_robot_embedding(
+            robot_emb = self.gat_module.gat.extract_robot_embedding(
                 x=batch_data.x,
                 edge_index=batch_data.edge_index,
                 edge_attr=batch_data.edge_attr,
@@ -282,8 +282,8 @@ class OnlineCBFAdapter:
         current_state = self.get_rel_state_wt_obs(tracking_controller)
         gamma0_range, gamma1_range = self.sample_cbf_parameters(current_state[3+self.extra_state], current_state[4+self.extra_state])
         
-        if self.use_gnn:
-            predictions = self.predict_with_gnn_penn(tracking_controller, gamma0_range, gamma1_range)
+        if self.use_gat:
+            predictions = self.predict_with_gat_penn(tracking_controller, gamma0_range, gamma1_range)
         else:
             predictions = self.predict_with_penn(current_state, gamma0_range, gamma1_range)
         
@@ -357,8 +357,14 @@ def get_online_cbf_adapter(robot_model, controller_name):
 
     controller_subkey_map = {
         "Online Adaptive CBF-QP":  "online_cbf_qp",
-        "Online Adaptive MPC-CBF": "online_mpc_cbf"
+        "Online Adaptive MPC-CBF MLP": "online_mpc_cbf_mlp",
+        "Online Adaptive MPC-CBF GAT": "online_mpc_cbf_gat",
     }
+    if controller_name == "Online Adaptive MPC-CBF GAT": 
+        use_gat=True
+    else:
+        use_gat=False
+    
     if controller_name not in controller_subkey_map:
         raise ValueError(f"Controller '{controller_name}' not recognized for online adaptation.")
     subkey = controller_subkey_map[controller_name]
@@ -374,7 +380,7 @@ def get_online_cbf_adapter(robot_model, controller_name):
         upper_bound=cfg["upper_bound"],
         epistemic_threshold=cfg.get("epistemic_threshold", 0.2),
         robot_model=robot_model,
-        use_gnn=True # TODO: 
+        use_gat=use_gat
     )
 
 def single_agent_simulation(velocity,
@@ -438,7 +444,7 @@ def single_agent_simulation(velocity,
     tracking_controller.set_waypoints(waypoints)
 
     # If controller is 'Online Adaptive', get adapter
-    if controller_name in ['Online Adaptive CBF-QP', 'Online Adaptive MPC-CBF']:
+    if controller_name in ['Online Adaptive CBF-QP', 'Online Adaptive MPC-CBF MLP', 'Online Adaptive MPC-CBF GAT']:
         online_cbf_adapter = get_online_cbf_adapter(robot_model, controller_name)
     else:
         online_cbf_adapter = None
@@ -495,7 +501,8 @@ if __name__ == "__main__":
         "Optimal Decay CBF-QP",
         "Optimal Decay MPC-CBF",
         "Online Adaptive CBF-QP",
-        "Online Adaptive MPC-CBF",
+        "Online Adaptive MPC-CBF MLP",
+        "Online Adaptive MPC-CBF GAT",
     ]
     robot_model_list = [
         "DynamicUnicycle2D",
