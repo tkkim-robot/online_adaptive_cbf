@@ -62,7 +62,7 @@ class ProbabilisticEnsembleGAT(nn.Module):
                     batch_data.x, batch_data.edge_index, batch_data.edge_attr, batch_data.y, batch_data.batch
                 )
                 # GAT embeddings
-                robot_emb = self.gat_model.extract_robot_embedding(x, edge_index, edge_attr, batch_idx)
+                robot_emb = self.gat_model.gat.extract_robot_embedding(x, edge_index, edge_attr, batch_idx)
                 gamma = getattr(batch_data, 'gamma', None)
                 if gamma is None:
                     gamma = torch.zeros((robot_emb.shape[0], 2), dtype=torch.float, device=self.device)
@@ -242,7 +242,7 @@ class ProbabilisticEnsembleGAT(nn.Module):
 
     def load_model(self, model_path):
         if os.path.exists(model_path):
-            checkpoint = torch.load(model_path)
+            checkpoint = torch.load(model_path, map_location=self.device)
             
             # Adjust the state_dict keys if they have 'model.' prefix
             if "model." in list(checkpoint.keys())[0]:
@@ -251,7 +251,7 @@ class ProbabilisticEnsembleGAT(nn.Module):
                     name = k.replace("model.", "")  # remove 'model.' prefix
                     new_state_dict[name] = v
                 checkpoint = new_state_dict
-            self.model.load_state_dict(checkpoint)       
+            self.model.load_state_dict(checkpoint, strict=False)       
             
         else:
             print("Model path does not exist. Check the provided path.")

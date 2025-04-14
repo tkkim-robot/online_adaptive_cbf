@@ -5,6 +5,7 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(project_root, 'safe_control'))
 sys.path.append(os.path.join(project_root, 'DistributionallyRobustCVaR'))
 
+import copy
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,8 +15,13 @@ from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController
 from nn_model.penn.gat import GATModule
 from nn_model.penn.nn_iccbf_predict import ProbabilisticEnsembleNN
+from nn_model.penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
 from DistributionallyRobustCVaR.distributionally_robust_cvar import DistributionallyRobustCVaR
 from online_cbf_config import ALL_DEFAULTS, ADAPTIVE_MODELS
+
+
+# TODO: compare cpu / cuda
+# TODO: 
 
 
 class OnlineCBFAdapter:
@@ -40,11 +46,13 @@ class OnlineCBFAdapter:
         self.gat_module = None
         if self.use_gat:
             self.gat_module = GATModule()
-
-        self.penn = ProbabilisticEnsembleNN(n_states=self.n_states)
+            self.penn = ProbabilisticEnsembleGAT(self.gat_module)
+        else:
+            self.penn = ProbabilisticEnsembleNN(n_states=self.n_states)
+            if scaler_name:
+                self.penn.load_scaler(scaler_name)
+        
         self.penn.load_model(model_name)
-        if scaler_name:
-            self.penn.load_scaler(scaler_name)
         self.lower_bound = lower_bound  # Lower bound for CBF parameter sampling, Conservative
         self.upper_bound = upper_bound  # Upper bound for CBF parameter sampling, Aggressive
         self.d_min = d_min  # Closest allowable distance to obstacles
@@ -55,8 +63,8 @@ class OnlineCBFAdapter:
         '''
         Sample CBF parameters (gamma0 and gamma1) within a specified range
         '''
-        gamma0_range = np.arange(max(self.lower_bound, current_gamma0 - 1.0), min(self.upper_bound, current_gamma0 + 1.0 + self.step_size), self.step_size)
-        gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 1.0), min(self.upper_bound, current_gamma1 + 1.0 + self.step_size), self.step_size)
+        gamma0_range = np.arange(max(self.lower_bound, current_gamma0 - 2.5), min(self.upper_bound, current_gamma0 + 2.5 + self.step_size), self.step_size)
+        gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 2.5), min(self.upper_bound, current_gamma1 + 2.5 + self.step_size), self.step_size)
         return gamma0_range, gamma1_range
 
     def get_rel_state_wt_obs(self, tracking_controller):
@@ -90,7 +98,7 @@ class OnlineCBFAdapter:
             velocity_z = tracking_controller.robot.X[4, 0]
             return [distance, velocity_x, velocity_z, delta_theta, gamma0, gamma1]
         else:
-            # for vtol, also put x_vel only in this particular scenario (same setting for training)
+            # for vtol, also put x_vel only in this particular scenario (same setting for training)            
             # 2D ground => velocity is single scalar
             # for vtol, also put x_vel only in this particular scenario (same setting for training)
             velocity = tracking_controller.robot.X[3, 0]
@@ -114,7 +122,6 @@ class OnlineCBFAdapter:
 
         for i, (gamma0, gamma1) in enumerate(zip(gamma0_range.repeat(len(gamma1_range)), np.tile(gamma1_range, len(gamma0_range)))):
             predictions.append((gamma0, gamma1, y_pred_safety_loss[i], y_pred_deadlock_time[i][0], epistemic_uncertainty[i]))
-
         return predictions
     
     def build_graph_from_env(self, tracking_controller):
@@ -161,51 +168,29 @@ class OnlineCBFAdapter:
         Predict safety loss, deadlock time, and epistemic uncertainty 
         using the Probabilistic Ensemble Neural Network
         """
-        graph_data = self.build_graph_from_env(tracking_controller)
-        batch_data = Batch.from_data_list([graph_data])
-
-        # Extract the 16D robot embedding from the GAT
-        self.gat_module.gat.eval()
-        with torch.no_grad():
-            robot_emb = self.gat_module.gat.extract_robot_embedding(
-                x=batch_data.x,
-                edge_index=batch_data.edge_index,
-                edge_attr=batch_data.edge_attr,
-                batch=batch_data.batch
-            )
-
-        predictions = []
-        self.penn.model.eval()
-
+        base_graph = self.build_graph_from_env(tracking_controller)
+        graph_list = []
         for g0 in gamma0_range:
             for g1 in gamma1_range:
-                gamma_tensor = torch.tensor([[g0, g1]], dtype=torch.float)
-                X = torch.cat([robot_emb, gamma_tensor], dim=1)  # Shape: [1, 18]
+                # Make a copy of the base graph and attach gamma
+                g_copy = copy.deepcopy(base_graph)
+                g_copy.gamma = torch.tensor([[g0, g1]], dtype=torch.float32)
+                graph_list.append(g_copy)
 
-                safety_ensembles = []    
-                deadlock_ensembles = []  
-                ensemble_safety_means = []  
+        y_pred_safety_list, y_pred_deadlock_list, div_list = self.penn.predict(graph_list)
 
-                with torch.no_grad():
-                    for m_i in range(self.penn.n_ensemble):
-                        mu_i, log_std_i = self.penn.model.single_forward(X, m_i)
-                        # Compute sigma = (exp(log_std))^2
-                        sigma_i = torch.square(torch.exp(log_std_i))
-                        # mu_i is [1,2] => index 0 for safety loss, 1 for deadlock time
-                        safety_pair = [mu_i[0, 0].item(), sigma_i[0, 0].item()]
-                        deadlock_pair = [mu_i[0, 1].item(), sigma_i[0, 1].item()]
-                        safety_ensembles.append(safety_pair)
-                        deadlock_ensembles.append(deadlock_pair)
-                        ensemble_safety_means.append(mu_i[0, 0].item())
-
-                # Compute epistemic uncertainty as the standard deviation of ensemble safety loss means
-                epistemic_val = float(np.std(ensemble_safety_means))
-
-                predictions.append(
-                    (g0, g1, safety_ensembles, deadlock_ensembles, epistemic_val)
-                )
+        predictions = []
+        idx = 0
+        for g0 in gamma0_range:
+            for g1 in gamma1_range:
+                safety_ensembles  = y_pred_safety_list[idx]   # List of [mu, var] per ensemble
+                deadlock_ensembles = y_pred_deadlock_list[idx]
+                epistemic_val     = div_list[idx]
+                predictions.append((g0, g1, safety_ensembles, deadlock_ensembles, epistemic_val))
+                idx += 1
 
         return predictions
+
 
     def filter_by_epistemic_uncertainty(self, predictions):
         '''
@@ -241,15 +226,16 @@ class OnlineCBFAdapter:
         cvar_boundary = self.calculate_cvar_boundary()
         for pred in filtered_predictions:
             _, _, y_pred_safety_loss, _, _ = pred
-            print(y_pred_safety_loss)
-            print(y_pred_safety_loss)
-            print(y_pred_safety_loss)
+            # print(y_pred_safety_loss)
+            # print(y_pred_safety_loss)
+            # print(y_pred_safety_loss)
 
             gmm = self.penn.create_gmm(y_pred_safety_loss)
             cvar_filter = DistributionallyRobustCVaR(gmm)
 
             if cvar_filter.is_within_boundary(cvar_boundary, alpha=0.99):
                 final_predictions.append(pred)
+        # print(final_predictions)
         return final_predictions
 
     def select_best_parameters(self, final_predictions, tracking_controller):
@@ -264,15 +250,25 @@ class OnlineCBFAdapter:
             gamma1 = max(self.lower_bound, current_gamma1 - self.step_size)
             return gamma0, gamma1
         min_deadlock_time = min(final_predictions, key=lambda x: x[3])[3]
-        best_predictions = [pred for pred in final_predictions if pred[3][0] < 1e-3]
+        # print(final_predictions)
+        # best_predictions = [pred for pred in final_predictions if pred[3][0] < 1e-3]
         # If no predictions under 1e-3, use the minimum deadlock time
-        if not best_predictions:
-            best_predictions = [pred for pred in final_predictions if pred[3] == min_deadlock_time]
-        # If there are multiple best predictions, use harmonic mean to select the best one
-        if len(best_predictions) != 1:
-            best_prediction = max(best_predictions, key=lambda x: 2 * (x[0] * x[1]) / (x[0] + x[1]) if (x[0] + x[1]) != 0 else 0)
-            return best_prediction[0], best_prediction[1]
-        return best_predictions[0][0], best_predictions[0][1]
+        # if not best_predictions:
+        #     best_predictions = [pred for pred in final_predictions if pred[3] == min_deadlock_time]
+        # # If there are multiple best predictions, use harmonic mean to select the best one
+        # if len(best_predictions) != 1:
+        #     best_prediction = max(best_predictions, key=lambda x: 2 * (x[0] * x[1]) / (x[0] + x[1]) if (x[0] + x[1]) != 0 else 0)
+        #     return best_prediction[0], best_prediction[1]
+        # return best_predictions[0][0], best_predictions[0][1]
+
+        # Pick the best prediction by harmonic mean of (gamma0, gamma1).
+        best_prediction = max(
+            final_predictions, 
+            key=lambda x: 2.0 * (x[0] * x[1]) / (x[0] + x[1]) if (x[0] + x[1]) != 0 else 0.0
+        )
+
+        return best_prediction[0], best_prediction[1]
+
 
     def cbf_param_adaptation(self, tracking_controller):
         '''
