@@ -35,9 +35,9 @@ ROBOT_SPECS = {
             "gamma1_range":    (0.01, 0.35)
         }
     },
-    "KinematicBicycle2D_C3BF": {
+    "KinematicBicycle2D_relaxedC3BF": {
         "spec": {
-            "model": "KinematicBicycle2D_C3BF",
+            "model": "KinematicBicycle2D_relaxedC3BF",
             "a_max": 0.5,
             "fov_angle": 170.0,
             "cam_range": 0.01,
@@ -90,7 +90,7 @@ def get_safety_loss_from_controller(tracking_controller, safety_metric):
     
     # Compute the Control Barrier Function (CBF) values
     gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
-    if tracking_controller.robot_spec['model'] in ['KinematicBicycle2D_C3BF']:
+    if tracking_controller.robot_spec['model'] in ['KinematicBicycle2D_relaxedC3BF']:
         h_k, d_h = tracking_controller.robot.agent_barrier_dt(robot_state, np.array([0, 0]), obs_state)
         cbf_constraint_value = d_h + gamma0 * h_k
     else:
@@ -168,7 +168,7 @@ def single_agent_simulation_gat(
             ex, ey, er = existing
             center_dist = np.hypot(ox - ex, oy - ey)
             min_clearance = er + radius + min_gap
-            if center_dist < min_clearance*1.75: # 1.75 for KinematicBicycle2D_C3BF, 1.2 for others
+            if center_dist < min_clearance*1.5: # 1.75 for KinematicBicycle2D_C3BF, 1.2 for others
                 valid = False
                 break
         if valid:
@@ -204,7 +204,7 @@ def single_agent_simulation_gat(
 
     # Set the gamma parameters for CBF
     tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
-    if robot_model != "KinematicBicycle2D_C3BF":
+    if robot_model != "KinematicBicycle2D_relaxedC3BF":
         tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
         
     # 5) Simulate
@@ -329,7 +329,7 @@ def generate_data_for_model_gat(
     parameter_space = []
     for _ in range(num_samples):
         gamma0 = np.random.uniform(g0_min, g0_max)
-        if robot_model == "KinematicBicycle2D_C3BF":
+        if robot_model == "KinematicBicycle2D_relaxedC3BF":
             gamma1 = None               
         else:
             gamma1 = np.random.uniform(g1_min, g1_max)        
@@ -387,17 +387,17 @@ if __name__ == "__main__":
         ]
     robot_model_list = [
         "DynamicUnicycle2D", 
-        "KinematicBicycle2D_C3BF", 
+        "KinematicBicycle2D_relaxedC3BF", 
         "Quad2D"
         ]
     controller_name = controller_list[1]
     robot_model = robot_model_list[1]
     
-    TESTMODE = False
+    TESTMODE = True
     
     if TESTMODE:
         single_simulation_example(robot_model, controller_name, 
-                                  gamma0=0.05, gamma1=0.07, theta=0.01)
+                                  gamma0=0.05, gamma1=0.05, theta=0.01)
 
     else:
         matplotlib.use('Agg') # Use a non-interactive backend to avoid display issues
