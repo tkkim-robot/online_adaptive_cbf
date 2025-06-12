@@ -66,37 +66,37 @@ ALL_DEFAULTS = {
             "MPC-CBF low fixed param": {
                 "type": "mpc_cbf",
                 "gamma0": 0.05,
-                "gamma1": 0.05
+                "gamma1": 0.0
             },
             "MPC-CBF high fixed param": {
                 "type": "mpc_cbf",
                 "gamma0": 3.0,
-                "gamma1": 3.0
+                "gamma1": 0.0
             },
             "Optimal Decay CBF-QP": {
                 "type": "optimal_decay_cbf_qp",
                 "gamma0": 0.5,
-                "gamma1": 0.5
+                "gamma1": 0.0
             },
             "Optimal Decay MPC-CBF": {
                 "type": "optimal_decay_mpc_cbf",
                 "gamma0": 0.1,
-                "gamma1": 0.1
+                "gamma1": 0.0
             },
             "Online Adaptive CBF-QP": {
                 "type": "cbf_qp",
                 "gamma0": 0.5,
-                "gamma1": 0.5
+                "gamma1": 0.0
             },
             "Online Adaptive MPC-CBF MLP": {
                 "type": "mpc_cbf",
                 "gamma0": 0.01,
-                "gamma1": 0.01
+                "gamma1": 0.00
             },
             "Online Adaptive MPC-CBF GAT": {
                 "type": "mpc_cbf",
                 "gamma0": 0.01,
-                "gamma1": 0.01
+                "gamma1": 0.00
             },
         },
         "robot_spec": {
@@ -164,10 +164,10 @@ ALL_DEFAULTS = {
         "default_obs": np.array([
             [4.0, 0.1, 0.3],
             [3.5, 0.3, 0.4],
-            [3.5, 3.0, 0.5],
+            [2.5, 3.0, 0.5],
             [6.5, 2.4, 1.05],
             [7.5, 2.7, 0.45],
-            [8.2, 1.2, 0.5],
+            [8.2, 0.7, 0.5],
         ])
     },
 
@@ -236,11 +236,11 @@ ALL_DEFAULTS = {
 ADAPTIVE_MODELS = {
     "DynamicUnicycle2D": {
         "online_cbf_qp": {
-            "model_path":  "nn_model/checkpoint/penn_model_0128.pth",
-            "scaler_path": "nn_model/checkpoint/scaler_0128.save",
-            "step_size":   0.01,
-            "lower_bound": 0.01,
-            "upper_bound": 0.15
+            "model_path":  "nn_model/checkpoint/DynamicUnicycle2D_0530_mlp_qp.pth",
+            "scaler_path": "nn_model/checkpoint/DynamicUnicycle2D_0530_mlp_qp.save",
+            "step_size":   0.05,
+            "lower_bound": 0.5,
+            "upper_bound": 3.0
         },
         "online_mpc_cbf_mlp": {
             "model_path":  "nn_model/checkpoint/DynamicUnicycle2D_0418_mlp.pth",
@@ -266,18 +266,18 @@ ADAPTIVE_MODELS = {
             "upper_bound": 0.2
         },
         "online_mpc_cbf_mlp": {
-            "model_path":  "nn_model/checkpoint/penn_model_1204_kinbi.pth",
-            "scaler_path": "nn_model/checkpoint/scaler_1204_kinbi.save",
-            "step_size":   0.05,
+            "model_path":  "nn_model/checkpoint/KinematicBicycle2D_C3BF_0606_mlp_1736.pth",
+            "scaler_path": "nn_model/checkpoint/KinematicBicycle2D_C3BF_0606_mlp_1736.save",
+            "step_size":   0.001,
             "lower_bound": 0.01,
-            "upper_bound": 3.0
+            "upper_bound": 0.35
         },
         "online_mpc_cbf_gat": {
-            "model_path":  "nn_model/checkpoint/penn_model_1204_kinbi.pth",
+            "model_path":  "nn_model/checkpoint/KinematicBicycle2D_C3BF_0608_gat_1530.pth",
             "scaler_path": "nn_model/checkpoint/scaler_1204_kinbi.save",
-            "step_size":   0.05,
+            "step_size":   0.001,
             "lower_bound": 0.01,
-            "upper_bound": 3.0
+            "upper_bound": 0.35
         }  
     },
     "Quad2D": {
@@ -289,15 +289,15 @@ ADAPTIVE_MODELS = {
             "upper_bound": 0.2
         },
         "online_mpc_cbf_mlp": {
-            "model_path":  "nn_model/checkpoint/Quad2D_0513_mlp.pth",
-            "scaler_path": "nn_model/checkpoint/Quad2D_0513_mlp.save",
+            "model_path":  "nn_model/checkpoint/Quad2D_0117_mlp.pth",
+            "scaler_path": "nn_model/checkpoint/Quad2D_0117_mlp.save",
             "step_size":   0.01,
             "lower_bound": 0.01,
             "upper_bound": 0.35
         },  
         "online_mpc_cbf_gat": {
-            "model_path":  "nn_model/checkpoint/Quad2D_0513_gat.pth",
-            "scaler_path": "nn_model/checkpoint/Quad2D_0513_gat.save",
+            "model_path":  "nn_model/checkpoint/Quad2D_0514_gat.pth",
+            "scaler_path": "nn_model/checkpoint/Quad2D_0514_gat.save",
             "step_size":   0.01,
             "lower_bound": 0.01,
             "upper_bound": 0.35

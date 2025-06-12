@@ -4,6 +4,7 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(project_root, 'safe_control'))
 sys.path.append(os.path.join(project_root, 'cvar_gmm_filter'))
 
+import csv
 import copy
 import torch
 import numpy as np
@@ -35,17 +36,14 @@ class OnlineCBFAdapter:
             self.extra_state = 1
             self.gamma_dim = 2
         elif self.robot_model == 'KinematicBicycle2D_C3BF':
-            self.extra_state = 0
+            self.extra_state = -1
             self.gamma_dim = 1
         else:
             self.extra_state = 0
             self.gamma_dim = 2
 
         self.use_gat = use_gat
-        if self.use_gat:
-            self.n_states = 18
-        else:
-            self.n_states = 6 + self.extra_state
+        self.n_states = 18 if self.use_gat else 6 + self.extra_state
 
         self.gat_module = None
         if self.use_gat:
@@ -63,13 +61,16 @@ class OnlineCBFAdapter:
         self.step_size = step_size  # Step size for sampling caldidate CBF parameters
         self.epistemic_threshold = epistemic_threshold  # Threshold for filtering predictions based on epistemic uncertainty
 
-    def sample_cbf_parameters(self, current_gamma0, current_gamma1):
+    def sample_cbf_parameters(self, current_gamma0, current_gamma1=None):
         '''
         Sample CBF parameters (gamma0 and gamma1) within a specified range
         '''
         gamma0_range = np.arange(max(self.lower_bound, current_gamma0 - 2.5), min(self.upper_bound, current_gamma0 + 2.5 + self.step_size), self.step_size)
-        gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 2.5), min(self.upper_bound, current_gamma1 + 2.5 + self.step_size), self.step_size)
-        return gamma0_range, gamma1_range
+        if self.gamma_dim == 2:
+            gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 2.5), min(self.upper_bound, current_gamma1 + 2.5 + self.step_size), self.step_size)
+            return gamma0_range, gamma1_range
+        else:
+            return gamma0_range, None
 
     def get_rel_state_wt_obs(self, tracking_controller):
         """
@@ -95,17 +96,19 @@ class OnlineCBFAdapter:
             delta_theta = np.arctan2(near_obs[1] - robot_pos[1], near_obs[0] - robot_pos[0]) - robot_theta
             delta_theta = ((delta_theta + np.pi) % (2 * np.pi)) - np.pi  
         gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
-        gamma1 = tracking_controller.pos_controller.cbf_param['alpha2']
+        if self.gamma_dim == 2:
+            gamma1 = tracking_controller.pos_controller.cbf_param['alpha2']
 
-        # If Quad2D => velocity_x, velocity_z
-        if self.robot_model == 'Quad2D':
+        if self.robot_model == 'Quad2D': # If Quad2D => velocity_x, velocity_z
             velocity_x = tracking_controller.robot.X[3, 0]
             velocity_z = tracking_controller.robot.X[4, 0]
             return [distance, velocity_x, velocity_z, delta_theta, gamma0, gamma1]
+        elif self.robot_model in ['KinematicBicycle2D_C3BF']:
+            velocity = tracking_controller.robot.X[3, 0]
+            return [distance, velocity, delta_theta, gamma0]
         else:
             # for vtol, also put x_vel only in this particular scenario (same setting for training)            
             # 2D ground => velocity is single scalar
-            # for vtol, also put x_vel only in this particular scenario (same setting for training)
             velocity = tracking_controller.robot.X[3, 0]
             return [distance, velocity, delta_theta, gamma0, gamma1]
 
@@ -113,23 +116,32 @@ class OnlineCBFAdapter:
         """
         Predict safety loss, deadlock time, and epistemic uncertainty using PENN (MLP-based)
         """
-        g0_grid, g1_grid = np.meshgrid(gamma0_range, gamma1_range, indexing='ij')
-        gamma_flat = np.stack([g0_grid.flatten(), g1_grid.flatten()], axis=1)  # (N, 2)
-        num_samples = gamma_flat.shape[0]
+        if self.gamma_dim == 2:
+            g0_grid, g1_grid = np.meshgrid(gamma0_range, gamma1_range, indexing='ij')
+            gamma_flat = np.stack([g0_grid.flatten(), g1_grid.flatten()], axis=1)
+        else:
+            gamma_flat = gamma0_range.reshape(-1, 1)
 
-        state_repeated = np.tile(current_state, (num_samples, 1))  # (N, D)
-        state_repeated[:, 3 + self.extra_state] = gamma_flat[:, 0]
-        state_repeated[:, 4 + self.extra_state] = gamma_flat[:, 1]
+        num_samples = gamma_flat.shape[0]
+        state_repeated = np.tile(current_state, (num_samples, 1))
+
+        if self.gamma_dim == 2:
+            state_repeated[:, 3 + self.extra_state] = gamma_flat[:, 0]
+            state_repeated[:, 4 + self.extra_state] = gamma_flat[:, 1]
+        else:
+            state_repeated[:, 3 + self.extra_state] = gamma_flat[:, 0]
 
         # Predict using vectorized PENN
         y_pred_safety_loss, y_pred_deadlock_time, epistemic_uncertainty = self.penn.predict(state_repeated)
 
         # Repackage predictions
-        predictions = [
-            (gamma_flat[i, 0], gamma_flat[i, 1], y_pred_safety_loss[i], y_pred_deadlock_time[i][0], epistemic_uncertainty[i])
-            for i in range(num_samples)
-        ]
-        return predictions    
+        predictions = []
+        for i in range(num_samples):
+            g0 = gamma_flat[i, 0]
+            g1 = gamma_flat[i, 1] if self.gamma_dim == 2 else 0.0
+            predictions.append((g0, g1, y_pred_safety_loss[i], y_pred_deadlock_time[i][0], epistemic_uncertainty[i]))
+
+        return predictions
     
     def build_graph_from_env(self, tracking_controller):
         """
@@ -178,23 +190,29 @@ class OnlineCBFAdapter:
         base_graph = self.build_graph_from_env(tracking_controller)
 
         # Generate all gamma combinations
-        g0_grid, g1_grid = torch.meshgrid(
-            torch.tensor(gamma0_range, dtype=torch.float32),
-            torch.tensor(gamma1_range, dtype=torch.float32),
-            indexing='ij'
-        )
-        gamma_comb = torch.stack([g0_grid.flatten(), g1_grid.flatten()], dim=1).to(self.device)  # (N, 2)
-        num_samples = gamma_comb.shape[0]
+        if self.gamma_dim == 2:
+            g0_grid, g1_grid = torch.meshgrid(
+                torch.tensor(gamma0_range, dtype=torch.float32),
+                torch.tensor(gamma1_range, dtype=torch.float32),
+                indexing='ij'
+            )
+            gamma_comb = torch.stack([g0_grid.flatten(), g1_grid.flatten()], dim=1).to(self.device)
+        else:
+            gamma_comb = torch.tensor(gamma0_range, dtype=torch.float32).reshape(-1, 1).to(self.device)
 
+        num_samples = gamma_comb.shape[0]
         graph_list = [base_graph.clone() for _ in range(num_samples)]
         for i in range(num_samples):
-            graph_list[i].gamma = gamma_comb[i].unsqueeze(0)  # Shape (1, 2)
+            graph_list[i].gamma = gamma_comb[i].unsqueeze(0)
+
         batched_graph = Batch.from_data_list(graph_list).to(self.device)
 
         # Predict with vectorized PENN
         y_pred_safety_list, y_pred_deadlock_list, div_list = self.penn.predict([batched_graph])
         predictions = []
-        for i, (g0, g1) in enumerate(gamma_comb.cpu().numpy()):
+        for i in range(num_samples):
+            g0 = gamma_comb[i, 0].item()
+            g1 = gamma_comb[i, 1].item() if self.gamma_dim == 2 else 0.0
             predictions.append((g0, g1, y_pred_safety_list[i], y_pred_deadlock_list[i], div_list[i]))
 
         return predictions
@@ -209,7 +227,7 @@ class OnlineCBFAdapter:
             return []
         epi = np.asarray([p[4] for p in predictions], dtype=np.float32)          # (N,)
         # If all uncertainties are high, return an empty list
-        if np.all(epi > 10.0):
+        if np.all(epi > 100.0):
             return []
         epi_norm = (epi - epi.min()) / (epi.max() - epi.min() + 1e-8)
         keep_mask = epi_norm <= self.epistemic_threshold                         # (N,) bool
@@ -252,33 +270,27 @@ class OnlineCBFAdapter:
         '''
         Select the best CBF parameters based on filtered predictions.
         '''
-        # If no predictions were selected, gradually decrease the parameter
-        if not final_predictions:
-            current_gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
+        current_gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
+        if self.gamma_dim == 2:
             current_gamma1 = tracking_controller.pos_controller.cbf_param['alpha2']
+
+        # If no predictions were selected, degrade conservatively
+        if not final_predictions:
             gamma0 = max(self.lower_bound, current_gamma0 - self.step_size)
-            gamma1 = max(self.lower_bound, current_gamma1 - self.step_size)
+            gamma1 = max(self.lower_bound, current_gamma1 - self.step_size) if self.gamma_dim == 2 else 0.0
             return gamma0, gamma1
-        
-        # min_deadlock_time = min(final_predictions, key=lambda x: x[3])[3]
-        # print(final_predictions)
-        # best_predictions = [pred for pred in final_predictions if pred[3][0] < 1e-3]
-        # If no predictions under 1e-3, use the minimum deadlock time
-        # if not best_predictions:
-        #     best_predictions = [pred for pred in final_predictions if pred[3] == min_deadlock_time]
-        # # If there are multiple best predictions, use harmonic mean to select the best one
-        # if len(best_predictions) != 1:
-        #     best_prediction = max(best_predictions, key=lambda x: 2 * (x[0] * x[1]) / (x[0] + x[1]) if (x[0] + x[1]) != 0 else 0)
-        #     return best_prediction[0], best_prediction[1]
-        # return best_predictions[0][0], best_predictions[0][1]
 
-        # Pick the best prediction by harmonic mean of (gamma0, gamma1).
-        best_prediction = max(
-            final_predictions, 
-            key=lambda x: 2.0 * (x[0] * x[1]) / (x[0] + x[1]) if (x[0] + x[1]) != 0 else 0.0
-        )
-
-        return best_prediction[0], best_prediction[1]
+        # Use harmonic mean only if gamma1 exists
+        if self.gamma_dim == 2:
+            best_prediction = max(
+                final_predictions,
+                key=lambda x: 2.0 * (x[0] * x[1]) / (x[0] + x[1]) if (x[0] + x[1]) != 0 else 0.0
+            )
+            return best_prediction[0], best_prediction[1]
+        else:
+            # gamma1 is unused → use max gamma0
+            best_prediction = max(final_predictions, key=lambda x: x[0])
+            return best_prediction[0], 0.0  # gamma0, dummy gamma1
 
     def cbf_param_adaptation(self, tracking_controller):
         '''
@@ -286,30 +298,31 @@ class OnlineCBFAdapter:
         which is both confident and satisfies the local validity condition
         '''
         current_state = self.get_rel_state_wt_obs(tracking_controller)
-        gamma0_range, gamma1_range = self.sample_cbf_parameters(current_state[3+self.extra_state], current_state[4+self.extra_state])
-        
+        gamma0 = current_state[3 + self.extra_state]
+        gamma1 = current_state[4 + self.extra_state] if self.gamma_dim == 2 else None
+        gamma0_range, gamma1_range = self.sample_cbf_parameters(gamma0, gamma1)
+
         if self.use_gat:
             predictions = self.predict_with_gat_penn(tracking_controller, gamma0_range, gamma1_range)
         else:
             predictions = self.predict_with_penn(current_state, gamma0_range, gamma1_range)
-        
+
         filtered_predictions = self.filter_by_epistemic_uncertainty(predictions)
         final_predictions = self.filter_by_aleatoric_uncertainty(filtered_predictions)
         best_gamma0, best_gamma1 = self.select_best_parameters(final_predictions, tracking_controller)
 
-        if best_gamma0 is not None and best_gamma1 is not None:
+        if self.gamma_dim == 2:
             print(f"CBF parameters updated to: {best_gamma0:.2f}, {best_gamma1:.2f}"
-                  f" | Total predictions: {len(predictions)}"
-                  f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
-                  f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
+                f" | Total predictions: {len(predictions)}"
+                f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
+                f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
         else:
-            print(f"CBF parameters updated to: NONE, NONE"
-                  f" | Total predictions: {len(predictions)}"
-                  f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
-                  f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
+            print(f"CBF parameter updated to: {best_gamma0:.2f}"
+                f" | Total predictions: {len(predictions)}"
+                f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
+                f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
 
         return best_gamma0, best_gamma1
-
 
 
 def get_robot_spec_and_obs(robot_model):
@@ -407,12 +420,11 @@ def single_agent_simulation(velocity,
     env_width, env_height = get_env_defaults(robot_model)
 
     print(robot_spec, default_obs)
-    print(ctrl_type, gamma0, gamma1)
+    print(controller_name, ctrl_type, gamma0, gamma1)
 
     if default_obs.shape[1] != 5:
         default_obs = np.hstack((default_obs, np.zeros((default_obs.shape[0], 2)))) # Set static obs velocity 0.0 at (5, 5)
     
-
     # Set initial state
     if robot_model == "Quad2D":
         # velocity should be [vx, vz] for Quad2D
@@ -435,8 +447,8 @@ def single_agent_simulation(velocity,
         robot_spec,
         controller_type={'pos': ctrl_type},
         dt=dt,
-        show_animation=False,
-        save_animation=False,
+        show_animation=True,
+        save_animation=True,
         ax=ax,
         fig=fig,
         env=env_handler
@@ -444,7 +456,10 @@ def single_agent_simulation(velocity,
 
     # Initialize the CBF parameters
     tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
-    tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
+    if robot_model not in ["KinematicBicycle2D_C3BF"]:
+        tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
+    else:
+        tracking_controller.pos_controller.cbf_param['alpha2'] = 0.0  # dummy placeholder
 
     # Load obstacles & set waypoints
     tracking_controller.obs = default_obs
@@ -471,21 +486,19 @@ def single_agent_simulation(velocity,
         tracking_controller.draw_plot()
 
         # Check if we've reached the goal or collided
-        if ret == -1:
+        if ret == -1 or ret == -2:
             dist_to_goal = np.linalg.norm(tracking_controller.robot.X[:2, 0] - waypoints[-1][:2])
-            if dist_to_goal < tracking_controller.reached_threshold:
-                print("Goal point reached.")
-            else:
-                print("Collided.")
+            print("Goal point reached." if dist_to_goal < tracking_controller.reached_threshold else "Collided.")
             break
 
         # Adapt the CBF parameters if using an online approach
         if online_cbf_adapter is not None:
             start = time.time()
             best_gamma0, best_gamma1 = online_cbf_adapter.cbf_param_adaptation(tracking_controller)
-            if best_gamma0 is not None and best_gamma1 is not None:
+            if best_gamma0 is not None:
                 tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma0
-                tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1
+                if robot_model not in ["KinematicBicycle2D_C3BF"]:
+                    tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1            
             end = time.time()
             print(f"Time taken for pure adaptation step: {end - start:.4f} seconds")
 
@@ -498,7 +511,9 @@ def single_agent_simulation(velocity,
         # append the states, control inputs, and CBF parameters by appending to csv
         with open('output.csv', 'a', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(np.append(robot_state, np.append(control_input, [tracking_controller.pos_controller.cbf_param['alpha1'], tracking_controller.pos_controller.cbf_param['alpha2']])))
+            writer.writerow(np.append(robot_state, np.append(control_input, 
+                [tracking_controller.pos_controller.cbf_param['alpha1'], 
+                 tracking_controller.pos_controller.cbf_param['alpha2']])))
 
     tracking_controller.export_video()
     plt.ioff()
@@ -524,7 +539,7 @@ if __name__ == "__main__":
 
     # Pick a specific controller and robot model
     controller_name = controller_list[-1]   
-    robot_model = robot_model_list[2]       
+    robot_model = robot_model_list[1]       
     
     # Define waypoints for the simulation
     if robot_model == "VTOL2D":
