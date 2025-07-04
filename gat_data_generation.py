@@ -35,6 +35,20 @@ ROBOT_SPECS = {
             "gamma1_range":    (0.01, 0.35)
         }
     },
+    "KinematicBicycle2D_C3BF": {
+        "spec": {
+            "model": "KinematicBicycle2D_C3BF",
+            "a_max": 0.5,
+            "fov_angle": 170.0,
+            "cam_range": 0.01,
+            "radius": 0.3
+        },
+        "param_ranges": {
+            "theta_range":     (-np.pi/2,  np.pi/2),
+            "gamma0_range":    (0.01, 0.35),
+            "gamma1_range":    (0.01, 0.35)
+        }
+    },
     "KinematicBicycle2D_relaxedC3BF": {
         "spec": {
             "model": "KinematicBicycle2D_relaxedC3BF",
@@ -61,6 +75,17 @@ ROBOT_SPECS = {
             "theta_range":      (-np.pi/6, np.pi/6),
             "gamma0_range":     (0.01, 0.35),
             "gamma1_range":     (0.01, 0.35)
+        }
+    },
+    "Quad3D": {
+        "spec": {
+            "model": "Quad3D",
+            "radius": 0.3
+        },
+        "param_ranges": {
+            "theta_range":      (-np.pi/6, np.pi/6),
+            "gamma0_range":     (0.01, 0.99),
+            "gamma1_range":     (0.01, 0.99)
         }
     }
 }
@@ -90,8 +115,11 @@ def get_safety_loss_from_controller(tracking_controller, safety_metric):
     
     # Compute the Control Barrier Function (CBF) values
     gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
-    if tracking_controller.robot_spec['model'] in ['KinematicBicycle2D_relaxedC3BF']:
+    if tracking_controller.robot_spec['model'] in ["KinematicBicycle2D_C3BF", 'KinematicBicycle2D_relaxedC3BF']:
         h_k, d_h = tracking_controller.robot.agent_barrier_dt(robot_state, np.array([0, 0]), obs_state)
+        cbf_constraint_value = d_h + gamma0 * h_k
+    elif tracking_controller.robot_spec['model'] in ['Quad3D']:
+        h_k, d_h = tracking_controller.robot.agent_barrier_dt(robot_state, np.array([0, 0, 0, 0]), obs_state)
         cbf_constraint_value = d_h + gamma0 * h_k
     else:
         gamma1 = tracking_controller.pos_controller.cbf_param['alpha2']
@@ -115,17 +143,22 @@ def single_agent_simulation_gat(
         num_obstacles=5,
         max_sim_time=20.0,
         deadlock_threshold=0.2,
-        show_animation=False
+        show_animation=False,
+        retry_limit=10,
+        _attempt=0,
     ):
     """
     Run a single agent simulation with multiple random obstacles to evaluate
     maximum safety loss and deadlock time, returning the constructed graph (PyG graph).
     """
-    if robot_model != "KinematicBicycle2D_C3BF" and gamma1 is None:
+    if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_relaxedC3BF", "Quad3D"] and gamma1 is None:
         raise ValueError("Selected model needs gamma1.")
-        
+    
+    
     # 1) Time step
     dt = 0.05
+    stuck_steps = int(5.0 / dt)
+    move_tol = 0.3
 
     # 2) Waypoints for the robot's path
     waypoints = np.array([
@@ -138,6 +171,16 @@ def single_agent_simulation_gat(
         vx_init = np.random.uniform(0.0, 1.0)
         vz_init = np.random.uniform(0.0, 1.0)
         x_init = np.append(waypoints[0], [vx_init, vz_init, 0.0])
+    elif robot_model == "Quad3D": # Quad3D => [x, y, z, θ, φ, ψ, vx, vy, vz, q, p, r]
+        x = waypoints[0][0]
+        y = waypoints[0][1]
+        z = 0.0
+        theta, phi, psi = 0.0, 0.0, 0.0
+        vx_init = np.random.uniform(0.0, 1.0)
+        vy_init = 0.0
+        vz_init = np.random.uniform(0.0, 1.0)
+        q, p, r = 0.0, 0.0, 0.0
+        x_init = np.array([x, y, z, theta, phi, psi, vx_init, vy_init, vz_init, q, p, r])
     else:
         velocity_init = np.random.uniform(0.0, 1.0)
         x_init = np.append(waypoints[0], velocity_init)
@@ -168,7 +211,7 @@ def single_agent_simulation_gat(
             ex, ey, er = existing
             center_dist = np.hypot(ox - ex, oy - ey)
             min_clearance = er + radius + min_gap
-            if center_dist < min_clearance*1.5: # 1.75 for KinematicBicycle2D_C3BF, 1.2 for others
+            if center_dist < min_clearance*1.2: 
                 valid = False
                 break
         if valid:
@@ -193,7 +236,7 @@ def single_agent_simulation_gat(
         controller_type={'pos': controller_name},
         dt=dt,
         show_animation=show_animation,
-        save_animation=False,
+        save_animation=True,
         enable_rotation=enable_rotation,
         ax=ax, fig=fig, env=env_handler,
     )
@@ -204,7 +247,7 @@ def single_agent_simulation_gat(
 
     # Set the gamma parameters for CBF
     tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
-    if robot_model != "KinematicBicycle2D_relaxedC3BF":
+    if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_relaxedC3BF", "Quad3D"]:
         tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
         
     # 5) Simulate
@@ -215,7 +258,10 @@ def single_agent_simulation_gat(
     max_safety_loss = 0.0
     success = True
 
-    for _ in range(int(max_sim_time / dt)):
+    init_xy = None
+    for step_idx in range(int(max_sim_time / dt)):
+        if init_xy is None:
+            init_xy = tracking_controller.robot.X[:2].copy()
         try:
             ret = tracking_controller.control_step()
             tracking_controller.draw_plot() 
@@ -238,6 +284,12 @@ def single_agent_simulation_gat(
                 vz = tracking_controller.robot.X[4]
                 if np.hypot(vx, vz) < deadlock_threshold:
                     deadlock_time += dt
+            elif robot_model == "Quad3D":
+                # For Quad3D, index 6 is x-dot, index 8 is z-dot
+                vx = tracking_controller.robot.X[6]
+                vz = tracking_controller.robot.X[8]
+                if np.hypot(vx, vz) < deadlock_threshold:
+                    deadlock_time += dt
             else:
                 # for ground robots, index 3 is linear velocity
                 if abs(tracking_controller.robot.X[3]) < deadlock_threshold:
@@ -250,8 +302,24 @@ def single_agent_simulation_gat(
             if new_safety_loss[0] > max_safety_loss:
                 max_safety_loss = new_safety_loss[0]
             # print(new_safety_loss, max_safety_loss, deadlock_time)
+            
+            if step_idx == stuck_steps:
+                moved = np.linalg.norm(tracking_controller.robot.X[:2] - init_xy)
+                if moved < move_tol:
+                    ret = 'stuck'
+                    success = False
+                    max_safety_loss = safety_loss_upper_bound
+                    break
 
         except InfeasibleError:
+            if _attempt < retry_limit:
+                return single_agent_simulation_gat(
+                    robot_model, controller_name,
+                    gamma0, gamma1, theta,
+                    num_obstacles, max_sim_time,
+                    deadlock_threshold, show_animation,
+                    retry_limit, _attempt + 1
+                )
             success = False
             max_safety_loss = safety_loss_upper_bound
             break
@@ -260,6 +328,16 @@ def single_agent_simulation_gat(
         success = False
         max_safety_loss = safety_loss_upper_bound
 
+    if ret == 'stuck' and _attempt < retry_limit:
+        return single_agent_simulation_gat(
+            robot_model, controller_name,
+            gamma0, gamma1, theta,
+            num_obstacles, max_sim_time,
+            deadlock_threshold, show_animation,
+            retry_limit, _attempt + 1
+        )
+        
+    tracking_controller.export_video()
     plt.ioff()
     plt.close()
 
@@ -270,6 +348,10 @@ def single_agent_simulation_gat(
     if robot_model == "Quad2D":
         # [rx, ry, rtheta, vx, vz]
         rx, ry, rtheta, vx_init, vz_init, _ = x_init
+        robot_state = [rx, ry, vx_init, vz_init]
+    elif robot_model == "Quad3D":
+        # [x, y, z, theta, phi, psi, vx_init, vy_init, vz_init, q, p, r]
+        rx, ry, _, _, _, _, vx_init, _, vz_init, _, _, _ = x_init
         robot_state = [rx, ry, vx_init, vz_init]
     else:
         # [rx, ry, rtheta, vx]
@@ -329,7 +411,7 @@ def generate_data_for_model_gat(
     parameter_space = []
     for _ in range(num_samples):
         gamma0 = np.random.uniform(g0_min, g0_max)
-        if robot_model == "KinematicBicycle2D_relaxedC3BF":
+        if robot_model in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_relaxedC3BF", "Quad3D"]:
             gamma1 = None               
         else:
             gamma1 = np.random.uniform(g1_min, g1_max)        
@@ -387,17 +469,19 @@ if __name__ == "__main__":
         ]
     robot_model_list = [
         "DynamicUnicycle2D", 
+        "KinematicBicycle2D_C3BF", 
         "KinematicBicycle2D_relaxedC3BF", 
-        "Quad2D"
+        "Quad2D",
+        "Quad3D"
         ]
     controller_name = controller_list[1]
-    robot_model = robot_model_list[1]
+    robot_model = robot_model_list[4]
     
-    TESTMODE = True
+    TESTMODE = False
     
     if TESTMODE:
         single_simulation_example(robot_model, controller_name, 
-                                  gamma0=0.05, gamma1=0.05, theta=0.01)
+                                  gamma0=0.01, gamma1=0.01, theta=0.01)
 
     else:
         matplotlib.use('Agg') # Use a non-interactive backend to avoid display issues
@@ -405,10 +489,10 @@ if __name__ == "__main__":
         generate_data_for_model_gat(
             robot_model=robot_model,
             controller_name=controller_name,
-            num_samples=50000,       
+            num_samples=100000,       
             num_processes=25,        # Change based on the number of cores available
             obstacles_range=(2, 10),
-            output_prefix="gat_datagen_1_75"
+            output_prefix="gat_datagen" 
         )
         print("Data generation complete!")
-
+        

@@ -35,6 +35,9 @@ class OnlineCBFAdapter:
         if self.robot_model == 'Quad2D': #TODO: make state dic
             self.extra_state = 1
             self.gamma_dim = 2
+        elif self.robot_model == 'Quad3D':
+            self.extra_state = 0
+            self.gamma_dim = 1
         elif self.robot_model == 'KinematicBicycle2D_C3BF':
             self.extra_state = -1
             self.gamma_dim = 1
@@ -103,6 +106,10 @@ class OnlineCBFAdapter:
             velocity_x = tracking_controller.robot.X[3, 0]
             velocity_z = tracking_controller.robot.X[4, 0]
             return [distance, velocity_x, velocity_z, delta_theta, gamma0, gamma1]
+        elif self.robot_model == 'Quad3D': # If Quad3D => velocity_x, velocity_z
+            velocity_x = tracking_controller.robot.X[6, 0]
+            velocity_z = tracking_controller.robot.X[8, 0]
+            return [distance, velocity_x, velocity_z, delta_theta, gamma0]
         elif self.robot_model in ['KinematicBicycle2D_C3BF']:
             velocity = tracking_controller.robot.X[3, 0]
             return [distance, velocity, delta_theta, gamma0]
@@ -154,6 +161,10 @@ class OnlineCBFAdapter:
         if self.robot_model == 'Quad2D':
             vx = tracking_controller.robot.X[3, 0]
             vz = tracking_controller.robot.X[4, 0]
+            robot_state = [rx, ry, vx, vz]
+        if self.robot_model == 'Quad3D':
+            vx = tracking_controller.robot.X[6, 0]
+            vz = tracking_controller.robot.X[8, 0]
             robot_state = [rx, ry, vx, vz]
         else:
             vel = tracking_controller.robot.X[3, 0]
@@ -262,6 +273,7 @@ class OnlineCBFAdapter:
             sig2_mat[i] = [e[1] for e in ens]
 
         boundary  = self.calculate_cvar_boundary()
+        # print(f"CVaR boundary: {boundary:.4f}")
         keep_mask = DistributionallyRobustCVaR.batch_within_boundary(mu_mat, sig2_mat, boundary, alpha=0.99)
 
         return [pred for pred, keep in zip(filtered_predictions, keep_mask) if keep]
@@ -306,9 +318,13 @@ class OnlineCBFAdapter:
             predictions = self.predict_with_gat_penn(tracking_controller, gamma0_range, gamma1_range)
         else:
             predictions = self.predict_with_penn(current_state, gamma0_range, gamma1_range)
+        # print(f"INITIAL PREDICTIONS@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@{predictions}")
 
         filtered_predictions = self.filter_by_epistemic_uncertainty(predictions)
+        # print(f"EPISTEMIC PREDICTIONS@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@{filtered_predictions}")
+
         final_predictions = self.filter_by_aleatoric_uncertainty(filtered_predictions)
+        # print(f"FINAL PREDICTIONS@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@{final_predictions}")
         best_gamma0, best_gamma1 = self.select_best_parameters(final_predictions, tracking_controller)
 
         if self.gamma_dim == 2:
@@ -407,7 +423,7 @@ def single_agent_simulation(velocity,
                             waypoints,
                             controller_name,
                             robot_model,
-                            max_sim_time=30,
+                            max_sim_time=20,
                             dt=0.05):
     """
     Run a single-agent trajectory simulation using the specified
@@ -429,6 +445,16 @@ def single_agent_simulation(velocity,
     if robot_model == "Quad2D":
         # velocity should be [vx, vz] for Quad2D
         x_init = np.append(waypoints[0], [velocity[0], velocity[1], 0])
+    if robot_model == "Quad3D":
+        # x_init = np.append(waypoints[0], [velocity[0], velocity[1], 0])
+        x, y = waypoints[0][:2]
+        z       = 0.0
+        theta   = phi = psi = 0.0
+        vx      = velocity[0]
+        vy      = 0.0
+        vz      = velocity[1]
+        q = p = r = 0.0
+        x_init = np.array([x, y, z, theta, phi, psi, vx, vy, vz, q, p, r])
     elif robot_model == "VTOL2D":
         x_init = np.hstack((2.0, 10.0, 0.0, velocity, 0.0, 0.0))
         plt.rcParams['figure.figsize'] = [12, 5]
@@ -456,7 +482,7 @@ def single_agent_simulation(velocity,
 
     # Initialize the CBF parameters
     tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
-    if robot_model not in ["KinematicBicycle2D_C3BF"]:
+    if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
         tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
     else:
         tracking_controller.pos_controller.cbf_param['alpha2'] = 0.0  # dummy placeholder
@@ -497,7 +523,7 @@ def single_agent_simulation(velocity,
             best_gamma0, best_gamma1 = online_cbf_adapter.cbf_param_adaptation(tracking_controller)
             if best_gamma0 is not None:
                 tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma0
-                if robot_model not in ["KinematicBicycle2D_C3BF"]:
+                if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
                     tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1            
             end = time.time()
             print(f"Time taken for pure adaptation step: {end - start:.4f} seconds")
@@ -534,12 +560,13 @@ if __name__ == "__main__":
         "DynamicUnicycle2D",
         "KinematicBicycle2D_C3BF",
         "Quad2D",
-        "VTOL2D"
+        "Quad3D",
+        "VTOL2D",
     ]
 
     # Pick a specific controller and robot model
     controller_name = controller_list[-1]   
-    robot_model = robot_model_list[1]       
+    robot_model = robot_model_list[3]       
     
     # Define waypoints for the simulation
     if robot_model == "VTOL2D":
@@ -554,7 +581,7 @@ if __name__ == "__main__":
                 ], dtype=np.float64)
 
     # For ground vehicles, velocity is a single scalar
-    if robot_model == "Quad2D":
+    if robot_model in ["Quad2D", "Quad3D"]:
         init_vel = [0.4, 0.2]
     elif robot_model == "VTOL2D":
         init_vel = 20.0

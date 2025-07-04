@@ -20,21 +20,21 @@ from penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
 
 
 # Name or model and saving path
-DATANAME = 'gat_datagen_1_75_50000_KinematicBicycle2D_C3BF_mpc_cbf'
-MODELNAME_SAVE = 'KinematicBicycle2D_C3BF_0515_gat_1339'
-SCALERNAME_SAVE = 'KinematicBicycle2D_C3BF_0515_gat_1339'
+DATANAME = 'gat_datagen_gamma099_10000_Quad3D_mpc_cbf'
+MODELNAME_SAVE = 'Quad3D_0625_gat_0130'
+SCALERNAME_SAVE = 'Quad3D_0625_gat_0130'
 data_file = 'data/' + DATANAME + '.csv'
 pickle_file = 'data/' + DATANAME + '.pkl'
 scaler_path = 'checkpoint/' + SCALERNAME_SAVE + '.save'
 model_path = 'checkpoint/' + MODELNAME_SAVE + '.pth'
 
-robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D_C3BF', 'Quad2D', 'VTOL2D']
-robot_model = robot_model_list[1]
+robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D_C3BF', 'Quad2D', 'Quad3D', 'VTOL2D']
+robot_model = robot_model_list[3]
 
 ACTIVATION = 'relu'
 LR = 0.0001
 BATCHSIZE = 32
-EPOCH = 500
+EPOCH = 1500
 
 TEST_ONLY = False       # False => Train then test  |   True => Just inference
 USE_GAT_EMBED = True   # False => MLP-only PENN    |   True => GAT+PENN
@@ -42,7 +42,7 @@ USE_GAT_EMBED = True   # False => MLP-only PENN    |   True => GAT+PENN
 WANDB_FLAG = True
 if WANDB_FLAG:
     import wandb
-    wandb.init(project="KinematicBicycle2D_C3BF_0515", config={
+    wandb.init(project="Quad3D_0701", config={
         "learning_rate": LR,
         "epochs": EPOCH,
         "batch_size": BATCHSIZE
@@ -52,6 +52,9 @@ if WANDB_FLAG:
 if robot_model == 'Quad2D':
     n_states = 7  
     gamma_dim = 2
+elif robot_model == 'Quad3D':
+    n_states = 12
+    gamma_dim = 1
 elif robot_model == 'KinematicBicycle2D_C3BF': # one gamma
     n_states = 5
     gamma_dim = 1
@@ -73,6 +76,9 @@ def load_and_preprocess_data(data_file, scaler_path=None, noise_percentage=0.0, 
     if robot_model == 'Quad2D':
         X = dataset[['Distance', 'VelocityX', 'VelocityZ', 'Theta', 'gamma0', 'gamma1']].values
         extra_states = 1
+    elif robot_model == 'Quad3D':
+        X = dataset[['Distance', 'VelocityX', 'VelocityZ', 'Theta', 'gamma0']].values
+        extra_states = 0
     elif robot_model == 'KinematicBicycle2D_C3BF':          
         X = dataset[['Distance', 'Velocity', 'Theta', 'gamma0']].values
         extra_states = 0        
@@ -185,6 +191,8 @@ if __name__ == '__main__':
                 input_data = [2.55, 0.01, 0.001, 0.005]
             elif robot_model == 'Quad2D': # [distance, velocityX, velocityZ, theta, gamma1, gamma2]
                 input_data = [2.55, 0.01, 0.02, 0.001, 0.005, 0.005]
+            elif robot_model == 'Quad3D': # [distance, velocityX, velocityZ, theta, gamma0]
+                input_data = [2.55, 0.01, 0.03, 0.001, 0.005]
             else:  # [distance, velocity, theta, gamma1, gamma2]
                 input_data = [2.55, 0.01, 0.001, 0.005, 0.005]            
 
