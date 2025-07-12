@@ -20,9 +20,9 @@ from penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
 
 
 # Name or model and saving path
-DATANAME = 'gat_datagen_gamma099_10000_Quad3D_mpc_cbf'
-MODELNAME_SAVE = 'Quad3D_0625_gat_0130'
-SCALERNAME_SAVE = 'Quad3D_0625_gat_0130'
+DATANAME = 'gat_datagen_newnew_100000_Quad3D_mpc_cbf'
+MODELNAME_SAVE = 'Quad3D_0708_mlp_1130'
+SCALERNAME_SAVE = 'Quad3D_0708_mlp_1130'
 data_file = 'data/' + DATANAME + '.csv'
 pickle_file = 'data/' + DATANAME + '.pkl'
 scaler_path = 'checkpoint/' + SCALERNAME_SAVE + '.save'
@@ -37,12 +37,12 @@ BATCHSIZE = 32
 EPOCH = 1500
 
 TEST_ONLY = False       # False => Train then test  |   True => Just inference
-USE_GAT_EMBED = True   # False => MLP-only PENN    |   True => GAT+PENN
+USE_GAT_EMBED = False   # False => MLP-only PENN    |   True => GAT+PENN
 
 WANDB_FLAG = True
 if WANDB_FLAG:
     import wandb
-    wandb.init(project="Quad3D_0701", config={
+    wandb.init(project="Quad3D_0707", config={
         "learning_rate": LR,
         "epochs": EPOCH,
         "batch_size": BATCHSIZE
@@ -53,7 +53,7 @@ if robot_model == 'Quad2D':
     n_states = 7  
     gamma_dim = 2
 elif robot_model == 'Quad3D':
-    n_states = 12
+    n_states = 6
     gamma_dim = 1
 elif robot_model == 'KinematicBicycle2D_C3BF': # one gamma
     n_states = 5
