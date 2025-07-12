@@ -23,7 +23,7 @@ from online_cbf_config import ALL_DEFAULTS, ADAPTIVE_MODELS
 
 class OnlineCBFAdapter:
     def __init__(self, model_name, scaler_name=None, d_min=0.075, step_size=0.05,
-                 epistemic_threshold=0.3, lower_bound=0.01, upper_bound=1.0,
+                 epistemic_threshold=0.2, lower_bound=0.01, upper_bound=1.0,
                  robot_model=None, use_gat=False):
         """
         Initialize the adaptive CBF parameter selector
@@ -68,9 +68,21 @@ class OnlineCBFAdapter:
         '''
         Sample CBF parameters (gamma0 and gamma1) within a specified range
         '''
-        gamma0_range = np.arange(max(self.lower_bound, current_gamma0 - 2.5), min(self.upper_bound, current_gamma0 + 2.5 + self.step_size), self.step_size)
+        # gamma0_range = np.arange(max(self.lower_bound, current_gamma0 - 2.5), min(self.upper_bound, current_gamma0 + 2.5 + self.step_size), self.step_size)
+        # if self.gamma_dim == 2:
+        #     gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 2.5), min(self.upper_bound, current_gamma1 + 2.5 + self.step_size), self.step_size)
+        #     return gamma0_range, gamma1_range
+        # else:
+        #     return gamma0_range, None
+        eps = 1e-9                       # make upper bound inclusive
+        gamma0_range = np.arange(self.lower_bound,
+                                self.upper_bound + eps,
+                                self.step_size)
+
         if self.gamma_dim == 2:
-            gamma1_range = np.arange(max(self.lower_bound, current_gamma1 - 2.5), min(self.upper_bound, current_gamma1 + 2.5 + self.step_size), self.step_size)
+            gamma1_range = np.arange(self.lower_bound,
+                                    self.upper_bound + eps,
+                                    self.step_size)
             return gamma0_range, gamma1_range
         else:
             return gamma0_range, None
@@ -98,9 +110,18 @@ class OnlineCBFAdapter:
             #distance = np.linalg.norm(robot_pos - near_obs[:2]) - 0.45 + robot_radius + near_obs[2]
             delta_theta = np.arctan2(near_obs[1] - robot_pos[1], near_obs[0] - robot_pos[0]) - robot_theta
             delta_theta = ((delta_theta + np.pi) % (2 * np.pi)) - np.pi  
-        gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
-        if self.gamma_dim == 2:
+        
+        
+        if self.gamma_dim == 1:
+            gamma0 = tracking_controller.pos_controller.cbf_param['alpha']
+            gamma1 = None
+        else:
+            gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
             gamma1 = tracking_controller.pos_controller.cbf_param['alpha2']
+
+        # gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
+        # if self.gamma_dim == 2:
+        #     gamma1 = tracking_controller.pos_controller.cbf_param['alpha2']
 
         if self.robot_model == 'Quad2D': # If Quad2D => velocity_x, velocity_z
             velocity_x = tracking_controller.robot.X[3, 0]
@@ -282,8 +303,10 @@ class OnlineCBFAdapter:
         '''
         Select the best CBF parameters based on filtered predictions.
         '''
-        current_gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
-        if self.gamma_dim == 2:
+        if self.gamma_dim == 1:
+            current_gamma0 = tracking_controller.pos_controller.cbf_param['alpha']
+        elif self.gamma_dim == 2:
+            current_gamma0 = tracking_controller.pos_controller.cbf_param['alpha1']
             current_gamma1 = tracking_controller.pos_controller.cbf_param['alpha2']
 
         # If no predictions were selected, degrade conservatively
@@ -423,7 +446,7 @@ def single_agent_simulation(velocity,
                             waypoints,
                             controller_name,
                             robot_model,
-                            max_sim_time=20,
+                            max_sim_time=30,
                             dt=0.05):
     """
     Run a single-agent trajectory simulation using the specified
@@ -445,7 +468,7 @@ def single_agent_simulation(velocity,
     if robot_model == "Quad2D":
         # velocity should be [vx, vz] for Quad2D
         x_init = np.append(waypoints[0], [velocity[0], velocity[1], 0])
-    if robot_model == "Quad3D":
+    elif robot_model == "Quad3D":
         # x_init = np.append(waypoints[0], [velocity[0], velocity[1], 0])
         x, y = waypoints[0][:2]
         z       = 0.0
@@ -481,11 +504,18 @@ def single_agent_simulation(velocity,
     )
 
     # Initialize the CBF parameters
-    tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
     if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
+        tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
         tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
     else:
+        tracking_controller.pos_controller.cbf_param['alpha'] = gamma0
         tracking_controller.pos_controller.cbf_param['alpha2'] = 0.0  # dummy placeholder
+    
+    # tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
+    # if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
+    #     tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
+    # else:
+    #     tracking_controller.pos_controller.cbf_param['alpha2'] = 0.0  # dummy placeholder
 
     # Load obstacles & set waypoints
     tracking_controller.obs = default_obs
@@ -522,9 +552,16 @@ def single_agent_simulation(velocity,
             start = time.time()
             best_gamma0, best_gamma1 = online_cbf_adapter.cbf_param_adaptation(tracking_controller)
             if best_gamma0 is not None:
-                tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma0
                 if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
-                    tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1            
+                    tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma0
+                    tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1
+                else:
+                    tracking_controller.pos_controller.cbf_param['alpha'] = best_gamma0
+                
+                # tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma0
+                # if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
+                #     tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1      
+                          
             end = time.time()
             print(f"Time taken for pure adaptation step: {end - start:.4f} seconds")
 
@@ -537,9 +574,18 @@ def single_agent_simulation(velocity,
         # append the states, control inputs, and CBF parameters by appending to csv
         with open('output.csv', 'a', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(np.append(robot_state, np.append(control_input, 
-                [tracking_controller.pos_controller.cbf_param['alpha1'], 
-                 tracking_controller.pos_controller.cbf_param['alpha2']])))
+            if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
+                writer.writerow(np.append(robot_state, np.append(control_input, 
+                    [tracking_controller.pos_controller.cbf_param['alpha1'], 
+                    tracking_controller.pos_controller.cbf_param['alpha2']])))
+            else:
+                writer.writerow(np.append(robot_state, np.append(control_input, 
+                    [tracking_controller.pos_controller.cbf_param['alpha'], 
+                    tracking_controller.pos_controller.cbf_param['alpha2']])))
+                
+            # writer.writerow(np.append(robot_state, np.append(control_input, 
+            #     [tracking_controller.pos_controller.cbf_param['alpha1'], 
+            #      tracking_controller.pos_controller.cbf_param['alpha2']])))
 
     tracking_controller.export_video()
     plt.ioff()
@@ -565,15 +611,15 @@ if __name__ == "__main__":
     ]
 
     # Pick a specific controller and robot model
-    controller_name = controller_list[-1]   
-    robot_model = robot_model_list[3]       
+    controller_name = controller_list[1]   
+    robot_model = robot_model_list[2]       
     
     # Define waypoints for the simulation
     if robot_model == "VTOL2D":
         waypoints = np.array([
                     [70, 10],
                     [70, 0.5]
-                ], dtype=np.float64)
+                ], dtype=np.float64) 
     else:
         waypoints = np.array([
                     [0.75, 2.0, 0.01],
