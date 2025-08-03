@@ -23,11 +23,12 @@ from online_cbf_config import ALL_DEFAULTS, ADAPTIVE_MODELS
 
 class OnlineCBFAdapter:
     def __init__(self, model_name, scaler_name=None, d_min=0.075, step_size=0.05,
-                 epistemic_threshold=0.2, lower_bound=0.01, upper_bound=1.0,
-                 robot_model=None, use_gat=False):
+                 epistemic_threshold=0.1, lower_bound=0.01, upper_bound=1.0,
+                 robot_model=None, use_gat=False, print_info=True):
         """
         Initialize the adaptive CBF parameter selector
         """
+        self.print_info = print_info
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # self.device = 'cpu'
         print(f"Using device {self.device} for OnlineCBFAdapter")
@@ -254,7 +255,8 @@ class OnlineCBFAdapter:
         Filter predictions based on epistemic uncertainty
         We employ Jensen-Renyi Divergence (JRD) with quadratic Renyi entropy, which has a closed-form expression of the divergence of a GMM
         If the JRD D(X) of the prediction of a given input X is greater than the predefined threshold, it is deemed to be out-of-distribution
-        '''        
+        '''                
+
         if not predictions:
             return []
         epi = np.asarray([p[4] for p in predictions], dtype=np.float32)          # (N,)
@@ -262,7 +264,10 @@ class OnlineCBFAdapter:
         if np.all(epi > 100.0):
             return []
         epi_norm = (epi - epi.min()) / (epi.max() - epi.min() + 1e-8)
+        
+        # The threshold 0.1 corresponds to the CCCP-calibrated raw divergence value after normalization
         keep_mask = epi_norm <= self.epistemic_threshold                         # (N,) bool
+        
         return [pred for pred, keep in zip(predictions, keep_mask) if keep]
 
     def calculate_cvar_boundary(self):
@@ -350,16 +355,17 @@ class OnlineCBFAdapter:
         # print(f"FINAL PREDICTIONS@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@{final_predictions}")
         best_gamma0, best_gamma1 = self.select_best_parameters(final_predictions, tracking_controller)
 
-        if self.gamma_dim == 2:
-            print(f"CBF parameters updated to: {best_gamma0:.2f}, {best_gamma1:.2f}"
-                f" | Total predictions: {len(predictions)}"
-                f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
-                f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
-        else:
-            print(f"CBF parameter updated to: {best_gamma0:.2f}"
-                f" | Total predictions: {len(predictions)}"
-                f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
-                f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
+        if self.print_info:
+            if self.gamma_dim == 2:
+                print(f"CBF parameters updated to: {best_gamma0:.2f}, {best_gamma1:.2f}"
+                    f" | Total predictions: {len(predictions)}"
+                    f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
+                    f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
+            else:
+                print(f"CBF parameter updated to: {best_gamma0:.2f}"
+                    f" | Total predictions: {len(predictions)}"
+                    f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
+                    f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
 
         return best_gamma0, best_gamma1
 
@@ -407,7 +413,7 @@ def get_env_defaults(robot_model):
 
     return env_width, env_height
 
-def get_online_cbf_adapter(robot_model, controller_name):
+def get_online_cbf_adapter(robot_model, controller_name, print_info=True):
     """
     Returns an OnlineCBFAdapter instance for the given robot_model
     """
@@ -437,9 +443,10 @@ def get_online_cbf_adapter(robot_model, controller_name):
         step_size=cfg["step_size"],
         lower_bound=cfg["lower_bound"],
         upper_bound=cfg["upper_bound"],
-        epistemic_threshold=cfg.get("epistemic_threshold", 0.2),
+        epistemic_threshold=cfg.get("epistemic_threshold", 0.1),
         robot_model=robot_model,
-        use_gat=use_gat
+        use_gat=use_gat,
+        print_info=print_info,
     )
 
 def single_agent_simulation(velocity,
@@ -611,8 +618,8 @@ if __name__ == "__main__":
     ]
 
     # Pick a specific controller and robot model
-    controller_name = controller_list[1]   
-    robot_model = robot_model_list[2]       
+    controller_name = controller_list[-1]   
+    robot_model = robot_model_list[0]       
     
     # Define waypoints for the simulation
     if robot_model == "VTOL2D":
