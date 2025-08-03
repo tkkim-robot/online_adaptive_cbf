@@ -19,6 +19,13 @@ class ProbabilisticEnsembleGAT(nn.Module):
         
         self.gat_model = gat_model  
         self.gat_model = self.gat_model.to(self.device)
+        
+        # Handle both GATModule and GATGraphNetwork cases
+        # If gat_model is a GATModule, extract the GATGraphNetwork
+        if hasattr(self.gat_model, 'gat'):
+            self.gat_network = self.gat_model.gat
+        else:
+            self.gat_network = self.gat_model
 
         try:
             from penn.penn import EnsembleStochasticLinear
@@ -38,7 +45,7 @@ class ProbabilisticEnsembleGAT(nn.Module):
             self.model = nn.DataParallel(self.model)
             torch.backends.cudnn.benchmark = True
 
-        self.optimizer = torch.optim.Adam(list(self.model.parameters()) + list(self.gat_model.parameters()), lr=lr)
+        self.optimizer = torch.optim.Adam(list(self.model.parameters()) + list(self.gat_network.parameters()), lr=lr)
         self.criterion = self.gaussian_nll_loss  # Custom Gaussian NLL Loss
         self.mse_loss = nn.MSELoss()
         self.best_test_err = 10000.0
@@ -46,7 +53,7 @@ class ProbabilisticEnsembleGAT(nn.Module):
     def predict(self, data_list):
         loader = GeoDataLoader(data_list, batch_size=len(data_list), shuffle=False)
         self.model.eval()
-        self.gat_model.eval()
+        self.gat_network.eval()
 
         with torch.no_grad():
             batch_data = next(iter(loader))  
@@ -55,7 +62,7 @@ class ProbabilisticEnsembleGAT(nn.Module):
             edge_attr = batch_data.edge_attr.to(self.device)
             batch_idx = batch_data.batch.to(self.device)
             gamma = getattr(batch_data, 'gamma', None).view(-1, self.gamma_dim).to(self.device)
-            robot_emb = self.gat_model.gat.extract_robot_embedding(x, edge_index, edge_attr, batch_idx)
+            robot_emb = self.gat_network.extract_robot_embedding(x, edge_index, edge_attr, batch_idx)
             
             # robot_emb: (1, emb_dim) → concat with gamma
             if robot_emb.shape[0] == 1 and gamma.shape[0] > 1:
@@ -105,7 +112,7 @@ class ProbabilisticEnsembleGAT(nn.Module):
     
     def train(self, train_loader, epoch):
         self.model.train()
-        self.gat_model.train()  
+        self.gat_network.train()  
 
         total_loss = 0.0
 
@@ -122,7 +129,7 @@ class ProbabilisticEnsembleGAT(nn.Module):
 
             # Train each ensemble member
             for model_idx in range(self.n_ensemble):
-                robot_emb = self.gat_model.extract_robot_embedding(x, edge_index, edge_attr, batch_idx)
+                robot_emb = self.gat_network.extract_robot_embedding(x, edge_index, edge_attr, batch_idx)
                 X_input = torch.cat([robot_emb, gamma], dim=1).to(self.device)
                 y_target = y.to(self.device)
                 
@@ -141,7 +148,7 @@ class ProbabilisticEnsembleGAT(nn.Module):
 
     def test(self, test_loader, epoch):
         self.model.eval()
-        self.gat_model.eval()
+        self.gat_network.eval()
 
         total_loss = 0.0
         total_mse = 0.0
@@ -155,7 +162,7 @@ class ProbabilisticEnsembleGAT(nn.Module):
                 y          = batch_data.y.to(self.device)    
                 y = y.squeeze(1) if y.dim() == 3 else y
 
-                robot_emb = self.gat_model.extract_robot_embedding(x, edge_index, edge_attr, batch_idx)
+                robot_emb = self.gat_network.extract_robot_embedding(x, edge_index, edge_attr, batch_idx)
                 gamma = getattr(batch_data, 'gamma', None).view(-1, self.gamma_dim).to(self.device)
 
                 X_input = torch.cat([robot_emb, gamma], dim=1).to(self.device)
