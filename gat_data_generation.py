@@ -30,7 +30,8 @@ ROBOT_SPECS = {
             "radius": 0.3
         },
         "param_ranges": {
-            "theta_range":     (-np.pi/2,  np.pi/2),
+            # "theta_range":     (-np.pi/2,  np.pi/2),
+            "theta_range":     (-0.01,  0.01),
             "gamma0_range":    (0.01, 0.35),
             "gamma1_range":    (0.01, 0.35)
         }
@@ -65,15 +66,16 @@ ROBOT_SPECS = {
     "Quad2D": {
         "spec": {
             "model": "Quad2D",
-            "f_min": 3.0,
-            "f_max": 10.0,
+            "f_min": 2.5,
+            "f_max": 5.5,
+            "inertia": 0.05,
             "sensor": "rgbd",
             "radius": 0.3
         },
         "param_ranges": {
             "theta_range":      (-np.pi/6, np.pi/6),
-            "gamma0_range":     (0.01, 0.35),
-            "gamma1_range":     (0.01, 0.35)
+            "gamma0_range":     (0.01, 0.99),
+            "gamma1_range":     (0.01, 0.99)
         }
     },
     "Quad3D": {
@@ -264,7 +266,7 @@ def single_agent_simulation_gat(
         controller_type={'pos': controller_name},
         dt=dt,
         show_animation=show_animation,
-        save_animation=False,
+        save_animation=True,
         enable_rotation=enable_rotation,
         ax=ax, fig=fig, env=env_handler,
     )
@@ -484,7 +486,7 @@ def single_simulation_example(robot_model, controller_name, gamma0=0.5, gamma1=0
         theta=theta,
         num_obstacles=num_obstacles,
         max_sim_time=20.0,
-        show_animation=True
+        show_animation=True,
     )
     print("Single Simulation Result:")
     print("Graph Data:", result["graph_data"])
@@ -509,14 +511,15 @@ if __name__ == "__main__":
         "Quad3D"
         ]
     controller_name = controller_list[1]
-    robot_model = robot_model_list[1]
+    robot_model = robot_model_list[-2]
     
     TESTMODE = False
+    np.random.seed(42)
     
     if TESTMODE:
         single_simulation_example(robot_model, controller_name,
-                                  gamma0=0.99
-                                  , gamma1=0.07, theta=0.01)
+                                  gamma0=0.1
+                                  , gamma1=0.1, theta=0.01)
 
     else: 
         matplotlib.use('Agg') # Use a non-interactive backend to avoid display issues
@@ -524,10 +527,11 @@ if __name__ == "__main__":
         generate_data_for_model_gat(
             robot_model=robot_model,
             controller_name=controller_name,
-            num_samples=10000,       
+            num_samples=200000,       
             num_processes=25,        # Change based on the number of cores available
             obstacles_range=(2, 10),
-            output_prefix="gat_datagen_newnew099" 
+            output_prefix="gat_datagen" 
         ) 
         print("Data generation complete!")
+    
         

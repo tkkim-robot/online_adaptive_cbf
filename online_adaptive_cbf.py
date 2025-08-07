@@ -23,7 +23,7 @@ from online_cbf_config import ALL_DEFAULTS, ADAPTIVE_MODELS
 
 class OnlineCBFAdapter:
     def __init__(self, model_name, scaler_name=None, d_min=0.075, step_size=0.05,
-                 epistemic_threshold=0.1, lower_bound=0.01, upper_bound=1.0,
+                 epistemic_threshold=0.2, lower_bound=0.01, upper_bound=1.0,
                  robot_model=None, use_gat=False, print_info=True):
         """
         Initialize the adaptive CBF parameter selector
@@ -601,25 +601,25 @@ def single_agent_simulation(velocity,
 
 if __name__ == "__main__":
     controller_list = [
-        "MPC-CBF low fixed param",
-        "MPC-CBF high fixed param",
-        "Optimal Decay CBF-QP",
-        "Optimal Decay MPC-CBF",
-        "Online Adaptive CBF-QP",
-        "Online Adaptive MPC-CBF MLP",
-        "Online Adaptive MPC-CBF GAT",
+        "MPC-CBF low fixed param",     # 0
+        "MPC-CBF high fixed param",    # 1
+        "Optimal Decay CBF-QP",        # 2
+        "Optimal Decay MPC-CBF",       # 3
+        "Online Adaptive CBF-QP",      # 4
+        "Online Adaptive MPC-CBF MLP", # 5
+        "Online Adaptive MPC-CBF GAT", # 6
     ]
     robot_model_list = [
-        "DynamicUnicycle2D",
-        "KinematicBicycle2D_C3BF",
-        "Quad2D",
-        "Quad3D",
-        "VTOL2D",
+        "DynamicUnicycle2D",           # 0
+        "KinematicBicycle2D_C3BF",     # 1
+        "Quad2D",                      # 2
+        "Quad3D",                      # 3
+        "VTOL2D",                      # 4
     ]
 
     # Pick a specific controller and robot model
     controller_name = controller_list[-1]   
-    robot_model = robot_model_list[0]       
+    robot_model = robot_model_list[3]       
     
     # Define waypoints for the simulation
     if robot_model == "VTOL2D":
