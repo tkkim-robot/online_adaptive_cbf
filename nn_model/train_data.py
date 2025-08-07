@@ -20,9 +20,13 @@ from penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
 
 
 # Name or model and saving path
-DATANAME = 'gat_datagen_newnew_100000_Quad3D_mpc_cbf'
-MODELNAME_SAVE = 'Quad3D_0708_mlp_1130'
-SCALERNAME_SAVE = 'Quad3D_0708_mlp_1130'
+DATANAME = 'gat_datagen_300000_Quad3D_mpc_cbf'
+# MODELNAME_SAVE = 'DynamicUnicycle2D_0729_mlp_2130'
+# SCALERNAME_SAVE = 'DynamicUnicycle2D_0729_mlp_2130'
+MODELNAME_SAVE = 'Quad3D_0807_gat_0230'
+SCALERNAME_SAVE = 'Quad3D_0807_gat_0230'
+# MODELNAME_SAVE = 'Quad3D_0729_mlp_2130'
+# SCALERNAME_SAVE = 'Quad3D_0729_mlp_2130'
 data_file = 'data/' + DATANAME + '.csv'
 pickle_file = 'data/' + DATANAME + '.pkl'
 scaler_path = 'checkpoint/' + SCALERNAME_SAVE + '.save'
@@ -33,16 +37,18 @@ robot_model = robot_model_list[3]
 
 ACTIVATION = 'relu'
 LR = 0.0001
-BATCHSIZE = 32
-EPOCH = 1500
+# BATCHSIZE = 32
+BATCHSIZE = 128
+EPOCH = 1000
 
 TEST_ONLY = False       # False => Train then test  |   True => Just inference
-USE_GAT_EMBED = False   # False => MLP-only PENN    |   True => GAT+PENN
+USE_GAT_EMBED = True   # False => MLP-only PENN    |   True => GAT+PENN
 
 WANDB_FLAG = True
-if WANDB_FLAG:
+# Only initialize wandb when running this script directly, not when imported
+if __name__ == "__main__" and WANDB_FLAG:
     import wandb
-    wandb.init(project="Quad3D_0707", config={
+    wandb.init(project="Quad3D_0807", config={
         "learning_rate": LR,
         "epochs": EPOCH,
         "batch_size": BATCHSIZE
