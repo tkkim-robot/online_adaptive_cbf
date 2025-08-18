@@ -39,14 +39,14 @@ ROBOT_SPECS = {
         "spec": {
             "model": "KinematicBicycle2D_C3BF",
             "a_max": 0.3,
-            # "beta_max": 0.10,
+            "beta_max": 0.25,
             "v_max": 1.0,
             "radius": 0.3
         },
         "param_ranges": {
-            "theta_range":     (-np.pi/2,  np.pi/2),
-            "gamma0_range":    (0.01, 0.35),
-            "gamma1_range":    (0.01, 0.35)
+            "theta_range":     (-0.01,  0.01),
+            "gamma0_range":    (0.01, 0.99),
+            "gamma1_range":    (0.01, 0.99)
         }
     },
     "KinematicBicycle2D_DPCBF": {
@@ -57,9 +57,9 @@ ROBOT_SPECS = {
             "radius": 0.3,
         },
         "param_ranges": {
-            "theta_range":     (-np.pi/2,  np.pi/2),
-            "gamma0_range":    (0.15, 0.99),
-            "gamma1_range":    (0.15, 0.99)
+            "theta_range":     (-0.01,  0.01),
+            "gamma0_range":    (0.01, 0.99),
+            "gamma1_range":    (0.01, 0.99)
         }
     },
     "Quad2D": {
@@ -159,7 +159,7 @@ def single_agent_simulation_gat(
         robot_model, controller_name,
         gamma0, gamma1=None, theta=0.01,
         num_obstacles=5,
-        max_sim_time=20.0,
+        max_sim_time=30.0,
         deadlock_threshold=0.2,
         show_animation=False,
         retry_limit=10,
@@ -176,11 +176,11 @@ def single_agent_simulation_gat(
     # 1) Time step
     dt = 0.05
     stuck_steps = int(5.0 / dt)
-    move_tol = 0.3
+    move_tol = 1.0
 
     # 2) Waypoints for the robot's path
     waypoints = np.array([
-        [1, 2, theta],
+        [0.5, 2, theta],
         [9.5, 2, 0]
     ], dtype=np.float64)
 
@@ -484,7 +484,7 @@ def single_simulation_example(robot_model, controller_name, gamma0=0.5, gamma1=0
         theta=theta,
         num_obstacles=num_obstacles,
         max_sim_time=20.0,
-        show_animation=True
+        show_animation=True,
     )
     print("Single Simulation Result:")
     print("Graph Data:", result["graph_data"])
@@ -509,25 +509,54 @@ if __name__ == "__main__":
         "Quad3D"
         ]
     controller_name = controller_list[1]
-    robot_model = robot_model_list[1]
+    robot_model = robot_model_list[2]
     
     TESTMODE = False
-    
+
     if TESTMODE:
+        np.random.seed(5119)
         single_simulation_example(robot_model, controller_name,
-                                  gamma0=0.99
-                                  , gamma1=0.07, theta=0.01)
+                                  gamma0=0.99, gamma1=0.99, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.8, gamma1=0.8, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.7, gamma1=0.7, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.6, gamma1=0.6, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.5, gamma1=0.5, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.4, gamma1=0.4, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.3, gamma1=0.3, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.2, gamma1=0.2, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.1, gamma1=0.1, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.01, gamma1=0.01, theta=0.01)
 
     else: 
         matplotlib.use('Agg') # Use a non-interactive backend to avoid display issues
  
+        # ROBOT_SPECS["KinematicBicycle2D_C3BF"]["param_ranges"]["gamma0_range"] = (0.01, 0.99)
+        # ROBOT_SPECS["KinematicBicycle2D_C3BF"]["param_ranges"]["gamma1_range"] = (0.01, 0.99)
         generate_data_for_model_gat(
             robot_model=robot_model,
             controller_name=controller_name,
-            num_samples=10000,       
-            num_processes=25,        # Change based on the number of cores available
-            obstacles_range=(2, 10),
-            output_prefix="gat_datagen_newnew099" 
+            num_samples=150000,       
+            num_processes=20,        # Change based on the number of cores available
+            obstacles_range=(2, 5),
+            output_prefix="gat_datagen" 
         ) 
         print("Data generation complete!")
-        
+

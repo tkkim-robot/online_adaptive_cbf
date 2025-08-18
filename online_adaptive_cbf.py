@@ -24,10 +24,11 @@ from online_cbf_config import ALL_DEFAULTS, ADAPTIVE_MODELS
 class OnlineCBFAdapter:
     def __init__(self, model_name, scaler_name=None, d_min=0.075, step_size=0.05,
                  epistemic_threshold=0.2, lower_bound=0.01, upper_bound=1.0,
-                 robot_model=None, use_gat=False):
+                 robot_model=None, use_gat=False, print_info=True):
         """
         Initialize the adaptive CBF parameter selector
         """
+        self.print_info = print_info
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # self.device = 'cpu'
         print(f"Using device {self.device} for OnlineCBFAdapter")
@@ -38,7 +39,7 @@ class OnlineCBFAdapter:
         elif self.robot_model == 'Quad3D':
             self.extra_state = 0
             self.gamma_dim = 1
-        elif self.robot_model == 'KinematicBicycle2D_C3BF':
+        elif self.robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:
             self.extra_state = -1
             self.gamma_dim = 1
         else:
@@ -131,7 +132,7 @@ class OnlineCBFAdapter:
             velocity_x = tracking_controller.robot.X[6, 0]
             velocity_z = tracking_controller.robot.X[8, 0]
             return [distance, velocity_x, velocity_z, delta_theta, gamma0]
-        elif self.robot_model in ['KinematicBicycle2D_C3BF']:
+        elif self.robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:
             velocity = tracking_controller.robot.X[3, 0]
             return [distance, velocity, delta_theta, gamma0]
         else:
@@ -350,16 +351,17 @@ class OnlineCBFAdapter:
         # print(f"FINAL PREDICTIONS@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@{final_predictions}")
         best_gamma0, best_gamma1 = self.select_best_parameters(final_predictions, tracking_controller)
 
-        if self.gamma_dim == 2:
-            print(f"CBF parameters updated to: {best_gamma0:.2f}, {best_gamma1:.2f}"
-                f" | Total predictions: {len(predictions)}"
-                f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
-                f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
-        else:
-            print(f"CBF parameter updated to: {best_gamma0:.2f}"
-                f" | Total predictions: {len(predictions)}"
-                f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
-                f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
+        if self.print_info:
+            if self.gamma_dim == 2:
+                print(f"CBF parameters updated to: {best_gamma0:.2f}, {best_gamma1:.2f}"
+                    f" | Total predictions: {len(predictions)}"
+                    f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
+                    f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
+            else:
+                print(f"CBF parameter updated to: {best_gamma0:.2f}"
+                    f" | Total predictions: {len(predictions)}"
+                    f" | Filtered {len(predictions)-len(filtered_predictions)} with Epistemic"
+                    f" | Filtered {len(filtered_predictions)-len(final_predictions)} with Aleatoric")
 
         return best_gamma0, best_gamma1
 
@@ -437,9 +439,10 @@ def get_online_cbf_adapter(robot_model, controller_name):
         step_size=cfg["step_size"],
         lower_bound=cfg["lower_bound"],
         upper_bound=cfg["upper_bound"],
-        epistemic_threshold=cfg.get("epistemic_threshold", 0.2),
+        epistemic_threshold=cfg.get("epistemic_threshold", 0.9),
         robot_model=robot_model,
-        use_gat=use_gat
+        use_gat=use_gat,
+        print_info=True,
     )
 
 def single_agent_simulation(velocity,
@@ -504,7 +507,7 @@ def single_agent_simulation(velocity,
     )
 
     # Initialize the CBF parameters
-    if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
+    if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_DPCBF", "Quad3D"]:
         tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
         tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
     else:
@@ -552,7 +555,7 @@ def single_agent_simulation(velocity,
             start = time.time()
             best_gamma0, best_gamma1 = online_cbf_adapter.cbf_param_adaptation(tracking_controller)
             if best_gamma0 is not None:
-                if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
+                if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_DPCBF", "Quad3D"]:
                     tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma0
                     tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1
                 else:
@@ -574,7 +577,7 @@ def single_agent_simulation(velocity,
         # append the states, control inputs, and CBF parameters by appending to csv
         with open('output.csv', 'a', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
+            if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_DPCBF", "Quad3D"]:
                 writer.writerow(np.append(robot_state, np.append(control_input, 
                     [tracking_controller.pos_controller.cbf_param['alpha1'], 
                     tracking_controller.pos_controller.cbf_param['alpha2']])))
@@ -605,13 +608,14 @@ if __name__ == "__main__":
     robot_model_list = [
         "DynamicUnicycle2D",
         "KinematicBicycle2D_C3BF",
+        "KinematicBicycle2D_DPCBF",
         "Quad2D",
         "Quad3D",
         "VTOL2D",
     ]
 
     # Pick a specific controller and robot model
-    controller_name = controller_list[1]   
+    controller_name = controller_list[-1]   
     robot_model = robot_model_list[2]       
     
     # Define waypoints for the simulation
