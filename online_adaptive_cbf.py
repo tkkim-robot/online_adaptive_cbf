@@ -255,7 +255,8 @@ class OnlineCBFAdapter:
         Filter predictions based on epistemic uncertainty
         We employ Jensen-Renyi Divergence (JRD) with quadratic Renyi entropy, which has a closed-form expression of the divergence of a GMM
         If the JRD D(X) of the prediction of a given input X is greater than the predefined threshold, it is deemed to be out-of-distribution
-        '''        
+        '''                
+
         if not predictions:
             return []
         epi = np.asarray([p[4] for p in predictions], dtype=np.float32)          # (N,)
@@ -263,7 +264,10 @@ class OnlineCBFAdapter:
         if np.all(epi > 100.0):
             return []
         epi_norm = (epi - epi.min()) / (epi.max() - epi.min() + 1e-8)
+        
+        # The threshold 0.1 corresponds to the CCCP-calibrated raw divergence value after normalization
         keep_mask = epi_norm <= self.epistemic_threshold                         # (N,) bool
+        
         return [pred for pred, keep in zip(predictions, keep_mask) if keep]
 
     def calculate_cvar_boundary(self):
@@ -409,7 +413,7 @@ def get_env_defaults(robot_model):
 
     return env_width, env_height
 
-def get_online_cbf_adapter(robot_model, controller_name):
+def get_online_cbf_adapter(robot_model, controller_name, print_info=True):
     """
     Returns an OnlineCBFAdapter instance for the given robot_model
     """
@@ -439,10 +443,10 @@ def get_online_cbf_adapter(robot_model, controller_name):
         step_size=cfg["step_size"],
         lower_bound=cfg["lower_bound"],
         upper_bound=cfg["upper_bound"],
-        epistemic_threshold=cfg.get("epistemic_threshold", 0.9),
+        epistemic_threshold=cfg.get("epistemic_threshold", 0.1),
         robot_model=robot_model,
         use_gat=use_gat,
-        print_info=True,
+        print_info=print_info,
     )
 
 def single_agent_simulation(velocity,
@@ -597,26 +601,26 @@ def single_agent_simulation(velocity,
 
 if __name__ == "__main__":
     controller_list = [
-        "MPC-CBF low fixed param",
-        "MPC-CBF high fixed param",
-        "Optimal Decay CBF-QP",
-        "Optimal Decay MPC-CBF",
-        "Online Adaptive CBF-QP",
-        "Online Adaptive MPC-CBF MLP",
-        "Online Adaptive MPC-CBF GAT",
+        "MPC-CBF low fixed param",     # 0
+        "MPC-CBF high fixed param",    # 1
+        "Optimal Decay CBF-QP",        # 2
+        "Optimal Decay MPC-CBF",       # 3
+        "Online Adaptive CBF-QP",      # 4
+        "Online Adaptive MPC-CBF MLP", # 5
+        "Online Adaptive MPC-CBF GAT", # 6
     ]
     robot_model_list = [
-        "DynamicUnicycle2D",
-        "KinematicBicycle2D_C3BF",
-        "KinematicBicycle2D_DPCBF",
-        "Quad2D",
-        "Quad3D",
-        "VTOL2D",
+        "DynamicUnicycle2D",           # 0
+        "KinematicBicycle2D_C3BF",     # 1
+        "KinematicBicycle2D_DPCBF",    # 2
+        "Quad2D",                      # 3
+        "Quad3D",                      # 4
+        "VTOL2D",                      # 5
     ]
 
     # Pick a specific controller and robot model
     controller_name = controller_list[-1]   
-    robot_model = robot_model_list[2]       
+    robot_model = robot_model_list[3]       
     
     # Define waypoints for the simulation
     if robot_model == "VTOL2D":

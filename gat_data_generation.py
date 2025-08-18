@@ -30,7 +30,8 @@ ROBOT_SPECS = {
             "radius": 0.3
         },
         "param_ranges": {
-            "theta_range":     (-np.pi/2,  np.pi/2),
+            # "theta_range":     (-np.pi/2,  np.pi/2),
+            "theta_range":     (-0.01,  0.01),
             "gamma0_range":    (0.01, 0.35),
             "gamma1_range":    (0.01, 0.35)
         }
@@ -65,15 +66,16 @@ ROBOT_SPECS = {
     "Quad2D": {
         "spec": {
             "model": "Quad2D",
-            "f_min": 3.0,
-            "f_max": 10.0,
+            "f_min": 2.5,
+            "f_max": 5.5,
+            "inertia": 0.05,
             "sensor": "rgbd",
             "radius": 0.3
         },
         "param_ranges": {
             "theta_range":      (-np.pi/6, np.pi/6),
-            "gamma0_range":     (0.01, 0.35),
-            "gamma1_range":     (0.01, 0.35)
+            "gamma0_range":     (0.01, 0.99),
+            "gamma1_range":     (0.01, 0.99)
         }
     },
     "Quad3D": {
@@ -264,7 +266,7 @@ def single_agent_simulation_gat(
         controller_type={'pos': controller_name},
         dt=dt,
         show_animation=show_animation,
-        save_animation=False,
+        save_animation=True,
         enable_rotation=enable_rotation,
         ax=ax, fig=fig, env=env_handler,
     )
