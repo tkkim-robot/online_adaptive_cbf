@@ -218,7 +218,7 @@ ALL_DEFAULTS = {
             "radius": 0.3
         },
         "default_obs": np.array([
-            # [0.1, 2.0, 0.1],
+            [0.1, 2.0, 0.1],
             [0.4, 2.7, 0.1],
             # [0.5, 3.0, 0.1],
             [0.5, 0.5, 0.2],
@@ -305,7 +305,8 @@ ADAPTIVE_MODELS = {
             "scaler_path": "nn_model/checkpoint/DynamicUnicycle2D_0530_mlp_qp.save",
             "step_size":   0.05,
             "lower_bound": 0.5,
-            "upper_bound": 3.0
+            "upper_bound": 3.0,
+            "epistemic_threshold": 0.1            
         },
         "online_mpc_cbf_mlp": {
             "model_path":  "nn_model/checkpoint/DynamicUnicycle2D_0801_mlp_0230.pth",
@@ -314,14 +315,18 @@ ADAPTIVE_MODELS = {
             # "scaler_path": "nn_model/checkpoint/DynamicUnicycle2D_0418_mlp.save",
             "step_size":   0.01,
             "lower_bound": 0.01,
-            "upper_bound": 0.35
+            "upper_bound": 0.35,
+            "epistemic_threshold": 0.1            
         },      
         "online_mpc_cbf_gat": {
+            # "model_path":  "nn_model/checkpoint/DynamicUnicycle2D_0808_gat_1730.pth",
+            # "scaler_path": "nn_model/checkpoint/DynamicUnicycle2D_0808_gat_1730.save",
             "model_path":  "nn_model/checkpoint/DynamicUnicycle2D_0731_gat_2130.pth",
             "scaler_path": "nn_model/checkpoint/DynamicUnicycle2D_0731_gat_2130.save",
             "step_size":   0.01,
             "lower_bound": 0.01,
-            "upper_bound": 0.35
+            "upper_bound": 0.35,
+            "epistemic_threshold": 0.1          
         }      
     },
     "KinematicBicycle2D_C3BF": {
@@ -361,18 +366,20 @@ ADAPTIVE_MODELS = {
             "scaler_path": "nn_model/checkpoint/Quad2D_0804_mlp_2330.save",
             # "model_path":  "nn_model/checkpoint/Quad2D_0117_mlp.pth",
             # "scaler_path": "nn_model/checkpoint/Quad2D_0117_mlp.save",
-            "step_size":   0.03,
+            "step_size":   0.04,
             "lower_bound": 0.01,
-            "upper_bound": 0.99
+            "upper_bound": 0.99,
+            "epistemic_threshold": 0.2            
         },  
         "online_mpc_cbf_gat": {
             "model_path":  "nn_model/checkpoint/Quad2D_0804_gat_1930.pth",
             "scaler_path": "nn_model/checkpoint/Quad2D_0804_gat_1930.save",
             # "model_path":  "nn_model/checkpoint/Quad2D_0514_gat.pth",
             # "scaler_path": "nn_model/checkpoint/Quad2D_0514_gat.save",
-            "step_size":   0.03,
+            "step_size":   0.04,
             "lower_bound": 0.01,
-            "upper_bound": 0.99
+            "upper_bound": 0.99,
+            "epistemic_threshold": 0.2            
         },
     },
     "Quad3D": {
@@ -384,21 +391,25 @@ ADAPTIVE_MODELS = {
             "upper_bound": 0.2
         },
         "online_mpc_cbf_mlp": {
-            "model_path":  "nn_model/checkpoint/Quad3D_0728_mlp_1230.pth",
-            "scaler_path": "nn_model/checkpoint/Quad3D_0728_mlp_1230.save",
+            "model_path":  "nn_model/checkpoint/Quad3D_0808_mlp_1230.pth",
+            "scaler_path": "nn_model/checkpoint/Quad3D_0808_mlp_1230.save",
+            # "model_path":  "nn_model/checkpoint/Quad3D_0728_mlp_1230.pth",
+            # "scaler_path": "nn_model/checkpoint/Quad3D_0728_mlp_1230.save",
             # "model_path":  "nn_model/checkpoint/Quad3D_0708_mlp_1130.pth",
             # "scaler_path": "nn_model/checkpoint/Quad3D_0708_mlp_1130.save",
             "step_size":   0.001,
             "lower_bound": 0.01,
-            "upper_bound": 0.5
+            "upper_bound": 0.5,
+            "epistemic_threshold": 0.2            
         },  
         "online_mpc_cbf_gat": {
             "model_path":  "nn_model/checkpoint/Quad3D_0807_gat_0230.pth",
             # "model_path":  "nn_model/checkpoint/best_gat_penn.pth",
-            "scaler_path": "nn_model/checkpoint/Quad3D_0802_gat_1830.save",
+            "scaler_path": "nn_model/checkpoint/Quad3D_0807_gat_0230.save",
             "step_size":   0.001,
             "lower_bound": 0.01,
-            "upper_bound": 0.5
+            "upper_bound": 0.5,
+            "epistemic_threshold": 0.2
         },
     },
     

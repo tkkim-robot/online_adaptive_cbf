@@ -443,7 +443,8 @@ def get_online_cbf_adapter(robot_model, controller_name, print_info=True):
         step_size=cfg["step_size"],
         lower_bound=cfg["lower_bound"],
         upper_bound=cfg["upper_bound"],
-        epistemic_threshold=cfg.get("epistemic_threshold", 0.1),
+        epistemic_threshold=cfg["epistemic_threshold"],
+        # epistemic_threshold=cfg.get("epistemic_threshold", 0.20),
         robot_model=robot_model,
         use_gat=use_gat,
         print_info=print_info,
@@ -619,7 +620,7 @@ if __name__ == "__main__":
 
     # Pick a specific controller and robot model
     controller_name = controller_list[-1]   
-    robot_model = robot_model_list[3]       
+    robot_model = robot_model_list[0]       
     
     # Define waypoints for the simulation
     if robot_model == "VTOL2D":

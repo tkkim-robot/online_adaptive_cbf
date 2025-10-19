@@ -129,7 +129,9 @@ class ClassConditionedConformalPrediction:
 
 if __name__ == "__main__":
     CONFIG = {
-        "pickle_path": "data/gat_datagen_200000_DynamicUnicycle2D_mpc_cbf.pkl",
+        # "pickle_path": "data/gat_datagen_300000_Quad3D_mpc_cbf.pkl",
+        # "model_path": "checkpoint/Quad3D_0807_gat_0230.pth",
+        "pickle_path": "data/gat_datagen_300000_DynamicUnicycle2D_mpc_cbf.pkl",
         "model_path": "checkpoint/DynamicUnicycle2D_0731_gat_2130.pth",
         "gamma_dim": 2,  # 1 for KinematicBicycle2D/Quad3D, 2 for DynamicUnicycle2D/Quad2D, etc.
         "alpha_cal": 0.95,
