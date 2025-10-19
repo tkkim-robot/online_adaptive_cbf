@@ -58,9 +58,9 @@ ROBOT_SPECS = {
             "radius": 0.3,
         },
         "param_ranges": {
-            "theta_range":     (-np.pi/6,  np.pi/6),
-            "gamma0_range":    (0.5, 0.99),
-            "gamma1_range":    (0.5, 0.99)
+            "theta_range":     (-np.pi/2,  np.pi/2),
+            "gamma0_range":    (0.15, 0.99),
+            "gamma1_range":    (0.15, 0.99)
         }
     },
     "Quad2D": {
@@ -161,7 +161,7 @@ def single_agent_simulation_gat(
         robot_model, controller_name,
         gamma0, gamma1=None, theta=0.01,
         num_obstacles=5,
-        max_sim_time=20.0,
+        max_sim_time=30.0,
         deadlock_threshold=0.2,
         show_animation=False,
         retry_limit=10,
@@ -182,7 +182,7 @@ def single_agent_simulation_gat(
 
     # 2) Waypoints for the robot's path
     waypoints = np.array([
-        [1, 2, theta],
+        [0.5, 2, theta],
         [9.5, 2, 0]
     ], dtype=np.float64)
 
@@ -513,12 +513,56 @@ if __name__ == "__main__":
     controller_name = controller_list[1]
     robot_model = robot_model_list[1]
     
-    TESTMODE = True
+    TESTMODE = False
+    np.random.seed(42)
     
     if TESTMODE:
+        np.random.seed(5119)
         single_simulation_example(robot_model, controller_name,
-                                  gamma0=0.1
-                                  , gamma1=0.1, theta=0.01)
+                                  gamma0=0.99, gamma1=0.99, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.8, gamma1=0.8, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.7, gamma1=0.7, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.6, gamma1=0.6, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.5, gamma1=0.5, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.4, gamma1=0.4, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.3, gamma1=0.3, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.2, gamma1=0.2, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.1, gamma1=0.1, theta=0.01)
+        np.random.seed(5119)
+        single_simulation_example(robot_model, controller_name,
+                                  gamma0=0.01, gamma1=0.01, theta=0.01)
+
+        # np.random.seed(5119)
+        # single_simulation_example(robot_model, controller_name,
+        #                           gamma0=0.99, gamma1=0.99, theta=0.01)
+        # np.random.seed(5119)
+        # single_simulation_example(robot_model, controller_name,
+        #                           gamma0=0.76, gamma1=0.76, theta=0.01)
+        # np.random.seed(5119)
+        # single_simulation_example(robot_model, controller_name,
+        #                           gamma0=0.51, gamma1=0.51, theta=0.01)
+        # np.random.seed(5119)
+        # single_simulation_example(robot_model, controller_name,
+        #                           gamma0=0.26, gamma1=0.26, theta=0.01)
+        # np.random.seed(5119)
+        # single_simulation_example(robot_model, controller_name,
+        #                           gamma0=0.11, gamma1=0.11, theta=0.01)
 
         # np.random.seed(5119)
         # single_simulation_example(robot_model, controller_name,

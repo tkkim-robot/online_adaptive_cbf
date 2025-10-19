@@ -116,6 +116,62 @@ ALL_DEFAULTS = {
         ])
     },
 
+    "KinematicBicycle2D_DPCBF": {
+        "controller_params": {
+            "MPC-CBF low fixed param": {
+                "type": "mpc_cbf",
+                "gamma0": 0.01,
+                "gamma1": 0.0
+            },
+            "MPC-CBF high fixed param": {
+                "type": "mpc_cbf",
+                "gamma0": 0.99,
+                "gamma1": 0.0
+            },
+            "Optimal Decay CBF-QP": {
+                "type": "optimal_decay_cbf_qp",
+                "gamma0": 0.5,
+                "gamma1": 0.0
+            },
+            "Optimal Decay MPC-CBF": {
+                "type": "optimal_decay_mpc_cbf",
+                "gamma0": 0.1,
+                "gamma1": 0.0
+            },
+            "Online Adaptive CBF-QP": {
+                "type": "cbf_qp",
+                "gamma0": 0.5,
+                "gamma1": 0.0
+            },
+            "Online Adaptive MPC-CBF MLP": {
+                "type": "mpc_cbf",
+                "gamma0": 0.01,
+                "gamma1": 0.00
+            },
+            "Online Adaptive MPC-CBF GAT": {
+                "type": "mpc_cbf",
+                "gamma0": 0.01,
+                "gamma1": 0.00
+            },
+        },
+        "robot_spec": {
+            "model": "KinematicBicycle2D_DPCBF",
+            "a_max": 0.3,
+            "v_max": 1.0,
+            "radius": 0.3,
+            "fov_angle": 170.0,
+            "cam_range": 0.01,
+        },
+        "default_obs": np.array([
+            # [4.0, 0.3, 0.15],
+            [3.5, 0.6, 0.35],
+            [3.5, 2.2, 0.45],
+            [6.5, 2.2, 0.8],
+            [8.4, 0.5, 0.25],
+            # [7.5, 2.0, 0.3],
+        ])
+    },
+
     "Quad2D": {
         "controller_params": {
             "MPC-CBF low fixed param": {
@@ -233,6 +289,21 @@ ALL_DEFAULTS = {
             [7.6, 0.5, 0.25],
             # [7.5, 2.5, 0.45],
             [8.7, 0.8, 0.5],
+            # [0.1, 2.0, 0.1],
+            [0.4, 2.7, 0.1],
+            # [0.5, 3.0, 0.1],
+            [0.5, 0.5, 0.2],
+            [1.7, 3.2, 0.5],
+            [2.0, 0.4, 0.3],
+            [3.1, 2.2, 0.5],
+            [3.5, 0.6, 0.4],
+            [4.6, 2.7, 0.4],
+            [4.7, 1.2, 0.4],
+            [6.8, 2.5, 1.0],
+            [6.2, 0.3, 0.25],
+            [7.6, 0.5, 0.25],
+            # [7.5, 2.5, 0.45],
+            [8.7, 0.8, 0.5],
         ])
     },
 
@@ -340,16 +411,39 @@ ADAPTIVE_MODELS = {
         "online_mpc_cbf_mlp": {
             "model_path":  "nn_model/checkpoint/KinematicBicycle2D_C3BF_0621_mlp_2430.pth",
             "scaler_path": "nn_model/checkpoint/KinematicBicycle2D_C3BF_0621_mlp_2430.save",
-            "step_size":   0.001,
+            "step_size":   0.005,
             "lower_bound": 0.01,
-            "upper_bound": 0.35
+            "upper_bound": 0.99
         },
         "online_mpc_cbf_gat": {
-            "model_path":  "nn_model/checkpoint/KinematicBicycle2D_C3BF_0706_gat.pth",
-            "scaler_path": "nn_model/checkpoint/scaler_1204_kinbi.save",
-            "step_size":   0.001,
+            "model_path":  "nn_model/checkpoint/KinematicBicycle2D_0814_gat_0130.pth",
+            "scaler_path": "nn_model/checkpoint/KinematicBicycle2D_0813_gat_2130.save",
+            "step_size":   0.005,
             "lower_bound": 0.01,
-            "upper_bound": 0.35
+            "upper_bound": 0.99
+        }  
+    },
+    "KinematicBicycle2D_DPCBF": {
+        "online_cbf_qp": {
+            "model_path":  "nn_model/checkpoint/penn_model_qp.pth",
+            "scaler_path": "nn_model/checkpoint/scaler_qp.save",
+            "step_size":   0.01,
+            "lower_bound": 0.1,
+            "upper_bound": 0.2
+        },
+        "online_mpc_cbf_mlp": {
+            "model_path":  "nn_model/checkpoint/KinematicBicycle2D_C3BF_0621_mlp_2430.pth",
+            "scaler_path": "nn_model/checkpoint/KinematicBicycle2D_C3BF_0621_mlp_2430.save",
+            "step_size":   0.005,
+            "lower_bound": 0.01,
+            "upper_bound": 0.99
+        },
+        "online_mpc_cbf_gat": {
+            "model_path":  "nn_model/checkpoint/KinematicBicycle2DDP_0817_gat_0130.pth",
+            "scaler_path": "nn_model/checkpoint/KinematicBicycle2DDP_0814_gat_0130.save",
+            "step_size":   0.005,
+            "lower_bound": 0.01,
+            "upper_bound": 0.99
         }  
     },
     "Quad2D": {

@@ -32,8 +32,9 @@ pickle_file = 'data/' + DATANAME + '.pkl'
 scaler_path = 'checkpoint/' + SCALERNAME_SAVE + '.save'
 model_path = 'checkpoint/' + MODELNAME_SAVE + '.pth'
 
-robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D_C3BF', 'Quad2D', 'Quad3D', 'VTOL2D']
-robot_model = robot_model_list[3]
+robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF', 
+                    'Quad2D', 'Quad3D', 'VTOL2D']
+robot_model = robot_model_list[2]
 
 ACTIVATION = 'relu'
 LR = 0.0001
@@ -48,7 +49,7 @@ WANDB_FLAG = True
 # Only initialize wandb when running this script directly, not when imported
 if __name__ == "__main__" and WANDB_FLAG:
     import wandb
-    wandb.init(project="Quad3D_0807", config={
+    wandb.init(project="KinematicBicycle2D_DPCBF_0814", config={
         "learning_rate": LR,
         "epochs": EPOCH,
         "batch_size": BATCHSIZE
@@ -61,7 +62,7 @@ if robot_model == 'Quad2D':
 elif robot_model == 'Quad3D':
     n_states = 6
     gamma_dim = 1
-elif robot_model == 'KinematicBicycle2D_C3BF': # one gamma
+elif robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']: # one gamma
     n_states = 5
     gamma_dim = 1
 else:
@@ -85,7 +86,7 @@ def load_and_preprocess_data(data_file, scaler_path=None, noise_percentage=0.0, 
     elif robot_model == 'Quad3D':
         X = dataset[['Distance', 'VelocityX', 'VelocityZ', 'Theta', 'gamma0']].values
         extra_states = 0
-    elif robot_model == 'KinematicBicycle2D_C3BF':          
+    elif robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_C3BF_DPCBF']:          
         X = dataset[['Distance', 'Velocity', 'Theta', 'gamma0']].values
         extra_states = 0        
     else:
@@ -193,7 +194,7 @@ if __name__ == '__main__':
             penn.load_model(model_path)
 
             # Example input array 
-            if robot_model == 'KinematicBicycle2D_C3BF': # [distance, velocity, theta, gamma0]
+            if robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']: # [distance, velocity, theta, gamma0]
                 input_data = [2.55, 0.01, 0.001, 0.005]
             elif robot_model == 'Quad2D': # [distance, velocityX, velocityZ, theta, gamma1, gamma2]
                 input_data = [2.55, 0.01, 0.02, 0.001, 0.005, 0.005]
@@ -223,7 +224,7 @@ if __name__ == '__main__':
             # Create datasets and dataloaders
             train_dataset = module.CustomDataset(train_dataX, train_dataY)
             test_dataset = module.CustomDataset(test_dataX, test_dataY)
-            train_loader = DataLoader(train_dataset, batch_size=BATCHSIZE, shuffle=True, num_workers=1, pin_memory=True)
+            train_loader = DataLoader(train_dataset, batch_size=BATCHSIZE, shuffle=True, num_workers=0, pin_memory=True)
             test_loader  = DataLoader(test_dataset, batch_size=BATCHSIZE, shuffle=False)
 
             start_epoch = 0

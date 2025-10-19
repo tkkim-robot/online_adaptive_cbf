@@ -39,7 +39,7 @@ class OnlineCBFAdapter:
         elif self.robot_model == 'Quad3D':
             self.extra_state = 0
             self.gamma_dim = 1
-        elif self.robot_model == 'KinematicBicycle2D_C3BF':
+        elif self.robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:
             self.extra_state = -1
             self.gamma_dim = 1
         else:
@@ -132,7 +132,7 @@ class OnlineCBFAdapter:
             velocity_x = tracking_controller.robot.X[6, 0]
             velocity_z = tracking_controller.robot.X[8, 0]
             return [distance, velocity_x, velocity_z, delta_theta, gamma0]
-        elif self.robot_model in ['KinematicBicycle2D_C3BF']:
+        elif self.robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:
             velocity = tracking_controller.robot.X[3, 0]
             return [distance, velocity, delta_theta, gamma0]
         else:
@@ -512,7 +512,7 @@ def single_agent_simulation(velocity,
     )
 
     # Initialize the CBF parameters
-    if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
+    if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_DPCBF", "Quad3D"]:
         tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
         tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
     else:
@@ -560,7 +560,7 @@ def single_agent_simulation(velocity,
             start = time.time()
             best_gamma0, best_gamma1 = online_cbf_adapter.cbf_param_adaptation(tracking_controller)
             if best_gamma0 is not None:
-                if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
+                if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_DPCBF", "Quad3D"]:
                     tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma0
                     tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1
                 else:
@@ -582,7 +582,7 @@ def single_agent_simulation(velocity,
         # append the states, control inputs, and CBF parameters by appending to csv
         with open('output.csv', 'a', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
+            if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_DPCBF", "Quad3D"]:
                 writer.writerow(np.append(robot_state, np.append(control_input, 
                     [tracking_controller.pos_controller.cbf_param['alpha1'], 
                     tracking_controller.pos_controller.cbf_param['alpha2']])))
@@ -613,9 +613,10 @@ if __name__ == "__main__":
     robot_model_list = [
         "DynamicUnicycle2D",           # 0
         "KinematicBicycle2D_C3BF",     # 1
-        "Quad2D",                      # 2
-        "Quad3D",                      # 3
-        "VTOL2D",                      # 4
+        "KinematicBicycle2D_DPCBF",    # 2
+        "Quad2D",                      # 3
+        "Quad3D",                      # 4
+        "VTOL2D",                      # 5
     ]
 
     # Pick a specific controller and robot model
