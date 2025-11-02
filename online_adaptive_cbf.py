@@ -15,6 +15,7 @@ from torch_geometric.data import Batch
 from sklearn.preprocessing import MinMaxScaler
 from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController
+from safe_control.dynamic_env.main import LocalTrackingControllerDyn
 from nn_model.penn.gat import GATModule
 from nn_model.penn.nn_iccbf_predict import ProbabilisticEnsembleNN
 from nn_model.penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
@@ -255,6 +256,8 @@ class OnlineCBFAdapter:
         Filter predictions based on epistemic uncertainty
         We employ Jensen-Renyi Divergence (JRD) with quadratic Renyi entropy, which has a closed-form expression of the divergence of a GMM
         If the JRD D(X) of the prediction of a given input X is greater than the predefined threshold, it is deemed to be out-of-distribution
+        
+        Uses raw JRD values directly (no normalization) for consistent comparison with CCCP-calibrated thresholds
         '''                
 
         if not predictions:
@@ -263,10 +266,10 @@ class OnlineCBFAdapter:
         # If all uncertainties are high, return an empty list
         if np.all(epi > 100.0):
             return []
-        epi_norm = (epi - epi.min()) / (epi.max() - epi.min() + 1e-8)
         
-        # The threshold 0.1 corresponds to the CCCP-calibrated raw divergence value after normalization
-        keep_mask = epi_norm <= self.epistemic_threshold                         # (N,) bool
+        # Use raw JRD values directly - no normalization needed
+        # The epistemic_threshold is now a raw JRD value calibrated by CCCP
+        keep_mask = epi <= self.epistemic_threshold                               # (N,) bool
         
         return [pred for pred, keep in zip(predictions, keep_mask) if keep]
 
@@ -422,10 +425,12 @@ def get_online_cbf_adapter(robot_model, controller_name, print_info=True):
 
     controller_subkey_map = {
         "Online Adaptive CBF-QP":  "online_cbf_qp",
+        "Online Adaptive CBF-QP MLP": "online_cbf_qp_mlp",
+        "Online Adaptive CBF-QP GAT": "online_cbf_qp_gat",
         "Online Adaptive MPC-CBF MLP": "online_mpc_cbf_mlp",
         "Online Adaptive MPC-CBF GAT": "online_mpc_cbf_gat",
     }
-    if controller_name == "Online Adaptive MPC-CBF GAT": 
+    if controller_name in ["Online Adaptive MPC-CBF GAT", "Online Adaptive CBF-QP GAT"]: 
         use_gat=True
     else:
         use_gat=False
@@ -437,14 +442,16 @@ def get_online_cbf_adapter(robot_model, controller_name, print_info=True):
         raise ValueError(f"No config for subkey '{subkey}' in '{robot_model}'")
 
     cfg = ADAPTIVE_MODELS[robot_model][subkey]
+    # Allow environment variable override for checkpoint and scaler paths
+    model_override = os.environ.get("CHECKPOINT_FILE")
+    scaler_override = os.environ.get("SCALER_FILE")
     return OnlineCBFAdapter(
-        model_name=cfg["model_path"],
-        scaler_name=cfg["scaler_path"],
+        model_name=model_override if model_override else cfg["model_path"],
+        scaler_name=scaler_override if scaler_override else cfg["scaler_path"],
         step_size=cfg["step_size"],
         lower_bound=cfg["lower_bound"],
         upper_bound=cfg["upper_bound"],
-        epistemic_threshold=cfg["epistemic_threshold"],
-        # epistemic_threshold=cfg.get("epistemic_threshold", 0.20),
+        epistemic_threshold=cfg.get("raw_epistemic_threshold", cfg.get("epistemic_threshold", 0.20)),
         robot_model=robot_model,
         use_gat=use_gat,
         print_info=print_info,
@@ -498,18 +505,31 @@ def single_agent_simulation(velocity,
     ax, fig = plot_handler.plot_grid("")
     env_handler = env.Env()
 
-    # Create the tracking controller
-    tracking_controller = LocalTrackingController(
-        x_init,
-        robot_spec,
-        controller_type={'pos': ctrl_type},
-        dt=dt,
-        show_animation=True,
-        save_animation=True,
-        ax=ax,
-        fig=fig,
-        env=env_handler
-    )
+    # Create the tracking controller - use LocalTrackingControllerDyn for KinematicBicycle2D_DPCBF
+    if robot_model == "KinematicBicycle2D_DPCBF":
+        tracking_controller = LocalTrackingControllerDyn(
+            x_init,
+            robot_spec,
+            controller_type={'pos': ctrl_type},
+            dt=dt,
+            show_animation=True,
+            save_animation=True,
+            ax=ax,
+            fig=fig,
+            env=env_handler
+        )
+    else:
+        tracking_controller = LocalTrackingController(
+            x_init,
+            robot_spec,
+            controller_type={'pos': ctrl_type},
+            dt=dt,
+            show_animation=True,
+            save_animation=True,
+            ax=ax,
+            fig=fig,
+            env=env_handler
+        )
 
     # Initialize the CBF parameters
     if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_DPCBF", "Quad3D"]:
@@ -530,7 +550,7 @@ def single_agent_simulation(velocity,
     tracking_controller.set_waypoints(waypoints)
 
     # If controller is 'Online Adaptive', get adapter
-    if controller_name in ['Online Adaptive CBF-QP', 'Online Adaptive MPC-CBF MLP', 'Online Adaptive MPC-CBF GAT']:
+    if controller_name in ['Online Adaptive CBF-QP', 'Online Adaptive CBF-QP MLP', 'Online Adaptive CBF-QP GAT', 'Online Adaptive MPC-CBF MLP', 'Online Adaptive MPC-CBF GAT']:
         online_cbf_adapter = get_online_cbf_adapter(robot_model, controller_name)
     else:
         online_cbf_adapter = None
