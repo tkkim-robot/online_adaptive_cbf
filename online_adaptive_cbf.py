@@ -40,7 +40,7 @@ class OnlineCBFAdapter:
         elif self.robot_model == 'Quad3D':
             self.extra_state = 0
             self.gamma_dim = 1
-        elif self.robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:
+        elif self.robot_model == 'KinematicBicycle2D_DPCBF':
             self.extra_state = -1
             self.gamma_dim = 1
         else:
@@ -133,7 +133,7 @@ class OnlineCBFAdapter:
             velocity_x = tracking_controller.robot.X[6, 0]
             velocity_z = tracking_controller.robot.X[8, 0]
             return [distance, velocity_x, velocity_z, delta_theta, gamma0]
-        elif self.robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:
+        elif self.robot_model == 'KinematicBicycle2D_DPCBF':
             velocity = tracking_controller.robot.X[3, 0]
             return [distance, velocity, delta_theta, gamma0]
         else:
@@ -430,10 +430,11 @@ def get_online_cbf_adapter(robot_model, controller_name, print_info=True):
         "Online Adaptive MPC-CBF MLP": "online_mpc_cbf_mlp",
         "Online Adaptive MPC-CBF GAT": "online_mpc_cbf_gat",
     }
+    # Determine if controller uses GAT
     if controller_name in ["Online Adaptive MPC-CBF GAT", "Online Adaptive CBF-QP GAT"]: 
-        use_gat=True
+        use_gat = True
     else:
-        use_gat=False
+        use_gat = False
     
     if controller_name not in controller_subkey_map:
         raise ValueError(f"Controller '{controller_name}' not recognized for online adaptation.")
@@ -476,8 +477,22 @@ def single_agent_simulation(velocity,
     print(robot_spec, default_obs)
     print(controller_name, ctrl_type, gamma0, gamma1)
 
-    if default_obs.shape[1] != 5:
-        default_obs = np.hstack((default_obs, np.zeros((default_obs.shape[0], 2)))) # Set static obs velocity 0.0 at (5, 5)
+    # For DPCBF, obstacles need 7 elements: [x, y, r, vx, vy, y_min, flag]
+    # For other robots, obstacles need 5 elements: [x, y, r, vx, vy]
+    if robot_model == "KinematicBicycle2D_DPCBF":
+        if default_obs.shape[1] != 7:
+            # Pad to 7 elements: [x, y, r, vx, vy, y_min, flag]
+            # flag=0 for circles, flag=1 for superellipsoids
+            if default_obs.shape[1] == 3:
+                # Start with [x, y, r], add [vx, vy, y_min, flag]
+                default_obs = np.hstack((default_obs, np.zeros((default_obs.shape[0], 4))))
+            elif default_obs.shape[1] == 5:
+                # Already has [x, y, r, vx, vy], add [y_min, flag]
+                default_obs = np.hstack((default_obs, np.zeros((default_obs.shape[0], 2))))
+            # If already 7, do nothing
+    else:
+        if default_obs.shape[1] != 5:
+            default_obs = np.hstack((default_obs, np.zeros((default_obs.shape[0], 2)))) # Set static obs velocity 0.0 at (5, 5)
     
     # Set initial state
     if robot_model == "Quad2D":
@@ -532,18 +547,13 @@ def single_agent_simulation(velocity,
         )
 
     # Initialize the CBF parameters
-    if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_DPCBF", "Quad3D"]:
+    if robot_model not in ["KinematicBicycle2D_DPCBF", "Quad3D"]:
         tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
         tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
     else:
         tracking_controller.pos_controller.cbf_param['alpha'] = gamma0
         tracking_controller.pos_controller.cbf_param['alpha2'] = 0.0  # dummy placeholder
     
-    # tracking_controller.pos_controller.cbf_param['alpha1'] = gamma0
-    # if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
-    #     tracking_controller.pos_controller.cbf_param['alpha2'] = gamma1
-    # else:
-    #     tracking_controller.pos_controller.cbf_param['alpha2'] = 0.0  # dummy placeholder
 
     # Load obstacles & set waypoints
     tracking_controller.obs = default_obs
@@ -580,15 +590,11 @@ def single_agent_simulation(velocity,
             start = time.time()
             best_gamma0, best_gamma1 = online_cbf_adapter.cbf_param_adaptation(tracking_controller)
             if best_gamma0 is not None:
-                if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_DPCBF", "Quad3D"]:
+                if robot_model not in ["KinematicBicycle2D_DPCBF", "Quad3D"]:
                     tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma0
                     tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1
                 else:
                     tracking_controller.pos_controller.cbf_param['alpha'] = best_gamma0
-                
-                # tracking_controller.pos_controller.cbf_param['alpha1'] = best_gamma0
-                # if robot_model not in ["KinematicBicycle2D_C3BF", "Quad3D"]:
-                #     tracking_controller.pos_controller.cbf_param['alpha2'] = best_gamma1      
                           
             end = time.time()
             print(f"Time taken for pure adaptation step: {end - start:.4f} seconds")
@@ -602,7 +608,7 @@ def single_agent_simulation(velocity,
         # append the states, control inputs, and CBF parameters by appending to csv
         with open('output.csv', 'a', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            if robot_model not in ["KinematicBicycle2D_C3BF", "KinematicBicycle2D_DPCBF", "Quad3D"]:
+            if robot_model not in ["KinematicBicycle2D_DPCBF", "Quad3D"]:
                 writer.writerow(np.append(robot_state, np.append(control_input, 
                     [tracking_controller.pos_controller.cbf_param['alpha1'], 
                     tracking_controller.pos_controller.cbf_param['alpha2']])))
@@ -610,10 +616,6 @@ def single_agent_simulation(velocity,
                 writer.writerow(np.append(robot_state, np.append(control_input, 
                     [tracking_controller.pos_controller.cbf_param['alpha'], 
                     tracking_controller.pos_controller.cbf_param['alpha2']])))
-                
-            # writer.writerow(np.append(robot_state, np.append(control_input, 
-            #     [tracking_controller.pos_controller.cbf_param['alpha1'], 
-            #      tracking_controller.pos_controller.cbf_param['alpha2']])))
 
     tracking_controller.export_video()
     plt.ioff()
@@ -622,26 +624,29 @@ def single_agent_simulation(velocity,
 
 if __name__ == "__main__":
     controller_list = [
-        "MPC-CBF low fixed param",     # 0
-        "MPC-CBF high fixed param",    # 1
-        "Optimal Decay CBF-QP",        # 2
-        "Optimal Decay MPC-CBF",       # 3
-        "Online Adaptive CBF-QP",      # 4
-        "Online Adaptive MPC-CBF MLP", # 5
-        "Online Adaptive MPC-CBF GAT", # 6
+        "CBF-QP low fixed param",      # 0
+        "CBF-QP high fixed param",     # 1
+        "MPC-CBF low fixed param",     # 2
+        "MPC-CBF high fixed param",    # 3
+        "Optimal Decay CBF-QP",        # 4
+        "Optimal Decay MPC-CBF",       # 5
+        "Online Adaptive CBF-QP",      # 6
+        "Online Adaptive CBF-QP MLP",  # 7
+        "Online Adaptive CBF-QP GAT",  # 8
+        "Online Adaptive MPC-CBF MLP", # 9
+        "Online Adaptive MPC-CBF GAT", # 10
     ]
     robot_model_list = [
         "DynamicUnicycle2D",           # 0
-        "KinematicBicycle2D_C3BF",     # 1
-        "KinematicBicycle2D_DPCBF",    # 2
-        "Quad2D",                      # 3
-        "Quad3D",                      # 4
-        "VTOL2D",                      # 5
+        "KinematicBicycle2D_DPCBF",    # 1
+        "Quad2D",                      # 2
+        "Quad3D",                      # 3
+        "VTOL2D",                      # 4
     ]
 
     # Pick a specific controller and robot model
-    controller_name = controller_list[-1]   
-    robot_model = robot_model_list[0]       
+    controller_name = controller_list[8]   
+    robot_model = robot_model_list[1]       
     
     # Define waypoints for the simulation
     if robot_model == "VTOL2D":

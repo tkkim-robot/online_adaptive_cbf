@@ -61,114 +61,46 @@ ALL_DEFAULTS = {
         ])
     },
 
-    "KinematicBicycle2D_C3BF": {
-        "controller_params": {
-            "MPC-CBF low fixed param": {
-                "type": "mpc_cbf",
-                "gamma0": 0.01,
-                "gamma1": 0.0
-            },
-            "MPC-CBF high fixed param": {
-                "type": "mpc_cbf",
-                "gamma0": 0.35,
-                "gamma1": 0.0
-            },
-            "Optimal Decay CBF-QP": {
-                "type": "optimal_decay_cbf_qp",
-                "gamma0": 0.5,
-                "gamma1": 0.0
-            },
-            "Optimal Decay MPC-CBF": {
-                "type": "optimal_decay_mpc_cbf",
-                "gamma0": 0.1,
-                "gamma1": 0.0
-            },
-            "Online Adaptive CBF-QP": {
-                "type": "cbf_qp",
-                "gamma0": 0.5,
-                "gamma1": 0.0
-            },
-            "Online Adaptive MPC-CBF MLP": {
-                "type": "mpc_cbf",
-                "gamma0": 0.01,
-                "gamma1": 0.00
-            },
-            "Online Adaptive MPC-CBF GAT": {
-                "type": "mpc_cbf",
-                "gamma0": 0.01,
-                "gamma1": 0.00
-            },
-        },
-        "robot_spec": {
-            "model": "KinematicBicycle2D_C3BF",
-            "a_max": 0.5,
-            "fov_angle": 170.0,
-            "cam_range": 0.01,
-            "radius": 0.3
-        },
-        "default_obs": np.array([
-            # [4.0, 0.3, 0.15],
-            [3.5, 0.6, 0.35],
-            [3.5, 2.2, 0.45],
-            [6.5, 2.2, 0.8],
-            [8.4, 0.5, 0.25],
-            # [7.5, 2.0, 0.3],
-        ])
-    },
-
     "KinematicBicycle2D_DPCBF": {
         "controller_params": {
-            "MPC-CBF low fixed param": {
-                "type": "mpc_cbf",
-                "gamma0": 0.01,
+            "CBF-QP low fixed param": {
+                "type": "cbf_qp",
+                "gamma0": 0.1,
                 "gamma1": 0.0
             },
-            "MPC-CBF high fixed param": {
-                "type": "mpc_cbf",
-                "gamma0": 0.99,
+            "CBF-QP high fixed param": {
+                "type": "cbf_qp",
+                "gamma0": 70.0,
                 "gamma1": 0.0
             },
             "Optimal Decay CBF-QP": {
                 "type": "optimal_decay_cbf_qp",
-                "gamma0": 0.5,
-                "gamma1": 0.0
-            },
-            "Optimal Decay MPC-CBF": {
-                "type": "optimal_decay_mpc_cbf",
                 "gamma0": 0.1,
                 "gamma1": 0.0
             },
-            "Online Adaptive CBF-QP": {
+            "Online Adaptive CBF-QP MLP": {
                 "type": "cbf_qp",
-                "gamma0": 0.5,
+                "gamma0": 0.1,
                 "gamma1": 0.0
             },
-            "Online Adaptive MPC-CBF MLP": {
-                "type": "mpc_cbf",
-                "gamma0": 0.01,
-                "gamma1": 0.00
-            },
-            "Online Adaptive MPC-CBF GAT": {
-                "type": "mpc_cbf",
-                "gamma0": 0.01,
-                "gamma1": 0.00
+            "Online Adaptive CBF-QP GAT": {
+                "type": "cbf_qp",
+                "gamma0": 0.1,
+                "gamma1": 0.0
             },
         },
         "robot_spec": {
             "model": "KinematicBicycle2D_DPCBF",
-            "a_max": 0.3,
-            "v_max": 1.0,
+            "a_max": 5.0,
             "radius": 0.3,
-            "fov_angle": 170.0,
-            "cam_range": 0.01,
         },
         "default_obs": np.array([
-            # [4.0, 0.3, 0.15],
-            [3.5, 0.6, 0.35],
-            [3.5, 2.2, 0.45],
-            [6.5, 2.2, 0.8],
-            [8.4, 0.5, 0.25],
-            # [7.5, 2.0, 0.3],
+            [4.0, 0.1, 0.3],
+            [3.5, 0.3, 0.4],
+            [2.5, 3.0, 0.5],
+            [6.5, 2.4, 1.05],
+            [7.5, 2.7, 0.45],
+            [8.2, 0.7, 0.5],
         ])
     },
 
@@ -237,23 +169,13 @@ ALL_DEFAULTS = {
             },
             "MPC-CBF high fixed param": {
                 "type": "mpc_cbf",
-                "gamma0": 0.50,
-                "gamma1": 0.50
-            },
-            "Optimal Decay CBF-QP": {
-                "type": "optimal_decay_cbf_qp",
-                "gamma0": 0.5,
-                "gamma1": 0.5
+                "gamma0": 0.99,
+                "gamma1": 0.99
             },
             "Optimal Decay MPC-CBF": {
                 "type": "optimal_decay_mpc_cbf",
                 "gamma0": 0.01,
                 "gamma1": 0.01
-            },
-            "Online Adaptive CBF-QP": {
-                "type": "cbf_qp",
-                "gamma0": 0.5,
-                "gamma1": 0.5
             },
             "Online Adaptive MPC-CBF MLP": {
                 "type": "mpc_cbf",
@@ -278,27 +200,12 @@ ALL_DEFAULTS = {
             [0.4, 2.7, 0.1],
             # [0.5, 3.0, 0.1],
             [0.5, 0.5, 0.2],
-            [1.7, 3.2, 0.4],
-            [2.0, 0.4, 0.3],
-            [3.1, 2.2, 0.4],
-            [3.5, 0.6, 0.4],
-            [4.6, 2.7, 0.4],
-            [4.7, 1.2, 0.4],
-            [6.8, 2.0, 0.4],
-            [6.2, 0.3, 0.25],
-            [7.6, 0.5, 0.25],
-            # [7.5, 2.5, 0.45],
-            [8.7, 0.8, 0.5],
-            # [0.1, 2.0, 0.1],
-            [0.4, 2.7, 0.1],
-            # [0.5, 3.0, 0.1],
-            [0.5, 0.5, 0.2],
             [1.7, 3.2, 0.5],
             [2.0, 0.4, 0.3],
             [3.1, 2.2, 0.5],
             [3.5, 0.6, 0.4],
-            [4.6, 2.7, 0.4],
-            [4.7, 1.2, 0.4],
+            [4.6, 2.7, 0.6],
+            [4.9, 0.9, 0.4],
             [6.8, 2.5, 1.0],
             [6.2, 0.3, 0.25],
             [7.6, 0.5, 0.25],
@@ -377,7 +284,7 @@ ADAPTIVE_MODELS = {
             "step_size":   0.05,
             "lower_bound": 0.5,
             "upper_bound": 3.0,
-            "epistemic_threshold": 0.1            
+            "raw_epistemic_threshold": 0.1            
         },
         "online_mpc_cbf_mlp": {
             "model_path":  "nn_model/checkpoint/DynamicUnicycle2D_0801_mlp_0230.pth",
@@ -387,7 +294,7 @@ ADAPTIVE_MODELS = {
             "step_size":   0.01,
             "lower_bound": 0.01,
             "upper_bound": 0.35,
-            "epistemic_threshold": 0.1            
+            "raw_epistemic_threshold": 0.1            
         },      
         "online_mpc_cbf_gat": {
             # "model_path":  "nn_model/checkpoint/DynamicUnicycle2D_0808_gat_1730.pth",
@@ -397,31 +304,8 @@ ADAPTIVE_MODELS = {
             "step_size":   0.01,
             "lower_bound": 0.01,
             "upper_bound": 0.35,
-            "epistemic_threshold": 0.1          
+            "raw_epistemic_threshold": 0.1          
         }      
-    },
-    "KinematicBicycle2D_C3BF": {
-        "online_cbf_qp": {
-            "model_path":  "nn_model/checkpoint/penn_model_qp.pth",
-            "scaler_path": "nn_model/checkpoint/scaler_qp.save",
-            "step_size":   0.01,
-            "lower_bound": 0.1,
-            "upper_bound": 0.2
-        },
-        "online_mpc_cbf_mlp": {
-            "model_path":  "nn_model/checkpoint/KinematicBicycle2D_C3BF_0621_mlp_2430.pth",
-            "scaler_path": "nn_model/checkpoint/KinematicBicycle2D_C3BF_0621_mlp_2430.save",
-            "step_size":   0.005,
-            "lower_bound": 0.01,
-            "upper_bound": 0.99
-        },
-        "online_mpc_cbf_gat": {
-            "model_path":  "nn_model/checkpoint/KinematicBicycle2D_0814_gat_0130.pth",
-            "scaler_path": "nn_model/checkpoint/KinematicBicycle2D_0813_gat_2130.save",
-            "step_size":   0.005,
-            "lower_bound": 0.01,
-            "upper_bound": 0.99
-        }  
     },
     "KinematicBicycle2D_DPCBF": {
         "online_cbf_qp": {
@@ -430,6 +314,21 @@ ADAPTIVE_MODELS = {
             "step_size":   0.01,
             "lower_bound": 0.1,
             "upper_bound": 0.2
+        },
+        "online_cbf_qp_mlp": {
+            "model_path":  "nn_model/checkpoint/penn_model_qp.pth",
+            "scaler_path": "nn_model/checkpoint/scaler_qp.save",
+            "step_size":   0.01,
+            "lower_bound": 0.1,
+            "upper_bound": 0.2
+        },
+        "online_cbf_qp_gat": {
+            "model_path":  "nn_model/checkpoint/KinematicBicycle2D_DPCBF_1101_gat_1730_epoch_200.pth",
+            "scaler_path": None,
+            "step_size":   0.05,
+            "lower_bound": 0.1,
+            "upper_bound": 15.0,
+            "raw_epistemic_threshold": 0.2930126190185547
         },
         "online_mpc_cbf_mlp": {
             "model_path":  "nn_model/checkpoint/KinematicBicycle2D_C3BF_0621_mlp_2430.pth",
@@ -463,7 +362,7 @@ ADAPTIVE_MODELS = {
             "step_size":   0.04,
             "lower_bound": 0.01,
             "upper_bound": 0.99,
-            "epistemic_threshold": 0.2            
+            "raw_epistemic_threshold": 0.2            
         },  
         "online_mpc_cbf_gat": {
             "model_path":  "nn_model/checkpoint/Quad2D_0804_gat_1930.pth",
@@ -473,7 +372,7 @@ ADAPTIVE_MODELS = {
             "step_size":   0.04,
             "lower_bound": 0.01,
             "upper_bound": 0.99,
-            "epistemic_threshold": 0.2            
+            "raw_epistemic_threshold": 0.2            
         },
     },
     "Quad3D": {
@@ -491,19 +390,22 @@ ADAPTIVE_MODELS = {
             # "scaler_path": "nn_model/checkpoint/Quad3D_0728_mlp_1230.save",
             # "model_path":  "nn_model/checkpoint/Quad3D_0708_mlp_1130.pth",
             # "scaler_path": "nn_model/checkpoint/Quad3D_0708_mlp_1130.save",
-            "step_size":   0.001,
+            "step_size":   0.003,
             "lower_bound": 0.01,
-            "upper_bound": 0.5,
-            "epistemic_threshold": 0.2            
+            "upper_bound": 0.99,
+            "raw_epistemic_threshold": 0.2            
         },  
         "online_mpc_cbf_gat": {
-            "model_path":  "nn_model/checkpoint/Quad3D_0807_gat_0230.pth",
+            # "model_path":  "nn_model/checkpoint/Quad3D_0807_gat_0230.pth",
+            # # "model_path":  "nn_model/checkpoint/best_gat_penn.pth",
+            # "scaler_path": "nn_model/checkpoint/Quad3D_0807_gat_0230.save",
+            "model_path":  "nn_model/checkpoint/Quad3D_1103_gat_0230_epoch_600.pth",
             # "model_path":  "nn_model/checkpoint/best_gat_penn.pth",
-            "scaler_path": "nn_model/checkpoint/Quad3D_0807_gat_0230.save",
-            "step_size":   0.001,
+            "scaler_path": "nn_model/checkpoint/Quad3D_1103_gat_0230_epoch_600.save",
+            "step_size":   0.003,
             "lower_bound": 0.01,
-            "upper_bound": 0.5,
-            "epistemic_threshold": 0.2
+            "upper_bound": 0.99,
+            "raw_epistemic_threshold": 0.6776006698608398
         },
     },
     
@@ -513,6 +415,6 @@ ADAPTIVE_MODELS = {
         "step_size":   0.01,
         "lower_bound": 0.05,
         "upper_bound": 0.35,
-        "epistemic_threshold": 0.05
+        "raw_epistemic_threshold": 0.05
     }
 }

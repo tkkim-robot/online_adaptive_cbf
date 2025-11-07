@@ -228,13 +228,10 @@ def single_agent_simulation_gat(
                 valid = False
                 break
         
-        # For dynamic environments, obstacles need velocity components [x, y, r, vx, vy, y_min, flag]
-        # Format: [x, y, r, vx, vy, y_min, flag] where flag=0 for circles, flag=1 for superellipsoids
-        # Set velocities to zero for static obstacles
-        if robot_model == "KinematicBicycle2D_DPCBF":
-            obstacles.append([ox, oy, radius, 0.0, 0.0, 0.0, 0])  # format: [x, y, r, vx, vy, y_min, flag]
-        else:
-            obstacles.append([ox, oy, radius])
+        # For tracking, obstacles should follow 7-field format:
+        # [x, y, r, vx, vy, y_min_or_theta, flag] where flag=0 for circles
+        # Use zeros for velocities and extra field for static circular obstacles
+        obstacles.append([ox, oy, radius, 0.0, 0.0, 0.0, 0])
         attempts += 1
 
     # print(obstacles)
@@ -538,8 +535,8 @@ if __name__ == "__main__":
         "Quad2D",
         "Quad3D"
         ]
-    controller_name = controller_list[0]
-    robot_model = robot_model_list[1]
+    controller_name = controller_list[1]
+    robot_model = robot_model_list[2]
     
     TESTMODE = False
     np.random.seed(42)
@@ -590,9 +587,9 @@ if __name__ == "__main__":
             robot_model=robot_model,
             controller_name=controller_name,
             num_samples=200000,       
-            num_processes=27,        # Change based on the number of cores available
+            num_processes=28,        # Change based on the number of cores available
             obstacles_range=(2, 10),
-            output_prefix="gat_datagen_1101" 
+            output_prefix="gat_datagen_1106" 
         ) 
         print("Data generation complete!")
         
