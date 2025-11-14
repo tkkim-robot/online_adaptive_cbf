@@ -1,16 +1,90 @@
 import json
 import os
+import pickle
 import numpy as np
 import torch
+from torch_geometric.data import Data
 
-from train_data import load_graph_dataset
+from train_data import load_graph_dataset as load_graph_dataset_train
 from penn.gat import GATModule
 from penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
 
 
+def load_traj_graph_dataset(pickle_file):
+    """
+    Load trajectory-level graph dataset for CCCP calibration.
+    
+    Each entry in the pickle file should contain:
+        - "graph_data": single graph for training (ignored here)
+        - "cccp_traj_graphs": list of per-time-step graph dicts for this trajectory
+    
+    Returns:
+        List of trajectories, where each trajectory is a list of PyG Data objects
+        representing states X_t at each time step t.
+    """
+    with open(pickle_file, 'rb') as f:
+        results = pickle.load(f)
+
+    traj_list = []
+    for entry in results:
+        if "cccp_traj_graphs" not in entry:
+            # Skip entries without CCCP trajectory data
+            continue
+            
+        traj_graphs = []
+        for graph_dict in entry["cccp_traj_graphs"]:
+            # Reconstruct PyG Data object from dict
+            graph_data = Data(
+                x=torch.tensor(graph_dict["x"], dtype=torch.float),
+                edge_index=torch.tensor(graph_dict["edge_index"], dtype=torch.long),
+                edge_attr=torch.tensor(graph_dict["edge_attr"], dtype=torch.float)
+            )
+            
+            if graph_dict.get("gamma") is not None:
+                gamma_array = graph_dict["gamma"]
+                # Ensure gamma is 2D: [1, gamma_dim] or [gamma_dim]
+                # Handle both numpy arrays and lists
+                if isinstance(gamma_array, np.ndarray):
+                    if gamma_array.ndim == 1:
+                        gamma_array = gamma_array.reshape(1, -1)
+                    elif gamma_array.ndim == 2 and gamma_array.shape[0] != 1:
+                        gamma_array = gamma_array.reshape(1, -1)
+                elif isinstance(gamma_array, (list, tuple)):
+                    gamma_array = np.array(gamma_array)
+                    if gamma_array.ndim == 1:
+                        gamma_array = gamma_array.reshape(1, -1)
+                graph_data.gamma = torch.tensor(gamma_array, dtype=torch.float)
+            
+            # Include y if present (though CCCP will ignore it)
+            if graph_dict.get("y") is not None:
+                graph_data.y = torch.tensor(graph_dict["y"], dtype=torch.float)
+            
+            traj_graphs.append(graph_data)
+        
+        if len(traj_graphs) > 0:
+            traj_list.append(traj_graphs)
+    
+    return traj_list
+
+
 class ClassConditionedConformalPrediction:
     """
-    Compute a CCCP threshold for in‑distribution recall.
+    Compute a CCCP threshold for in-distribution recall.
+    
+    Two modes available:
+    1. Trajectory-level (use_trajectory_level=True, default):
+       Implements the Class-Conditioned Conformal Prediction (CCCP) method as specified:
+       - Per-time-step nonconformity: D(X_t) (JRD from the ensemble)
+       - Trajectory-level nonconformity: Q_i = max_t D(X_t)  [Equation (51)]
+       - Threshold: D_thr = Quantile({Q_i}; alpha_cal)  [Equation (52)]
+       - Coverage guarantee: P(Q_test <= D_thr | tau_test in D) >= alpha_cal
+       where alpha_cal = 1 - delta_cal is the coverage probability.
+    
+    2. Graph-level (use_trajectory_level=False):
+       Implementation that processes individual graphs:
+       - Computes D(X) (JRD) for each graph independently
+       - Threshold: D_thr = Quantile({D(X)}; alpha_cal)
+       - No trajectory aggregation
     """
 
     def __init__(
@@ -18,8 +92,8 @@ class ClassConditionedConformalPrediction:
         pickle_path: str,
         model_path: str,
         gamma_dim: int,
-        alpha_cal: float = 0.05,
-        normalized_thresholds: list = [0.05, 0.1, 0.15, 0.2],  # Multiple thresholds to calculate
+        alpha_cal: float = 0.95,
+        use_trajectory_level: bool = True,
         device: str = "cpu",
         n_output: int = 2,
         n_hidden: int = 40,
@@ -27,13 +101,22 @@ class ClassConditionedConformalPrediction:
     ):
         self.pickle_path = pickle_path
         self.model_path = model_path
-        self.alpha_cal = alpha_cal
-        self.normalized_thresholds = normalized_thresholds
+        self.alpha_cal = alpha_cal  # Coverage probability = 1 - delta_cal
+        self.use_trajectory_level = use_trajectory_level
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        # Load dataset
-        self.data_list = load_graph_dataset(self.pickle_path)
-        print(f"[INFO] Loaded {len(self.data_list):,} graphs from {self.pickle_path}")
+        # Load dataset based on mode
+        if self.use_trajectory_level:
+            # Load trajectory dataset (each trajectory is a list of graphs)
+            self.traj_list = load_traj_graph_dataset(self.pickle_path)
+            print(f"[INFO] Loaded {len(self.traj_list):,} trajectories from {self.pickle_path}")
+            self.data_list = None  # Not used in trajectory mode
+        else:
+            # Load individual graphs
+            # Use load_graph_dataset from train_data which handles the standard pickle format
+            self.data_list = load_graph_dataset_train(self.pickle_path)
+            print(f"[INFO] Loaded {len(self.data_list):,} graphs from {self.pickle_path}")
+            self.traj_list = None  # Not used in graph mode
 
         # Build model
         gat_mod = GATModule(device=self.device).to(self.device)
@@ -49,82 +132,177 @@ class ClassConditionedConformalPrediction:
         self.predictor.load_model(self.model_path)
         print(f"[INFO] Loaded weights from {self.model_path}")
 
-        # Storage
-        self.jrd_vals = None
+        # Storage for scores (trajectory-level or graph-level depending on mode)
+        if self.use_trajectory_level:
+            # Q_vals corresponds to {Q_i}_{i=1}^{N_traj} from equation (51)
+            self.Q_vals = None
+        else:
+            # jrd_vals stores individual JRD values for graph-level calibration
+            self.jrd_vals = None
+        # threshold corresponds to D_thr from equation (52) or graph-level quantile
         self.threshold = None
-        self.raw_thresholds_for_normalized = {}
 
     def _collect_divergences(self):
-        """Run the model across the calibration dataset and store JRD values."""
-        jrd_list = []
-        total_samples = len(self.data_list)
-        print(f"[INFO] Starting divergence collection for {total_samples:,} samples...")
+        """
+        Run the model across the calibration dataset and compute scores.
         
-        for i, data in enumerate(self.data_list):
-            # predictor.predict expects a *list* of Data objects
-            _, _, divs = self.predictor.predict([data])
-            jrd_list.extend(divs)
+        Mode 1 (use_trajectory_level=True):
+        For each trajectory tau_i = {X_t}_{t=1}^{T_i}:
+        - Computes D(X_t) (JRD) for each state X_t
+        - Computes Q_i = max_t D(X_t) (trajectory-level nonconformity score)
+        Stores Q_i values in self.Q_vals, which corresponds to {Q_i}_{i=1}^{N_traj}
+        from equation (51) in the LaTeX spec.
+        
+        Mode 2 (use_trajectory_level=False):
+        For each graph:
+        - Computes D(X) (JRD) for each individual graph
+        Stores JRD values in self.jrd_vals
+        """
+        if self.use_trajectory_level:
+            # Trajectory-level processing
+            Q_list = []
+            total_trajectories = len(self.traj_list)
+            print(f"[INFO] Starting trajectory-level divergence collection for {total_trajectories:,} trajectories...")
             
-            # Show progress every 1000 samples or at the end
-            if (i + 1) % 10000 == 0 or (i + 1) == total_samples:
-                progress = (i + 1) / total_samples * 100
-                print(f"[PROGRESS] Processed {i + 1:,}/{total_samples:,} samples ({progress:.1f}%)")
+            for i, traj_graphs in enumerate(self.traj_list):
+                # Predict on all graphs in this trajectory
+                # predictor.predict expects a list of Data objects
+                _, _, divs = self.predictor.predict(traj_graphs)
+                divs = np.asarray(divs, dtype=np.float64)
+                
+                # Compute trajectory-level nonconformity: Q_i = max_t D(X_t)
+                # This implements equation (51): Q_i := max_t D(X_t)
+                Q_i = float(divs.max())
+                Q_list.append(Q_i)
+                
+                # Show progress every 1000 trajectories or at the end
+                if (i + 1) % 1000 == 0 or (i + 1) == total_trajectories:
+                    progress = (i + 1) / total_trajectories * 100
+                    print(f"[PROGRESS] Processed {i + 1:,}/{total_trajectories:,} trajectories ({progress:.1f}%)")
 
-        self.jrd_vals = np.asarray(jrd_list, dtype=np.float64)
-        print(f"[INFO] Collected {self.jrd_vals.size:,} JRD values.")
+            self.Q_vals = np.asarray(Q_list, dtype=np.float64)
+            print(f"[INFO] Collected {self.Q_vals.size:,} trajectory-level scores (Q_i values).")
+        else:
+            # Graph-level processing
+            jrd_list = []
+            total_samples = len(self.data_list)
+            print(f"[INFO] Starting graph-level divergence collection for {total_samples:,} graphs...")
+            
+            for i, data in enumerate(self.data_list):
+                # predictor.predict expects a *list* of Data objects
+                _, _, divs = self.predictor.predict([data])
+                jrd_list.extend(divs)
+                
+                # Show progress every 50,000 samples or at the end
+                if (i + 1) % 50000 == 0 or (i + 1) == total_samples:
+                    progress = (i + 1) / total_samples * 100
+                    print(f"[PROGRESS] Processed {i + 1:,}/{total_samples:,} graphs ({progress:.1f}%)")
+
+            self.jrd_vals = np.asarray(jrd_list, dtype=np.float64)
+            print(f"[INFO] Collected {self.jrd_vals.size:,} JRD values.")
 
     def calibrate(self):
-        """Compute ε̂ such that P(ID ≤ ε̂) ≥ 1 − α_cal."""
-        if self.jrd_vals is None:
-            self._collect_divergences()
+        """
+        Compute threshold based on selected mode.
+        
+        Mode 1 (use_trajectory_level=True):
+        D_thr = Quantile({Q_i}; alpha_cal) as per equation (52).
+        - alpha_cal = 1 - delta_cal is the coverage probability
+        - D_thr is the (alpha_cal)-quantile of trajectory-level scores {Q_i}
+        - Coverage guarantee: P(Q_test <= D_thr | tau_test in D) >= alpha_cal
+        
+        Mode 2 (use_trajectory_level=False):
+        D_thr = Quantile({D(X)}; alpha_cal)
+        - Computes threshold on individual graph JRD values
+        """
+        if self.use_trajectory_level:
+            if self.Q_vals is None:
+                self._collect_divergences()
 
-        # Calculate the normalized threshold (equivalent to epistemic_threshold=0.2 in OnlineCBFAdapter)
-        jrd_normalized = (self.jrd_vals - self.jrd_vals.min()) / (self.jrd_vals.max() - self.jrd_vals.min() + 1e-8)
-        
-        # Calculate raw JRD values for multiple normalized thresholds
-        print(f"[INFO] Calculating raw JRD thresholds for normalized thresholds: {self.normalized_thresholds}")
-        for norm_thresh in self.normalized_thresholds:
-            # Find the raw JRD value that corresponds to the normalized threshold
-            # We want to find the value where normalized JRD <= norm_thresh
-            # This means we keep the bottom norm_thresh% of samples (lowest JRD values)
-            raw_thresh = float(np.quantile(self.jrd_vals, norm_thresh, interpolation="higher"))
-            self.raw_thresholds_for_normalized[norm_thresh] = raw_thresh
-            print(f"[RESULT] Raw JRD threshold for normalized threshold {norm_thresh} = {raw_thresh:.6f}")
-        
-        # Also calculate the original CCCP threshold
-        q = 1.0 - self.alpha_cal  # e.g. 0.05 for α=0.95
-        self.threshold = float(np.quantile(self.jrd_vals, q, interpolation="higher"))
-        
-        print(f"[RESULT] CCCP threshold ε̂ (quantile {q:.3f}) = {self.threshold:.6f}")
-        print(f"[INFO] JRD statistics - Min: {self.jrd_vals.min():.6f}, Max: {self.jrd_vals.max():.6f}, Mean: {self.jrd_vals.mean():.6f}")
+            # alpha_cal = 1 - delta_cal (coverage probability)
+            # D_thr = Quantile({Q_i}; alpha_cal) as per equation (52)
+            coverage = self.alpha_cal  # e.g., 0.95 means 95% coverage
+            self.threshold = float(
+                np.quantile(self.Q_vals, coverage, interpolation="higher")
+            )
+            
+            print(f"[RESULT] CCCP threshold D_thr (coverage={coverage:.3f}) = {self.threshold:.6f}")
+            print(f"[INFO] Trajectory-level score (Q_i) statistics:")
+            print(f"  Min: {self.Q_vals.min():.6f}, Max: {self.Q_vals.max():.6f}")
+            print(f"  Mean: {self.Q_vals.mean():.6f}, Std: {self.Q_vals.std():.6f}")
+        else:
+            if self.jrd_vals is None:
+                self._collect_divergences()
+
+            # Graph-level threshold computation
+            coverage = self.alpha_cal
+            self.threshold = float(
+                np.quantile(self.jrd_vals, coverage, interpolation="higher")
+            )
+            
+            print(f"[RESULT] CCCP threshold D_thr (coverage={coverage:.3f}) = {self.threshold:.6f}")
+            print(f"[INFO] JRD statistics:")
+            print(f"  Min: {self.jrd_vals.min():.6f}, Max: {self.jrd_vals.max():.6f}")
+            print(f"  Mean: {self.jrd_vals.mean():.6f}, Std: {self.jrd_vals.std():.6f}")
         
         return self.threshold
 
     def save_threshold(self, out_json: str):
+        """
+        Save the computed CCCP threshold to JSON.
+        
+        The threshold format depends on the mode:
+        - Trajectory-level: D_thr = Quantile({Q_i}; alpha_cal) per equation (52)
+        - Graph-level: D_thr = Quantile({D(X)}; alpha_cal)
+        """
         if self.threshold is None:
             raise RuntimeError("Call calibrate() before saving.")
 
         os.makedirs(os.path.dirname(out_json), exist_ok=True)
+        
+        if self.use_trajectory_level:
+            stats = {
+                "min": float(self.Q_vals.min()),
+                "max": float(self.Q_vals.max()),
+                "mean": float(self.Q_vals.mean()),
+                "std": float(self.Q_vals.std()),
+                "num_trajectories": int(self.Q_vals.size)
+            }
+            description = {
+                "alpha_cal": "Coverage probability = 1 - delta_cal",
+                "cccp_threshold": "D_thr = Quantile({Q_i}; alpha_cal) per equation (52)",
+                "Q_i": "Trajectory-level nonconformity score = max_t D(X_t) per equation (51)",
+                "mode": "trajectory-level"
+            }
+        else:
+            stats = {
+                "min": float(self.jrd_vals.min()),
+                "max": float(self.jrd_vals.max()),
+                "mean": float(self.jrd_vals.mean()),
+                "std": float(self.jrd_vals.std()),
+                "num_graphs": int(self.jrd_vals.size)
+            }
+            description = {
+                "alpha_cal": "Coverage probability = 1 - delta_cal",
+                "cccp_threshold": "D_thr = Quantile({D(X)}; alpha_cal)",
+                "mode": "graph-level"
+            }
+        
         with open(out_json, "w") as f:
             json.dump(
                 {
                     "pickle_path": self.pickle_path,
                     "model_path": self.model_path,
                     "alpha_cal": self.alpha_cal,
-                    "normalized_thresholds": self.normalized_thresholds,
+                    "use_trajectory_level": self.use_trajectory_level,
                     "cccp_threshold": self.threshold,
-                    "raw_thresholds_for_normalized": self.raw_thresholds_for_normalized,
-                    "jrd_statistics": {
-                        "min": float(self.jrd_vals.min()),
-                        "max": float(self.jrd_vals.max()),
-                        "mean": float(self.jrd_vals.mean()),
-                        "std": float(self.jrd_vals.std())
-                    }
+                    "score_statistics": stats,
+                    "description": description
                 },
                 f,
                 indent=2,
             )
-        print(f"[INFO] Thresholds saved to {out_json}")
+        print(f"[INFO] Threshold saved to {out_json}")
 
 
 if __name__ == "__main__":
@@ -134,8 +312,8 @@ if __name__ == "__main__":
         "pickle_path": "data/gat_datagen_300000_DynamicUnicycle2D_mpc_cbf.pkl",
         "model_path": "checkpoint/DynamicUnicycle2D_0731_gat_2130.pth",
         "gamma_dim": 2,  # 1 for KinematicBicycle2D/Quad3D, 2 for DynamicUnicycle2D/Quad2D, etc.
-        "alpha_cal": 0.95,
-        "normalized_thresholds": [0.05, 0.1, 0.15, 0.2],  # Multiple thresholds to calculate
+        "alpha_cal": 0.95,  # Coverage probability = 1 - delta_cal
+        "use_trajectory_level": True,  # Set to False for graph-level calibration
         "device": "cuda",  
         "out_json": "checkpoint/jrd_cccp_threshold.json",
     }
@@ -145,7 +323,7 @@ if __name__ == "__main__":
         model_path=CONFIG["model_path"],
         gamma_dim=CONFIG["gamma_dim"],
         alpha_cal=CONFIG["alpha_cal"],
-        normalized_thresholds=CONFIG["normalized_thresholds"],
+        use_trajectory_level=CONFIG["use_trajectory_level"],
         device=CONFIG["device"],
     )
     cccp.calibrate()

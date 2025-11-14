@@ -152,10 +152,14 @@ def single_agent_simulation_gat(
         show_animation=False,
         retry_limit=10,
         _attempt=0,
+        save_cccp_traj=False,
     ):
     """
     Run a single agent simulation with multiple random obstacles to evaluate
     maximum safety loss and deadlock time, returning the constructed graph (PyG graph).
+    
+    Args:
+        save_cccp_traj: If True, also stores per-time-step graphs for CCCP calibration.
     """
     if robot_model not in ["KinematicBicycle2D_DPCBF", "Quad3D"] and gamma1 is None:
         raise ValueError("Selected model needs gamma1.")
@@ -304,7 +308,13 @@ def single_agent_simulation_gat(
     max_safety_loss = 0.0
     success = True
 
+    # Initialize CCCP trajectory graph collection
+    cccp_traj_graphs = [] if save_cccp_traj else None
+    goal_state = [9.5, 2.0]  # Goal state for graph creation
+    module = GATModule() if save_cccp_traj else None
+
     init_xy = None
+    ret = None  # Initialize ret before loop
     for step_idx in range(int(max_sim_time / dt)):
         if init_xy is None:
             init_xy = tracking_controller.robot.X[:2].copy()
@@ -349,6 +359,40 @@ def single_agent_simulation_gat(
                 max_safety_loss = new_safety_loss[0]
             # print(new_safety_loss, max_safety_loss, deadlock_time)
             
+            # CCCP: Create per-time-step graph for calibration 
+            # This implements the trajectory-level nonconformity score collection
+            # Each graph represents state X_t at time step t
+            if save_cccp_traj:
+                # Extract current robot state and convert to [x, y, vx, vy] format
+                current_state = np.asarray(tracking_controller.robot.X).flatten()
+                if robot_model == "Quad2D":
+                    rx, ry = current_state[0], current_state[1]
+                    vx, vz = current_state[3], current_state[4]
+                    robot_state = [rx, ry, vx, vz]
+                elif robot_model == "Quad3D":
+                    rx, ry = current_state[0], current_state[1]
+                    vx, vz = current_state[6], current_state[8]
+                    robot_state = [rx, ry, vx, vz]
+                else:
+                    # Ground robots: [x, y, theta, v]
+                    rx, ry, rtheta = current_state[0], current_state[1], current_state[2]
+                    velocity = current_state[3]
+                    vx = velocity * np.cos(rtheta)
+                    vy = velocity * np.sin(rtheta)
+                    robot_state = [rx, ry, vx, vy]
+                
+                # Create per-step graph with dummy labels (CCCP only needs inputs for JRD)
+                step_graph = module.create_graph(
+                    robot=robot_state,
+                    obstacles=obstacles,
+                    goal=goal_state,
+                    deadlock=0.0,  # Dummy value, CCCP ignores labels
+                    risk=0.0       # Dummy value, CCCP ignores labels
+                )
+                # Attach gamma parameters (same as final graph)
+                step_graph.gamma = [[gamma0]] if gamma1 is None else [[gamma0, gamma1]]
+                cccp_traj_graphs.append(step_graph)
+            
             if step_idx == stuck_steps:
                 moved = np.linalg.norm(tracking_controller.robot.X[:2] - init_xy)
                 if moved < move_tol:
@@ -364,7 +408,8 @@ def single_agent_simulation_gat(
                     gamma0, gamma1, theta,
                     num_obstacles, max_sim_time,
                     deadlock_threshold, show_animation,
-                    retry_limit, _attempt + 1
+                    retry_limit, _attempt + 1,
+                    save_cccp_traj
                 )
             success = False
             max_safety_loss = safety_loss_upper_bound
@@ -378,7 +423,8 @@ def single_agent_simulation_gat(
                     gamma0, gamma1, theta,
                     num_obstacles, max_sim_time,
                     deadlock_threshold, show_animation,
-                    retry_limit, _attempt + 1
+                    retry_limit, _attempt + 1,
+                    save_cccp_traj
                 )
             success = False
             max_safety_loss = safety_loss_upper_bound
@@ -395,7 +441,8 @@ def single_agent_simulation_gat(
             gamma0, gamma1, theta,
             num_obstacles, max_sim_time,
             deadlock_threshold, show_animation,
-            retry_limit, _attempt + 1
+            retry_limit, _attempt + 1,
+            save_cccp_traj
         )
         
     # tracking_controller.export_video()  # Disabled for memory efficiency
@@ -407,7 +454,10 @@ def single_agent_simulation_gat(
     
     # 6) Construct a graph for the final scenario using GATModule
     # The "robot" should be the initial state and the "goal" should be the second waypoint.
-    module = GATModule() 
+    # Note: This graph is used for training (deadlock/risk prediction), not for CCCP
+    if not save_cccp_traj:
+        module = GATModule()
+    
     if robot_model == "Quad2D":
         # [rx, ry, rtheta, vx, vz]
         rx, ry, rtheta, vx_init, vz_init, _ = x_init
@@ -424,13 +474,17 @@ def single_agent_simulation_gat(
         vy_init = velocity_init * np.sin(rtheta)
         robot_state = [rx, ry, vx_init, vy_init]
 
-    goal_state = [9.5, 2.0]
     graph_data = module.create_graph(robot=robot_state, obstacles=obstacles, goal=goal_state, deadlock=deadlock_time, risk=max_safety_loss)
     graph_data.gamma = [[gamma0]] if gamma1 is None else [[gamma0, gamma1]]
-        
-    return {
+    
+    # Construct result: always include graph_data, optionally include cccp_traj_graphs
+    result = {
         "graph_data": graph_data,
     }
+    if save_cccp_traj:
+        result["cccp_traj_graphs"] = cccp_traj_graphs
+        
+    return result
 
 def worker(params):
     with SuppressPrints():  
@@ -443,7 +497,7 @@ def worker(params):
     if isinstance(graph_data.gamma, list) or isinstance(graph_data.gamma, np.ndarray):
         graph_data.gamma = torch.tensor(graph_data.gamma, dtype=torch.float)
 
-    # Convert tensors to numpy before returning
+    # Convert tensors to numpy before returning (for training graph)
     result["graph_data"] = {
         "x": graph_data.x.cpu().numpy(),  
         "edge_index": graph_data.edge_index.cpu().numpy(),
@@ -451,6 +505,23 @@ def worker(params):
         "y": graph_data.y.cpu().numpy() if hasattr(graph_data, 'y') else None, 
         "gamma": graph_data.gamma.cpu().numpy() if hasattr(graph_data, 'gamma') else None
     }
+    
+    # Convert CCCP trajectory graphs to serializable format
+    if "cccp_traj_graphs" in result:
+        cccp_traj_dicts = []
+        for step_graph in result["cccp_traj_graphs"]:
+            # Convert each per-step graph to dict with NumPy arrays
+            step_dict = {
+                "x": step_graph.x.cpu().numpy(),
+                "edge_index": step_graph.edge_index.cpu().numpy(),
+                "edge_attr": step_graph.edge_attr.cpu().numpy(),
+                "gamma": step_graph.gamma.cpu().numpy() if hasattr(step_graph, 'gamma') else None,
+            }
+            # Include y if present (though CCCP will ignore it)
+            if hasattr(step_graph, 'y') and step_graph.y is not None:
+                step_dict["y"] = step_graph.y.cpu().numpy()
+            cccp_traj_dicts.append(step_dict)
+        result["cccp_traj_graphs"] = cccp_traj_dicts
     
     return result
 
@@ -460,11 +531,15 @@ def generate_data_for_model_gat(
     num_samples=10,
     num_processes=1,
     obstacles_range=(2, 10),
-    output_prefix="gat_datagen"
+    output_prefix="gat_datagen",
+    save_cccp_traj=False
     ):
     """
     Randomly samples multiple obstacles (2~10), random robot initial states,
     random gamma0, gamma1, runs single_agent_simulation_gat, and saves data in .pkl.
+    
+    Args:
+        save_cccp_traj: If True, also saves per-time-step graphs for CCCP calibration.
     """
     param_ranges = ROBOT_SPECS[robot_model]["param_ranges"]
     th_min, th_max = param_ranges["theta_range"]
@@ -480,7 +555,7 @@ def generate_data_for_model_gat(
             gamma1 = np.random.uniform(g1_min, g1_max)        
         theta = np.random.uniform(th_min, th_max)
         n_obs  = np.random.randint(obstacles_range[0], obstacles_range[1] + 1)
-        parameter_space.append((robot_model, controller_name, gamma0, gamma1, theta, n_obs))
+        parameter_space.append((robot_model, controller_name, gamma0, gamma1, theta, n_obs, save_cccp_traj))
 
     # Use a multiprocessing pool
     pool = Pool(processes=num_processes)
@@ -536,8 +611,10 @@ if __name__ == "__main__":
         "Quad3D"
         ]
     controller_name = controller_list[1]
-    robot_model = robot_model_list[2]
+    robot_model = robot_model_list[0]
     
+    # CCCP trajectory collection flag (set to True to enable CCCP calibration data)
+    save_cccp_traj = False    
     TESTMODE = False
     np.random.seed(42)
     
@@ -589,7 +666,8 @@ if __name__ == "__main__":
             num_samples=200000,       
             num_processes=28,        # Change based on the number of cores available
             obstacles_range=(2, 10),
-            output_prefix="gat_datagen_1106" 
+            output_prefix="gat_datagen_1112",
+            save_cccp_traj=save_cccp_traj
         ) 
         print("Data generation complete!")
         
