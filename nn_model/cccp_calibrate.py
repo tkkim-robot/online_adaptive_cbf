@@ -2,12 +2,15 @@ import json
 import os
 import pickle
 import numpy as np
+import pandas as pd
 import torch
 from torch_geometric.data import Data
+import joblib
 
 from train_data import load_graph_dataset as load_graph_dataset_train
 from penn.gat import GATModule
 from penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
+from penn.nn_iccbf_predict import ProbabilisticEnsembleNN
 
 
 def load_traj_graph_dataset(pickle_file):
@@ -89,48 +92,132 @@ class ClassConditionedConformalPrediction:
 
     def __init__(
         self,
-        pickle_path: str,
-        model_path: str,
-        gamma_dim: int,
+        pickle_path: str = None,
+        csv_path: str = None,
+        model_path: str = None,
+        scaler_path: str = None,
+        robot_model: str = None,
+        gamma_dim: int = None,
         alpha_cal: float = 0.95,
         use_trajectory_level: bool = True,
+        use_mlp: bool = False,
         device: str = "cpu",
         n_output: int = 2,
         n_hidden: int = 40,
         n_ensemble: int = 3,
     ):
+        """
+        Initialize CCCP calibration.
+        
+        Args:
+            pickle_path: Path to pickle file (for GAT mode)
+            csv_path: Path to CSV file (for MLP mode)
+            model_path: Path to model checkpoint
+            scaler_path: Path to scaler file (required for MLP mode)
+            robot_model: Robot model name (required for MLP mode)
+            gamma_dim: Gamma dimension (required for GAT mode, inferred for MLP)
+            alpha_cal: Coverage probability = 1 - delta_cal
+            use_trajectory_level: Whether to use trajectory-level calibration (GAT only)
+            use_mlp: Whether to use MLP mode (True) or GAT mode (False)
+            device: Device to use
+            n_output: Number of outputs
+            n_hidden: Hidden layer size
+            n_ensemble: Number of ensemble members
+        """
+        self.use_mlp = use_mlp
         self.pickle_path = pickle_path
+        self.csv_path = csv_path
         self.model_path = model_path
+        self.scaler_path = scaler_path
+        self.robot_model = robot_model
         self.alpha_cal = alpha_cal  # Coverage probability = 1 - delta_cal
         self.use_trajectory_level = use_trajectory_level
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
-        # Load dataset based on mode
-        if self.use_trajectory_level:
-            # Load trajectory dataset (each trajectory is a list of graphs)
-            self.traj_list = load_traj_graph_dataset(self.pickle_path)
-            print(f"[INFO] Loaded {len(self.traj_list):,} trajectories from {self.pickle_path}")
-            self.data_list = None  # Not used in trajectory mode
+        if self.use_mlp:
+            # MLP mode: Load CSV data
+            if csv_path is None:
+                raise ValueError("csv_path is required for MLP mode")
+            if scaler_path is None:
+                raise ValueError("scaler_path is required for MLP mode")
+            if robot_model is None:
+                raise ValueError("robot_model is required for MLP mode")
+            
+            # Load CSV dataset (we need raw data for MLP predictor, which handles transformation internally)
+            # But we still need to extract the raw features for batch processing
+            dataset = pd.read_csv(csv_path)
+            
+            # Prepare X depending on robot model (raw features before transformation)
+            if robot_model == 'Quad2D':
+                X = dataset[['Distance', 'VelocityX', 'VelocityZ', 'Theta', 'gamma0', 'gamma1']].values
+            elif robot_model == 'Quad3D':
+                X = dataset[['Distance', 'VelocityX', 'VelocityZ', 'Theta', 'gamma0']].values
+            elif robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:
+                X = dataset[['Distance', 'Velocity', 'Theta', 'gamma0']].values
+            else:  # DynamicUnicycle2D, etc.
+                X = dataset[['Distance', 'Velocity', 'Theta', 'gamma0', 'gamma1']].values
+            
+            self.csv_data = X  # Store raw data (predictor will handle transformation)
+            print(f"[INFO] Loaded {len(self.csv_data):,} samples from {csv_path}")
+            
+            # Determine n_states based on robot model
+            if robot_model == 'Quad2D':
+                n_states = 7  # Distance, VelocityX, VelocityZ, sin(Theta), cos(Theta), gamma0, gamma1
+            elif robot_model == 'Quad3D':
+                n_states = 6  # Distance, VelocityX, VelocityZ, sin(Theta), cos(Theta), gamma0
+            elif robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:
+                n_states = 5  # Distance, Velocity, sin(Theta), cos(Theta), gamma0
+            else:  # DynamicUnicycle2D, etc.
+                n_states = 6  # Distance, Velocity, sin(Theta), cos(Theta), gamma0, gamma1
+            
+            # Build MLP model
+            self.predictor = ProbabilisticEnsembleNN(
+                n_states=n_states,
+                n_output=n_output,
+                n_hidden=n_hidden,
+                n_ensemble=n_ensemble,
+                device=str(self.device),
+            )
+            self.predictor.load_scaler(scaler_path)
+            self.predictor.load_model(model_path)
+            print(f"[INFO] Loaded MLP weights from {model_path}")
+            
+            # MLP mode only supports graph-level (non-trajectory) calibration
+            self.use_trajectory_level = False
+            self.traj_list = None
+            self.data_list = None
+            
         else:
-            # Load individual graphs
-            # Use load_graph_dataset from train_data which handles the standard pickle format
-            self.data_list = load_graph_dataset_train(self.pickle_path)
-            print(f"[INFO] Loaded {len(self.data_list):,} graphs from {self.pickle_path}")
-            self.traj_list = None  # Not used in graph mode
+            # GAT mode: Load pickle data
+            if pickle_path is None:
+                raise ValueError("pickle_path is required for GAT mode")
+            
+            # Load dataset based on mode
+            if self.use_trajectory_level:
+                # Load trajectory dataset (each trajectory is a list of graphs)
+                self.traj_list = load_traj_graph_dataset(self.pickle_path)
+                print(f"[INFO] Loaded {len(self.traj_list):,} trajectories from {self.pickle_path}")
+                self.data_list = None  # Not used in trajectory mode
+            else:
+                # Load individual graphs
+                # Use load_graph_dataset from train_data which handles the standard pickle format
+                self.data_list = load_graph_dataset_train(self.pickle_path)
+                print(f"[INFO] Loaded {len(self.data_list):,} graphs from {self.pickle_path}")
+                self.traj_list = None  # Not used in graph mode
 
-        # Build model
-        gat_mod = GATModule(device=self.device).to(self.device)
-        gat_net = gat_mod.gat
-        self.predictor = ProbabilisticEnsembleGAT(
-            gat_net,
-            n_output=n_output,
-            n_hidden=n_hidden,
-            n_ensemble=n_ensemble,
-            gamma_dim=gamma_dim,
-            device=self.device,
-        ).to(self.device)
-        self.predictor.load_model(self.model_path)
-        print(f"[INFO] Loaded weights from {self.model_path}")
+            # Build GAT model
+            gat_mod = GATModule(device=self.device).to(self.device)
+            gat_net = gat_mod.gat
+            self.predictor = ProbabilisticEnsembleGAT(
+                gat_net,
+                n_output=n_output,
+                n_hidden=n_hidden,
+                n_ensemble=n_ensemble,
+                gamma_dim=gamma_dim,
+                device=self.device,
+            ).to(self.device)
+            self.predictor.load_model(self.model_path)
+            print(f"[INFO] Loaded GAT weights from {self.model_path}")
 
         # Storage for scores (trajectory-level or graph-level depending on mode)
         if self.use_trajectory_level:
@@ -185,18 +272,40 @@ class ClassConditionedConformalPrediction:
         else:
             # Graph-level processing
             jrd_list = []
-            total_samples = len(self.data_list)
-            print(f"[INFO] Starting graph-level divergence collection for {total_samples:,} graphs...")
             
-            for i, data in enumerate(self.data_list):
-                # predictor.predict expects a *list* of Data objects
-                _, _, divs = self.predictor.predict([data])
-                jrd_list.extend(divs)
+            if self.use_mlp:
+                # MLP mode: Process CSV data
+                total_samples = len(self.csv_data)
+                print(f"[INFO] Starting graph-level divergence collection for {total_samples:,} samples (MLP mode)...")
                 
-                # Show progress every 50,000 samples or at the end
-                if (i + 1) % 50000 == 0 or (i + 1) == total_samples:
-                    progress = (i + 1) / total_samples * 100
-                    print(f"[PROGRESS] Processed {i + 1:,}/{total_samples:,} graphs ({progress:.1f}%)")
+                # Process in batches for efficiency
+                batch_size = 10000
+                for batch_start in range(0, total_samples, batch_size):
+                    batch_end = min(batch_start + batch_size, total_samples)
+                    batch_data = self.csv_data[batch_start:batch_end]
+                    
+                    # Predict on batch (predictor handles transformation and scaling internally)
+                    _, _, divs = self.predictor.predict(batch_data)
+                    jrd_list.extend(divs)
+                    
+                    # Show progress
+                    if batch_end % 50000 == 0 or batch_end == total_samples:
+                        progress = batch_end / total_samples * 100
+                        print(f"[PROGRESS] Processed {batch_end:,}/{total_samples:,} samples ({progress:.1f}%)")
+            else:
+                # GAT mode: Process graph data
+                total_samples = len(self.data_list)
+                print(f"[INFO] Starting graph-level divergence collection for {total_samples:,} graphs...")
+                
+                for i, data in enumerate(self.data_list):
+                    # predictor.predict expects a *list* of Data objects
+                    _, _, divs = self.predictor.predict([data])
+                    jrd_list.extend(divs)
+                    
+                    # Show progress every 50,000 samples or at the end
+                    if (i + 1) % 50000 == 0 or (i + 1) == total_samples:
+                        progress = (i + 1) / total_samples * 100
+                        print(f"[PROGRESS] Processed {i + 1:,}/{total_samples:,} graphs ({progress:.1f}%)")
 
             self.jrd_vals = np.asarray(jrd_list, dtype=np.float64)
             print(f"[INFO] Collected {self.jrd_vals.size:,} JRD values.")
@@ -288,20 +397,34 @@ class ClassConditionedConformalPrediction:
                 "mode": "graph-level"
             }
         
+        # Prepare metadata based on mode
+        if self.use_mlp:
+            metadata = {
+                "csv_path": self.csv_path,
+                "model_path": self.model_path,
+                "scaler_path": self.scaler_path,
+                "robot_model": self.robot_model,
+                "alpha_cal": self.alpha_cal,
+                "use_trajectory_level": False,  # MLP always uses graph-level
+                "use_mlp": True,
+                "cccp_threshold": self.threshold,
+                "score_statistics": stats,
+                "description": description
+            }
+        else:
+            metadata = {
+                "pickle_path": self.pickle_path,
+                "model_path": self.model_path,
+                "alpha_cal": self.alpha_cal,
+                "use_trajectory_level": self.use_trajectory_level,
+                "use_mlp": False,
+                "cccp_threshold": self.threshold,
+                "score_statistics": stats,
+                "description": description
+            }
+        
         with open(out_json, "w") as f:
-            json.dump(
-                {
-                    "pickle_path": self.pickle_path,
-                    "model_path": self.model_path,
-                    "alpha_cal": self.alpha_cal,
-                    "use_trajectory_level": self.use_trajectory_level,
-                    "cccp_threshold": self.threshold,
-                    "score_statistics": stats,
-                    "description": description
-                },
-                f,
-                indent=2,
-            )
+            json.dump(metadata, f, indent=2)
         print(f"[INFO] Threshold saved to {out_json}")
 
 
