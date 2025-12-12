@@ -37,15 +37,27 @@ class OnlineCBFAdapter:
         if self.robot_model == 'Quad2D': #TODO: make state dic
             self.extra_state = 1
             self.gamma_dim = 2
+            self.theta_index = 3  # [distance, velocity_x, velocity_z, delta_theta, gamma0, gamma1]
+            self.gamma0_index = 4
+            self.gamma1_index = 5
         elif self.robot_model == 'Quad3D':
             self.extra_state = 0
             self.gamma_dim = 1
+            self.theta_index = 3  # [distance, velocity_x, velocity_z, delta_theta, gamma0]
+            self.gamma0_index = 4
+            self.gamma1_index = None
         elif self.robot_model == 'KinematicBicycle2D_DPCBF':
             self.extra_state = -1
             self.gamma_dim = 1
+            self.theta_index = 2  # [distance, velocity, delta_theta, gamma0]
+            self.gamma0_index = 3
+            self.gamma1_index = None
         else:
             self.extra_state = 0
             self.gamma_dim = 2
+            self.theta_index = 2  # [distance, velocity, delta_theta, gamma0, gamma1]
+            self.gamma0_index = 3
+            self.gamma1_index = 4
 
         self.use_gat = use_gat
         self.n_states = 18 if self.use_gat else 6 + self.extra_state
@@ -55,7 +67,7 @@ class OnlineCBFAdapter:
             self.gat_module = GATModule().to(self.device)
             self.penn = ProbabilisticEnsembleGAT(self.gat_module, device=self.device, gamma_dim=self.gamma_dim)
         else:
-            self.penn = ProbabilisticEnsembleNN(n_states=self.n_states, device=self.device)
+            self.penn = ProbabilisticEnsembleNN(n_states=self.n_states, device=self.device, theta_index=self.theta_index)
             if scaler_name:
                 self.penn.load_scaler(scaler_name)
 
@@ -155,11 +167,12 @@ class OnlineCBFAdapter:
         num_samples = gamma_flat.shape[0]
         state_repeated = np.tile(current_state, (num_samples, 1))
 
+        # Use correct gamma indices based on robot model
         if self.gamma_dim == 2:
-            state_repeated[:, 3 + self.extra_state] = gamma_flat[:, 0]
-            state_repeated[:, 4 + self.extra_state] = gamma_flat[:, 1]
+            state_repeated[:, self.gamma0_index] = gamma_flat[:, 0]
+            state_repeated[:, self.gamma1_index] = gamma_flat[:, 1]
         else:
-            state_repeated[:, 3 + self.extra_state] = gamma_flat[:, 0]
+            state_repeated[:, self.gamma0_index] = gamma_flat[:, 0]
 
         # Predict using vectorized PENN
         y_pred_safety_loss, y_pred_deadlock_time, epistemic_uncertainty = self.penn.predict(state_repeated)
@@ -185,7 +198,7 @@ class OnlineCBFAdapter:
             vx = tracking_controller.robot.X[3, 0]
             vz = tracking_controller.robot.X[4, 0]
             robot_state = [rx, ry, vx, vz]
-        if self.robot_model == 'Quad3D':
+        elif self.robot_model == 'Quad3D':
             vx = tracking_controller.robot.X[6, 0]
             vz = tracking_controller.robot.X[8, 0]
             robot_state = [rx, ry, vx, vz]
@@ -341,8 +354,8 @@ class OnlineCBFAdapter:
         which is both confident and satisfies the local validity condition
         '''
         current_state = self.get_rel_state_wt_obs(tracking_controller)
-        gamma0 = current_state[3 + self.extra_state]
-        gamma1 = current_state[4 + self.extra_state] if self.gamma_dim == 2 else None
+        gamma0 = current_state[self.gamma0_index]
+        gamma1 = current_state[self.gamma1_index] if self.gamma_dim == 2 else None
         gamma0_range, gamma1_range = self.sample_cbf_parameters(gamma0, gamma1)
 
         if self.use_gat:

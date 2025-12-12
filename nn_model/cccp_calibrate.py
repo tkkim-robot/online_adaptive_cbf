@@ -160,15 +160,19 @@ class ClassConditionedConformalPrediction:
             self.csv_data = X  # Store raw data (predictor will handle transformation)
             print(f"[INFO] Loaded {len(self.csv_data):,} samples from {csv_path}")
             
-            # Determine n_states based on robot model
+            # Determine n_states and theta_index based on robot model
             if robot_model == 'Quad2D':
                 n_states = 7  # Distance, VelocityX, VelocityZ, sin(Theta), cos(Theta), gamma0, gamma1
+                theta_index = 3 
             elif robot_model == 'Quad3D':
                 n_states = 6  # Distance, VelocityX, VelocityZ, sin(Theta), cos(Theta), gamma0
+                theta_index = 3  
             elif robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:
                 n_states = 5  # Distance, Velocity, sin(Theta), cos(Theta), gamma0
+                theta_index = 2 
             else:  # DynamicUnicycle2D, etc.
                 n_states = 6  # Distance, Velocity, sin(Theta), cos(Theta), gamma0, gamma1
+                theta_index = 2  
             
             # Build MLP model
             self.predictor = ProbabilisticEnsembleNN(
@@ -177,6 +181,7 @@ class ClassConditionedConformalPrediction:
                 n_hidden=n_hidden,
                 n_ensemble=n_ensemble,
                 device=str(self.device),
+                theta_index=theta_index,
             )
             self.predictor.load_scaler(scaler_path)
             self.predictor.load_model(model_path)

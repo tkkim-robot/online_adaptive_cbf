@@ -10,7 +10,7 @@ import joblib
 
 
 class ProbabilisticEnsembleNN(nn.Module):
-    def __init__(self, n_states=6, n_output=2, n_hidden=40, n_ensemble=3, device='cpu', lr=0.001, activation='relu'):
+    def __init__(self, n_states=6, n_output=2, n_hidden=40, n_ensemble=3, device='cpu', lr=0.001, activation='relu', theta_index=None):
         super(ProbabilisticEnsembleNN, self).__init__()
         self.device = device
         self.n_states = n_states
@@ -18,6 +18,10 @@ class ProbabilisticEnsembleNN(nn.Module):
         self.n_hidden = n_hidden
         self.n_ensemble = n_ensemble
         self.scaler = None
+        # theta_index: index of theta in the input array before transformation
+        # Default to 2 for compatibility (DynamicUnicycle2D, KinematicBicycle2D_DPCBF)
+        # Quad3D and Quad2D have theta at index 3
+        self.theta_index = theta_index if theta_index is not None else 2
 
         try:
             from penn.penn import EnsembleStochasticLinear
@@ -44,8 +48,11 @@ class ProbabilisticEnsembleNN(nn.Module):
 
     def predict(self, input_array):
         input_array = np.atleast_2d(input_array)  # Ensures 2D input
-        theta = input_array[:, 2]
-        input_transformed = np.column_stack((input_array[:, :2], np.sin(theta), np.cos(theta), input_array[:, 3:]))
+        theta = input_array[:, self.theta_index]
+        # Split array: everything before theta, theta, everything after theta
+        input_transformed = np.column_stack((input_array[:, :self.theta_index], 
+                                           np.sin(theta), np.cos(theta), 
+                                           input_array[:, self.theta_index+1:]))
         input_scaled = self.scaler.transform(input_transformed)
         input_tensor = torch.tensor(input_scaled, dtype=torch.float32).to(self.device)
 

@@ -318,9 +318,9 @@ ADAPTIVE_MODELS = {
         "online_cbf_qp_mlp": {
             "model_path":  "nn_model/checkpoint/penn_model_qp.pth",
             "scaler_path": "nn_model/checkpoint/scaler_qp.save",
-            "step_size":   0.01,
+            "step_size":   0.05,
             "lower_bound": 0.1,
-            "upper_bound": 0.2
+            "upper_bound": 15.0
         },
         "online_cbf_qp_gat": {
             "model_path":  "nn_model/checkpoint/KinematicBicycle2D_DPCBF_1101_gat_1730_epoch_200.pth",
