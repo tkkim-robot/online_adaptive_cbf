@@ -1,26 +1,38 @@
 import os
 import sys
 project_root = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(project_root, 'safe_control'))
-sys.path.append(os.path.join(project_root, 'cvar_gmm_filter'))
+# Make sure the repository root is on sys.path (so `import safe_control` resolves locally),
+# and add cvar_gmm_filter. Avoid adding the `safe_control/` directory itself because that
+# can cause confusing resolution in multiprocessing contexts.
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+_cvar_path = os.path.join(project_root, 'cvar_gmm_filter')
+if _cvar_path not in sys.path:
+    sys.path.insert(0, _cvar_path)
 
 import csv
 import copy
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-import torch_geometric
 from scipy.stats import norm
-from torch_geometric.data import Batch
 from sklearn.preprocessing import MinMaxScaler
 from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController
 from safe_control.dynamic_env.main import LocalTrackingControllerDyn
-from nn_model.penn.gat import GATModule
 from nn_model.penn.nn_iccbf_predict import ProbabilisticEnsembleNN
-from nn_model.penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
 from cvar_gmm_filter.distributionally_robust_cvar import DistributionallyRobustCVaR
 from online_cbf_config import ALL_DEFAULTS, ADAPTIVE_MODELS
+
+# torch_geometric is only required for GAT-based models. Make it optional so
+# non-GAT experiments (including BarrierNet rollouts) can run without it.
+try:
+    import torch_geometric  # noqa: F401
+    from torch_geometric.data import Batch  # noqa: F401
+    _TORCH_GEOMETRIC_AVAILABLE = True
+except Exception:
+    Batch = None
+    _TORCH_GEOMETRIC_AVAILABLE = False
 
 class OnlineCBFAdapter:
     def __init__(self, model_name, scaler_name=None, d_min=0.075, step_size=0.05,
@@ -64,6 +76,15 @@ class OnlineCBFAdapter:
 
         self.gat_module = None
         if self.use_gat:
+            if not _TORCH_GEOMETRIC_AVAILABLE:
+                raise ModuleNotFoundError(
+                    "torch_geometric is required for GAT-based online adaptation "
+                    "(e.g., 'Online Adaptive ... GAT'). Install torch_geometric or use the MLP controller."
+                )
+            # Local imports to avoid hard dependency when not using GAT
+            from nn_model.penn.gat import GATModule
+            from nn_model.penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
+
             self.gat_module = GATModule().to(self.device)
             self.penn = ProbabilisticEnsembleGAT(self.gat_module, device=self.device, gamma_dim=self.gamma_dim)
         else:
@@ -234,6 +255,11 @@ class OnlineCBFAdapter:
         Predict safety loss, deadlock time, and epistemic uncertainty 
         using the Probabilistic Ensemble Neural Network
         """
+        if not _TORCH_GEOMETRIC_AVAILABLE or Batch is None:
+            raise ModuleNotFoundError(
+                "torch_geometric is required for GAT-based online adaptation. "
+                "Install torch_geometric or disable use_gat."
+            )
         base_graph = self.build_graph_from_env(tracking_controller)
 
         # Generate all gamma combinations
@@ -401,6 +427,11 @@ def get_controller_defaults(robot_model, controller_name):
     Returns (controller_type, gamma0, gamma1) for the given robot_model
     and high-level controller_name.
     """
+    # BarrierNet is handled as a direct controller in safe_control/tracking.py.
+    # It does not use gamma parameters here.
+    if controller_name == "BarrierNet":
+        return ("barriernet", 0.0, 0.0)
+
     if robot_model not in ALL_DEFAULTS:
         raise ValueError(f"Unknown robot_model '{robot_model}'")
     
