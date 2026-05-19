@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create the Q3 obstacle-count ablation figure from existing experiment CSVs.
+Create the obstacle-count ablation figure from existing experiment CSVs.
 
 This script is intentionally standalone: it does not import controller, model,
 or training modules. It only reads saved CSV artifacts and writes figure/data
@@ -35,19 +35,19 @@ class ResultCase:
 SDF_CASES: tuple[ResultCase, ...] = (
     ResultCase(
         robot="Dynamic unicycle",
-        method="Ours-GAT",
+        method="OA-CBF w/ GAT",
         csv_path="epoch_exp/du2d_1113/"
         "sim_results_in_obs_sweep_Online_Adaptive_MPC-CBF_GAT_DynamicUnicycle2D_1120_1217.csv",
     ),
     ResultCase(
         robot="Dynamic unicycle",
-        method="Ours-FC",
+        method="OA-CBF w/ FC",
         csv_path="epoch_exp/du2d_1113/"
         "sim_results_in_obs_sweep_Online_Adaptive_MPC-CBF_MLP_DynamicUnicycle2D_1120_2354.csv",
     ),
     ResultCase(
         robot="Quad2D",
-        method="Ours-GAT",
+        method="OA-CBF w/ GAT",
         csv_path="epoch_exp/quad2d_1111/"
         "sim_results_in_obs_sweep_Online_Adaptive_MPC-CBF_GAT_Quad2D_1109_0241.csv",
         obs_id_filter_csv="epoch_exp/quad2d_1111/"
@@ -55,19 +55,19 @@ SDF_CASES: tuple[ResultCase, ...] = (
     ),
     ResultCase(
         robot="Quad2D",
-        method="Ours-FC",
+        method="OA-CBF w/ FC",
         csv_path="epoch_exp/quad2d_1111/"
         "sim_results_in_obs_sweep_Online_Adaptive_MPC-CBF_MLP_Quad2D_1121_0018.csv",
     ),
     ResultCase(
         robot="Quad3D",
-        method="Ours-GAT",
+        method="OA-CBF w/ GAT",
         csv_path="epoch_exp/quad3d_1103/"
         "sim_results_in_obs_sweep_Online_Adaptive_MPC-CBF_GAT_Quad3D_1115_0317.csv",
     ),
     ResultCase(
         robot="Quad3D",
-        method="Ours-FC",
+        method="OA-CBF w/ FC",
         csv_path="epoch_exp/quad3d_1207/"
         "sim_results_in_obs_sweep_Online_Adaptive_MPC-CBF_MLP_Quad3D_1207_1413.csv",
     ),
@@ -77,7 +77,7 @@ SDF_CASES: tuple[ResultCase, ...] = (
 DPCBF_CASES: tuple[ResultCase, ...] = (
     ResultCase(
         robot="DPCBF bicycle",
-        method="Ours-GAT",
+        method="OA-CBF w/ GAT",
         csv_path="epoch_exp/kinematicbicycle2D_1101/"
         "sim_results_in_obs_sweep_Online_Adaptive_CBF-QP_GAT_KinematicBicycle2D_DPCBF_1102_0215.csv",
         obs_id_filter_csv="epoch_exp/kinematicbicycle2D_1101/"
@@ -85,7 +85,7 @@ DPCBF_CASES: tuple[ResultCase, ...] = (
     ),
     ResultCase(
         robot="DPCBF bicycle",
-        method="Ours-FC",
+        method="OA-CBF w/ FC",
         csv_path="epoch_exp/kinematicbicycle2D_1209/"
         "sim_results_in_obs_sweep_Online_Adaptive_CBF-QP_MLP_KinematicBicycle2D_DPCBF_1208_2025_epoch_200.csv",
     ),
@@ -102,16 +102,26 @@ def obstacle_count_from_obs_id(obs_id: int) -> int:
     return int(rng.randint(OBS_COUNT_LOW, OBS_COUNT_HIGH_EXCLUSIVE))
 
 
+def resolve_data_path(repo_root: Path, path_text: str) -> Path:
+    direct = repo_root / path_text
+    if direct.exists():
+        return direct
+    dataset_path = repo_root / "dataset" / path_text
+    if dataset_path.exists():
+        return dataset_path
+    return direct
+
+
 def read_obs_id_filter(repo_root: Path, filter_csv: str | None) -> set[int] | None:
     if filter_csv is None:
         return None
-    path = repo_root / filter_csv
+    path = resolve_data_path(repo_root, filter_csv)
     with path.open(newline="") as f:
         return {int(row["obs_id"]) for row in csv.DictReader(f)}
 
 
 def iter_rows(repo_root: Path, case: ResultCase) -> Iterable[dict[str, object]]:
-    path = repo_root / case.csv_path
+    path = resolve_data_path(repo_root, case.csv_path)
     keep_obs_ids = read_obs_id_filter(repo_root, case.obs_id_filter_csv)
     with path.open(newline="") as f:
         for row in csv.DictReader(f):
@@ -196,9 +206,9 @@ def plot_summary(summary: list[dict[str, object]], out_base: Path, include_dpcbf
             "ps.fonttype": 42,
         }
     )
-    colors = {"Ours-FC": "#B45309", "Ours-GAT": "#2563EB"}
-    markers = {"Ours-FC": "s", "Ours-GAT": "o"}
-    methods = ["Ours-FC", "Ours-GAT"]
+    colors = {"OA-CBF w/ FC": "#B45309", "OA-CBF w/ GAT": "#2563EB"}
+    markers = {"OA-CBF w/ FC": "s", "OA-CBF w/ GAT": "o"}
+    methods = ["OA-CBF w/ FC", "OA-CBF w/ GAT"]
     x_values = list(range(OBS_COUNT_LOW, OBS_COUNT_HIGH_EXCLUSIVE))
 
     fig, axes = plt.subplots(1, 2, figsize=(6.75, 2.35), sharex=True)
@@ -277,7 +287,7 @@ def main() -> None:
     summary = summarize(rows)
 
     suffix = "sdf_dpcbf" if args.include_dpcbf else "sdf"
-    out_base = out_dir / f"q3_obstacle_count_ablation_{suffix}"
+    out_base = out_dir / f"obstacle_count_ablation_{suffix}"
     write_summary_csv(summary, out_base.with_suffix(".csv"))
     plot_summary(summary, out_base, include_dpcbf=args.include_dpcbf)
 

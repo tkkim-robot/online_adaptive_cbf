@@ -24,6 +24,17 @@ from nn_model.penn.nn_iccbf_predict import ProbabilisticEnsembleNN
 from cvar_gmm_filter.distributionally_robust_cvar import DistributionallyRobustCVaR
 from online_cbf_config import ALL_DEFAULTS, ADAPTIVE_MODELS
 
+
+def _resolve_local_artifact(path):
+    if path is None:
+        return None
+    if os.path.exists(path):
+        return path
+    dataset_path = os.path.join(project_root, "dataset", path)
+    if os.path.exists(dataset_path):
+        return dataset_path
+    return path
+
 # torch_geometric is only required for GAT-based models. Make it optional so
 # non-GAT experiments (including BarrierNet rollouts) can run without it.
 try:
@@ -496,9 +507,12 @@ def get_online_cbf_adapter(robot_model, controller_name, print_info=True):
     else:
         epistemic_threshold = cfg.get("raw_epistemic_threshold", cfg.get("epistemic_threshold", 0.20))
 
+    model_name = _resolve_local_artifact(model_override if model_override else cfg["model_path"])
+    scaler_name = _resolve_local_artifact(scaler_override if scaler_override else cfg["scaler_path"])
+
     return OnlineCBFAdapter(
-        model_name=model_override if model_override else cfg["model_path"],
-        scaler_name=scaler_override if scaler_override else cfg["scaler_path"],
+        model_name=model_name,
+        scaler_name=scaler_name,
         step_size=cfg["step_size"],
         lower_bound=cfg["lower_bound"],
         upper_bound=cfg["upper_bound"],

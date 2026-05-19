@@ -201,17 +201,28 @@ def remove_mask_like_svg_constructs(svg_path):
     tree.write(svg_path, encoding="utf-8", xml_declaration=True)
 
 
+def resolve_repo_artifact(path):
+    repo_root = Path(__file__).resolve().parents[1]
+    direct = repo_root / path
+    if direct.exists():
+        return str(direct)
+    dataset_path = repo_root / "dataset" / path
+    if dataset_path.exists():
+        return str(dataset_path)
+    return path
+
+
 def main():
     configure_ieee_style()
 
-    model_path = os.environ.get(
+    model_path = resolve_repo_artifact(os.environ.get(
         "UNCERTAINTY_MODEL_PATH",
         "nn_model/checkpoint/DynamicUnicycle2D_1120_mlp_1230_epoch_400.pth",
-    )
-    scaler_path = os.environ.get(
+    ))
+    scaler_path = resolve_repo_artifact(os.environ.get(
         "UNCERTAINTY_SCALER_PATH",
         model_path.replace(".pth", ".save"),
-    )
+    ))
 
     penn = ProbabilisticEnsembleNN()
     penn.load_model(model_path)
