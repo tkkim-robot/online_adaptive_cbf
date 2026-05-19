@@ -45,12 +45,30 @@ To install this project, follow these steps:
    ```bash
    python -m pip install -e .
    ```
+   BarrierNet dependencies are optional:
+   ```bash
+   python -m pip install -e ".[barriernet]"
+   ```
    Or, install packages manually (see [`setup.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/setup.py)).
 
 
 ## Getting Started
 
 Familiarize with APIs and examples with the scripts in [`online_adaptive_cbf.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/online_adaptive_cbf.py)
+
+### Paper Media
+
+Paper figures and videos are generated with [`plot/generate_paper_media.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/plot/generate_paper_media.py):
+
+```bash
+python plot/generate_paper_media.py --case narrow --format svg
+python plot/generate_paper_media.py --case wide --format svg
+python plot/generate_paper_media.py --case narrow --format mp4 --media individual
+python plot/generate_paper_media.py --case wide --format mp4 --media all
+```
+
+Use `--dynamics quad2d` or `--dynamics dynamic_unicycle,quad3d` to generate a subset. Outputs are written under `paper_media/`.
+For final videos, do not pass `--max-frames`; that option is only for quick smoke tests and compresses playback.
 
 ### Basic Example
 You can run our test example by:
@@ -158,7 +176,7 @@ Please refer to our repository [`cvar-gmm-filter`](https://github.com/signalkee/
 
 ### Visualize Prediction Results for CBF Parameters of Interest
 
-[`test_plot.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/test_plot.py) provides an online plotting tool to visualize the predicted GMM distribution of the candidate CBF parameters. Here is the example of visualizing the predicted `risk_level` with three candidates, without adapting the paremeters.
+[`plot/plot_realtime_gmm_predictions.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/plot/plot_realtime_gmm_predictions.py) provides an online plotting tool to visualize the predicted GMM distribution of the candidate CBF parameters. Here is the example of visualizing the predicted `risk_level` with three candidates, without adapting the parameters.
 
 
 |    Single Obstacle         |    Multiple Obstacles    |
