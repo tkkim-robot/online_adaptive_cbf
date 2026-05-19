@@ -1,7 +1,8 @@
 import os
 import sys
-project_root = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.extend([
+    project_root,
     os.path.join(project_root, 'safe_control'),
 ])
 
@@ -114,7 +115,7 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric, save_svg=
 
     # Update the detected obstacle
     nearest_obs = tracking_controller.obs.flatten()
-    obs_x, obs_y, obs_r = nearest_obs
+    obs_x, obs_y, obs_r = nearest_obs[:3]
 
     # Set CBF parameters
     cbf_alpha1 = 0.15
@@ -186,8 +187,13 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric, save_svg=
         for j in range(1, 4):
             fig.update_scenes(camera=camera, row=i, col=j)
 
-    # Display the combined figure
-    fig.show()
+    output_path = os.environ.get('SAFETY_LOSS_OUTPUT', os.path.join(project_root, 'paper_figures', 'output', 'safety_loss_grid.html'))
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    fig.write_html(output_path)
+    print(f"Saved safety-loss grid: {output_path}")
+
+    if os.environ.get('SHOW_PLOT', '').strip().lower() in ('1', 'true', 'yes'):
+        fig.show()
 
 
 def safety_loss_function_example():
@@ -204,7 +210,7 @@ def safety_loss_function_example():
     waypoints = np.array(waypoints, dtype=np.float64)
     x_init = np.append(waypoints[0], 0)
 
-    known_obs = np.array([[4, 4, 0.2]])
+    known_obs = np.array([[4, 4, 0.2, 0, 0, 0, 0]])
 
     # Initialize environment and plotting handler
     plot_handler = plotting.Plotting(width=10, height=6, known_obs=known_obs)
@@ -221,9 +227,9 @@ def safety_loss_function_example():
     }
     control_type = 'mpc_cbf'
     tracking_controller = LocalTrackingController(x_init, robot_spec,
-                                                control_type=control_type,
+                                                controller_type={'pos': control_type},
                                                 dt=dt,
-                                                show_animation=True,
+                                                show_animation=False,
                                                 save_animation=False,
                                                 ax=ax, fig=fig,
                                                 env=env_handler)
@@ -241,7 +247,8 @@ def safety_loss_function_example():
 
         
     # Plot safety loss function grid
-    plot_safety_loss_function_grid(tracking_controller, safety_metric)
+    save_svg = os.environ.get('SAFETY_LOSS_SAVE_SVG', '').strip().lower() in ('1', 'true', 'yes')
+    plot_safety_loss_function_grid(tracking_controller, safety_metric, save_svg=save_svg)
 
 
 if __name__ == "__main__":

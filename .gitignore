@@ -1,10 +1,41 @@
 # Ignore pycache directories
 __pycache__/
 
-# Ignore misc. files
+# Ignore misc. files and generated local data
 *.csv
 *.egg-info/
 .DS_Store
+*.pth
+*.pkl
+*.save
 
-# Ignore directories and files with "images" in their name
+# Generated paper/video artifacts
 output/
+paper_figures/
+paper_video_outputs/
+sanity_runs/
+
+# Local experiment/checkpoint artifacts copied for paper reproduction
+nn_model/wandb/
+epoch_exp/
+barriernet_results/
+convert_pkl_csv.py
+check_data_histogram.py
+adaptation_experiment.py
+automated_pipeline.py
+AUTOMATION_GUIDE.md
+monitor_dataset_generation.sh
+run_barriernet_*.sh
+run_final_barriernet_pipeline.sh
+run_full_pipeline.sh
+run_post_training_pipeline.py
+run_training_tmux.sh
+analyze_and_visualize_failing_cases.py
+calculate_metrics.py
+list_valid_obs_ids.py
+visualize_single_simulation.py
+run_best_window_experiments.py
+results_summary.txt
+run_best_window_analysis_and_experiments.py
+train_data_with_checkpoints.py
+run_mlp_experiments_all_models.py

@@ -225,15 +225,14 @@ class ProbabilisticEnsembleGAT(nn.Module):
     def load_model(self, model_path):
         if os.path.exists(model_path):
             checkpoint = torch.load(model_path, map_location=self.device)
-            
-            # Adjust the state_dict keys if they have 'model.' prefix
-            if "model." in list(checkpoint.keys())[0]:
-                new_state_dict = {}
-                for k, v in checkpoint.items():
-                    name = k.replace("model.", "")  # remove 'model.' prefix
-                    new_state_dict[name] = v
-                checkpoint = new_state_dict
-            self.model.load_state_dict(checkpoint, strict=False)       
+            keys = list(checkpoint.keys())
+            has_full_gat_state = any(k.startswith(("gat_model.", "gat_network.")) for k in keys)
+            if has_full_gat_state:
+                self.load_state_dict(checkpoint, strict=False)
+            else:
+                if keys and keys[0].startswith("model."):
+                    checkpoint = {k.replace("model.", "", 1): v for k, v in checkpoint.items()}
+                self.model.load_state_dict(checkpoint, strict=False)
             
         else:
             print("Model path does not exist. Check the provided path.")

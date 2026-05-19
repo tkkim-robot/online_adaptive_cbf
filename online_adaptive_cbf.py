@@ -490,13 +490,19 @@ def get_online_cbf_adapter(robot_model, controller_name, print_info=True):
     # Allow environment variable override for checkpoint and scaler paths
     model_override = os.environ.get("CHECKPOINT_FILE")
     scaler_override = os.environ.get("SCALER_FILE")
+    threshold_override = os.environ.get("RAW_EPISTEMIC_THRESHOLD")
+    if threshold_override:
+        epistemic_threshold = float(threshold_override)
+    else:
+        epistemic_threshold = cfg.get("raw_epistemic_threshold", cfg.get("epistemic_threshold", 0.20))
+
     return OnlineCBFAdapter(
         model_name=model_override if model_override else cfg["model_path"],
         scaler_name=scaler_override if scaler_override else cfg["scaler_path"],
         step_size=cfg["step_size"],
         lower_bound=cfg["lower_bound"],
         upper_bound=cfg["upper_bound"],
-        epistemic_threshold=cfg.get("raw_epistemic_threshold", cfg.get("epistemic_threshold", 0.20)),
+        epistemic_threshold=epistemic_threshold,
         robot_model=robot_model,
         use_gat=use_gat,
         print_info=print_info,
@@ -714,4 +720,3 @@ if __name__ == "__main__":
 
     # Run the simulation
     single_agent_simulation(init_vel, waypoints, controller_name, robot_model)
-

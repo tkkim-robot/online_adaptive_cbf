@@ -22,6 +22,12 @@ setup(
         'torch_scatter',
         'networkx',
     ],
+    extras_require={
+        'barriernet': [
+            'cvxopt',
+            'qpth',
+        ],
+    },
     include_package_data=True,
     zip_safe=False,
 )
