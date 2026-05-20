@@ -56,20 +56,6 @@ To install this project, follow these steps:
 
 Familiarize with APIs and examples with the scripts in [`online_adaptive_cbf.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/online_adaptive_cbf.py)
 
-### Paper Media
-
-Paper figures and videos are generated with [`plot/generate_paper_media.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/plot/generate_paper_media.py):
-
-```bash
-python plot/generate_paper_media.py --case narrow --format svg
-python plot/generate_paper_media.py --case wide --format svg
-python plot/generate_paper_media.py --case narrow --format mp4 --media individual
-python plot/generate_paper_media.py --case wide --format mp4 --media all
-```
-
-Use `--dynamics quad2d` or `--dynamics dynamic_unicycle,quad3d` to generate a subset. Outputs are written under `paper_media/`.
-For final videos, do not pass `--max-frames`; that option is only for quick smoke tests and compresses playback.
-
 ### Basic Example
 You can run our test example by:
 
@@ -134,6 +120,35 @@ The sample results from the basic example:
 |  <img src="https://github.com/user-attachments/assets/5d5806c1-31a9-42fb-806f-04ece91d54ba"  height="170px"> |
 
 The green point is the goal location, and the gray circles are the obstacles that are known a priori.
+
+### Live Simulation Preview
+
+Use [`examples/run_simulation.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/examples/run_simulation.py) to interactively preview the scenarios with the `safe_control` renderer:
+
+```bash
+python examples/run_simulation.py --list
+python examples/run_simulation.py --case narrow --dynamics quad2d --method ours_gat --backend MacOSX
+python examples/run_simulation.py --case wide --dynamics dynamic_unicycle --method ours_gat --hold
+```
+
+Useful flags are `--case narrow|wide`, `--dynamics`, `--method`, `--max-t`, `--backend`, `--pause`, and `--hold`.
+
+### Paper Media
+
+> Warning: This feature requires a lot of computation time. For interactive visualization, use [`examples/run_simulation.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/examples/run_simulation.py)
+
+
+Paper figures and videos are generated with [`plot/generate_paper_media.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/plot/generate_paper_media.py):
+
+```bash
+python plot/generate_paper_media.py --case narrow --format svg
+python plot/generate_paper_media.py --case wide --format svg
+python plot/generate_paper_media.py --case narrow --format mp4 --media individual
+python plot/generate_paper_media.py --case wide --format mp4 --media all
+```
+
+Use `--dynamics quad2d` or `--dynamics dynamic_unicycle,quad3d` to generate a subset. Outputs are written under `paper_media/`.
+For final videos, do not pass `--max-frames`; that option is only for quick smoke tests and compresses playback.
 
 ## Module Breakdown
 
