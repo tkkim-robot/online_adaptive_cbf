@@ -1,10 +1,10 @@
 # online_adaptive_cbf
 
-This repository contains the implementation of an online adaptive framework for Control Barrier Functions (CBFs) in input-constrained nonlinear systems. The algorithm dynamically adapts CBF parameters to optimize performance while ensuring safety, particularly for robotic navigation tasks. Please see our paper ["Learning to Refine Input Constrained Control Barrier Functions via Uncertainty-Aware Online Parameter Adaptation"]() for more details.
+This repository contains the implementation of an online adaptive framework for Control Barrier Functions (CBFs) in input-constrained nonlinear systems. The algorithm dynamically adapts CBF parameters to optimize performance while ensuring safety.
 
 
 <div align="center">
-<img src="https://github.com/user-attachments/assets/d047f394-008f-4eb2-9e79-3e2f7a074b47" width="700px">
+<img src="https://github.com/user-attachments/assets/62b98ddd-1999-4a08-b68c-994f800ff8a2" width="700px">
 
 <div align="center">
 
@@ -156,9 +156,9 @@ For final videos, do not pass `--max-frames`; that option is only for quick smok
 
 The [`safety loss density function`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/safety_loss_function.py) is designed to quantify the collision risk between the robot and obstacles. This safety loss is computed based on the robot's state and the obstacles' locations.
 
-|    Mean Predicted Risk Level    |
+|    Safety Loss    |
 | :-------------------------------: |
-|  <img src="https://github.com/user-attachments/assets/9d8d2e21-ab83-4445-9cc4-de09029550b2"  height="350px"> |
+|  <img src="https://github.com/user-attachments/assets/fd040200-cbcb-4547-894e-8480d7495105"  height="350px"> |
 
 ### Data Generation
 
@@ -177,7 +177,7 @@ To train the PENN model, use the script [`penn/train_data.py`](https://github.co
 
 |    Mean Predicted Risk Level    |
 | :-------------------------------: |
-|  <img src="https://github.com/user-attachments/assets/611dea04-93df-4635-97eb-34b93a5850ad"  height="350px"> |
+|  <img src="https://github.com/user-attachments/assets/461e3568-890b-4b31-8739-7271560cf747"  height="350px"> |
 
 You can observe that the predicted risk level becomes higher as the CBF parameter increases, the distance to the obstacle decreases, the velocity increases, and the relative angle to the obstacle becomes smaller.
 
