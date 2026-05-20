@@ -2,9 +2,18 @@
 __pycache__/
 
 # Ignore misc. files
-*.csv
 *.egg-info/
 .DS_Store
 
-# Ignore directories and files with "images" in their name
+# Generated paper/video artifacts
 output/
+paper_figures/
+paper_video_outputs/
+paper_media/
+sanity_runs/
+sim_results/
+
+# Local data and run helpers
+dataset/
+local_run_scripts/
+local_experiment_tools/

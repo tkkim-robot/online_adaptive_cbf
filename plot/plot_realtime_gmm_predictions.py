@@ -1,6 +1,6 @@
 import os
 import sys
-project_root = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.join(project_root, 'safe_control'))
 
 import numpy as np
@@ -9,6 +9,17 @@ from matplotlib.ticker import FixedLocator
 from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController
 from nn_model.penn.nn_iccbf_predict import ProbabilisticEnsembleNN
+
+
+def resolve_artifact_path(path):
+    direct = path if os.path.isabs(path) else os.path.join(project_root, path)
+    if os.path.exists(direct):
+        return direct
+    dataset_path = os.path.join(project_root, "dataset", path)
+    if os.path.exists(dataset_path):
+        return dataset_path
+    return path
+
 
 class RealTimePlotter:
     def __init__(self, model_name, scaler_name, plot_deadlock=False):
@@ -180,7 +191,7 @@ class RealTimePlotter:
         self.setup_gmm_plots()
         return ax_main, env_handler
 
-def test_plot_example(max_sim_time=20):
+def realtime_gmm_prediction_example(max_sim_time=20):
     '''
     Example function to visualize the predicted safety loss GMMs in real-time
     '''
@@ -201,7 +212,15 @@ def test_plot_example(max_sim_time=20):
     env_handler = env.Env()
     
     # Initialize the real-time plotter and tracking controller
-    real_time_plotter = RealTimePlotter('nn_model/checkpoint/penn_model_0921.pth', 'nn_model/checkpoint/scaler_0921.save')
+    model_path = resolve_artifact_path(os.environ.get(
+        "GMM_MODEL_PATH",
+        "nn_model/checkpoint/DynamicUnicycle2D_1120_mlp_1230_epoch_400.pth",
+    ))
+    scaler_path = resolve_artifact_path(os.environ.get(
+        "GMM_SCALER_PATH",
+        model_path.replace(".pth", ".save"),
+    ))
+    real_time_plotter = RealTimePlotter(model_path, scaler_path)
     ax_main, env_handler = real_time_plotter.initialize_plots(plot_handler, env_handler)
     
     # Set up the robot's specifications
@@ -213,9 +232,8 @@ def test_plot_example(max_sim_time=20):
         'cam_range': 3.0,
         'radius': 0.3
     }
-    control_type = 'mpc_cbf'
     tracking_controller = LocalTrackingController(x_init, robot_spec,
-                                                control_type=control_type,
+                                                controller_type={'pos': 'mpc_cbf'},
                                                 dt=dt,
                                                 show_animation=True,
                                                 save_animation=False,
@@ -249,4 +267,4 @@ def test_plot_example(max_sim_time=20):
 
 
 if __name__ == "__main__":
-    test_plot_example()
+    realtime_gmm_prediction_example()

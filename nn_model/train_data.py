@@ -20,29 +20,36 @@ from penn.nn_gat_iccbf_predict import ProbabilisticEnsembleGAT
 
 
 # Name or model and saving path
-DATANAME = 'gat_datagen_1_75_50000_KinematicBicycle2D_C3BF_mpc_cbf'
-MODELNAME_SAVE = 'KinematicBicycle2D_C3BF_0515_gat_1339'
-SCALERNAME_SAVE = 'KinematicBicycle2D_C3BF_0515_gat_1339'
+DATANAME = 'gat_datagen_1112_200000_DynamicUnicycle2D_mpc_cbf'
+MODELNAME_SAVE = 'DynamicUnicycle2D_1120_mlp_1230'
+SCALERNAME_SAVE = 'DynamicUnicycle2D_1120_mlp_1230'
+# MODELNAME_SAVE = 'Quad3D_0807_gat_0230'
+# SCALERNAME_SAVE = 'Quad3D_0807_gat_0230'
+# MODELNAME_SAVE = 'Quad3D_0729_mlp_2130'
+# SCALERNAME_SAVE = 'Quad3D_0729_mlp_2130'
 data_file = 'data/' + DATANAME + '.csv'
 pickle_file = 'data/' + DATANAME + '.pkl'
 scaler_path = 'checkpoint/' + SCALERNAME_SAVE + '.save'
 model_path = 'checkpoint/' + MODELNAME_SAVE + '.pth'
 
-robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D_C3BF', 'Quad2D', 'VTOL2D']
-robot_model = robot_model_list[1]
+robot_model_list = ['DynamicUnicycle2D', 'KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF', 
+                    'Quad2D', 'Quad3D', 'VTOL2D']
+robot_model = robot_model_list[0]
 
 ACTIVATION = 'relu'
 LR = 0.0001
-BATCHSIZE = 32
+# BATCHSIZE = 32
+BATCHSIZE = 128
 EPOCH = 500
 
 TEST_ONLY = False       # False => Train then test  |   True => Just inference
-USE_GAT_EMBED = True   # False => MLP-only PENN    |   True => GAT+PENN
+USE_GAT_EMBED = False   # False => MLP-only PENN    |   True => GAT+PENN
 
 WANDB_FLAG = True
-if WANDB_FLAG:
+# Only initialize wandb when running this script directly, not when imported
+if __name__ == "__main__" and WANDB_FLAG:
     import wandb
-    wandb.init(project="KinematicBicycle2D_C3BF_0515", config={
+    wandb.init(project="DynamicUnicycle2D_1120_mlp_1230", config={
         "learning_rate": LR,
         "epochs": EPOCH,
         "batch_size": BATCHSIZE
@@ -52,7 +59,10 @@ if WANDB_FLAG:
 if robot_model == 'Quad2D':
     n_states = 7  
     gamma_dim = 2
-elif robot_model == 'KinematicBicycle2D_C3BF': # one gamma
+elif robot_model == 'Quad3D':
+    n_states = 6
+    gamma_dim = 1
+elif robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']: # one gamma
     n_states = 5
     gamma_dim = 1
 else:
@@ -73,22 +83,32 @@ def load_and_preprocess_data(data_file, scaler_path=None, noise_percentage=0.0, 
     if robot_model == 'Quad2D':
         X = dataset[['Distance', 'VelocityX', 'VelocityZ', 'Theta', 'gamma0', 'gamma1']].values
         extra_states = 1
-    elif robot_model == 'KinematicBicycle2D_C3BF':          
+        theta_index = 3 
+    elif robot_model == 'Quad3D':
+        X = dataset[['Distance', 'VelocityX', 'VelocityZ', 'Theta', 'gamma0']].values
+        extra_states = 0
+        theta_index = 3 
+    elif robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:          
         X = dataset[['Distance', 'Velocity', 'Theta', 'gamma0']].values
-        extra_states = 0        
+        extra_states = 0
+        theta_index = 2  
     else:
         X = dataset[['Distance', 'Velocity', 'Theta', 'gamma0', 'gamma1']].values
         extra_states = 0
+        theta_index = 2 
 
     y = dataset[['Safety Loss', 'Deadlock Time']].values 
 
-    # Apply noise to Distance, Velocity, and Theta
-    noise = np.random.randn(*X[:, :3+extra_states].shape) * noise_percentage / 100
-    X[:, :3+extra_states] += X[:, :3+extra_states] * noise
+    # Apply noise to Distance, Velocity components, and Theta
+    # Noise should be applied to first 2+extra_states elements (Distance, Velocity/VelocityX, VelocityZ if applicable) and Theta
+    noise_base = np.random.randn(*X[:, :2+extra_states].shape) * noise_percentage / 100
+    X[:, :2+extra_states] += noise_base
+    noise_theta = np.random.randn(X.shape[0]) * noise_percentage / 100
+    X[:, theta_index] += X[:, theta_index] * noise_theta
 
     # Transform Theta into sine and cosine components
-    Theta = X[:, 2+extra_states]
-    X_transformed = np.column_stack((X[:, :2+extra_states], np.sin(Theta), np.cos(Theta), X[:, 3+extra_states:]))
+    Theta = X[:, theta_index]
+    X_transformed = np.column_stack((X[:, :theta_index], np.sin(Theta), np.cos(Theta), X[:, theta_index+1:]))
 
    # Initialize the scaler
     scaler = StandardScaler()
@@ -173,7 +193,16 @@ if __name__ == '__main__':
 
     if not USE_GAT_EMBED:
         # ============= MLP-based (no GAT) approach =============
-        penn = ProbabilisticEnsembleNN(n_states, n_output, n_hidden, n_ensemble, device, lr=LR)
+        # Determine theta_index based on robot_model
+        if robot_model == 'Quad2D':
+            theta_index = 3
+        elif robot_model == 'Quad3D':
+            theta_index = 3
+        elif robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:
+            theta_index = 2
+        else:  # DynamicUnicycle2D, etc.
+            theta_index = 2
+        penn = ProbabilisticEnsembleNN(n_states, n_output, n_hidden, n_ensemble, device, lr=LR, theta_index=theta_index)
 
         if TEST_ONLY:
             # Load scaler and model, then do predictions
@@ -181,10 +210,12 @@ if __name__ == '__main__':
             penn.load_model(model_path)
 
             # Example input array 
-            if robot_model == 'KinematicBicycle2D_C3BF': # [distance, velocity, theta, gamma0]
+            if robot_model in ['KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']: # [distance, velocity, theta, gamma0]
                 input_data = [2.55, 0.01, 0.001, 0.005]
             elif robot_model == 'Quad2D': # [distance, velocityX, velocityZ, theta, gamma1, gamma2]
                 input_data = [2.55, 0.01, 0.02, 0.001, 0.005, 0.005]
+            elif robot_model == 'Quad3D': # [distance, velocityX, velocityZ, theta, gamma0]
+                input_data = [2.55, 0.01, 0.03, 0.001, 0.005]
             else:  # [distance, velocity, theta, gamma1, gamma2]
                 input_data = [2.55, 0.01, 0.001, 0.005, 0.005]            
 
@@ -209,7 +240,7 @@ if __name__ == '__main__':
             # Create datasets and dataloaders
             train_dataset = module.CustomDataset(train_dataX, train_dataY)
             test_dataset = module.CustomDataset(test_dataX, test_dataY)
-            train_loader = DataLoader(train_dataset, batch_size=BATCHSIZE, shuffle=True, num_workers=1, pin_memory=True)
+            train_loader = DataLoader(train_dataset, batch_size=BATCHSIZE, shuffle=True, num_workers=0, pin_memory=True)
             test_loader  = DataLoader(test_dataset, batch_size=BATCHSIZE, shuffle=False)
 
             start_epoch = 0

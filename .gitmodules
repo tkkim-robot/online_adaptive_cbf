@@ -1,6 +1,7 @@
 [submodule "safe_control"]
 	path = safe_control
 	url = https://github.com/tkkim-robot/safe_control.git
+	branch = barriernet
 [submodule "cvar_gmm_filter"]
 	path = cvar_gmm_filter
 	url = https://github.com/signalkee/cvar_gmm_filter.git
