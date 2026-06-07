@@ -30,7 +30,7 @@ To install this project, follow these steps:
 
 1. Clone the repository:
    ```bash
-   git --recursive clone https://github.com/tkkim-robot/online_adaptive_cbf.git
+   git clone --recursive https://github.com/tkkim-robot/online_adaptive_cbf.git
    cd online_adaptive_cbf
    ```
 
