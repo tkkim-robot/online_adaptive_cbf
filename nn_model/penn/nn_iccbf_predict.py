@@ -208,8 +208,7 @@ class ProbabilisticEnsembleNN(nn.Module):
             self.model.to(self.device)  
 
         else:
-            print("Model path does not exist. Check the provided path.")
+            raise FileNotFoundError(f"Learned inference requires a trained checkpoint: {model_path}")
             
     def load_scaler(self, scaler_path):
         self.scaler = joblib.load(scaler_path)
-

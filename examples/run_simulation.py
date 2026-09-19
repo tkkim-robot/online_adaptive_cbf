@@ -192,10 +192,6 @@ def run_preview(media, args: argparse.Namespace) -> int:
         tracker.draw_plot(pause=pause)
         for k in range(steps):
             ret = tracker.control_step()
-            if case.robot == "Quad3D":
-                tracker.robot.X[2, 0] = 0.0
-                tracker.robot.X[8, 0] = 0.0
-                tracker.robot.render_plot()
             apply_adapter_update(tracker, adapter)
             tracker.draw_plot(pause=pause)
             if ret in (-1, -2):
@@ -217,6 +213,13 @@ def run_preview(media, args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
+    if args.list:
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from oa_cbf_jax.legacy_cases import CASES
+        for group in sorted({case.group for case in CASES}):
+            print(f"{group}: {', '.join(case.method for case in CASES if case.group == group)}")
+        return 0
     media = import_media_module(args.backend)
     return run_preview(media, args)
 

@@ -26,56 +26,17 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "local_experiment_tools"))
-
-import adaptation_experiment as ae
+# Scene generation used only these constants from an absent private helper.
+ae = SimpleNamespace(DT=0.05, SEED=0)
 from online_adaptive_cbf import get_controller_defaults, get_online_cbf_adapter, get_robot_spec_and_obs
 from safe_control.dynamic_env.main import LocalTrackingControllerDyn
 from safe_control.tracking import LocalTrackingController
 from safe_control.utils import env
 from safety_loss_function import SafetyLossFunction
+from oa_cbf_jax.legacy_cases import Case, CASES
 
 
-@dataclass(frozen=True)
-class Case:
-    group: str
-    method: str
-    robot: str
-    controller: str
-    checkpoint: str | None = None
-    threshold: str | None = None
 
-CASES = [
-    Case("dynamic_unicycle", "fixed_low", "DynamicUnicycle2D", "MPC-CBF low fixed param"),
-    Case("dynamic_unicycle", "fixed_high", "DynamicUnicycle2D", "MPC-CBF high fixed param"),
-    Case("dynamic_unicycle", "od_cbf_qp", "DynamicUnicycle2D", "Optimal Decay CBF-QP"),
-    Case("dynamic_unicycle", "od_cbf_mpc", "DynamicUnicycle2D", "Optimal Decay MPC-CBF"),
-    Case("dynamic_unicycle", "barriernet", "DynamicUnicycle2D", "BarrierNet", "safe_control/position_control/BarrierNet/checkpoints/DynamicUnicycle2D_barriernet.pth"),
-    Case("dynamic_unicycle", "ours_fc", "DynamicUnicycle2D", "Online Adaptive MPC-CBF MLP", "nn_model/checkpoint/DynamicUnicycle2D_1120_mlp_1230_epoch_400.pth", "0.130267"),
-    Case("dynamic_unicycle", "ours_gat", "DynamicUnicycle2D", "Online Adaptive MPC-CBF GAT", "nn_model/checkpoint/DynamicUnicycle2D_1112_gat_2230_epoch_300.pth", "0.987007"),
-
-    Case("quad2d", "fixed_low", "Quad2D", "MPC-CBF low fixed param"),
-    Case("quad2d", "fixed_high", "Quad2D", "MPC-CBF high fixed param"),
-    Case("quad2d", "od_cbf_qp", "Quad2D", "Optimal Decay CBF-QP"),
-    Case("quad2d", "od_cbf_mpc", "Quad2D", "Optimal Decay MPC-CBF"),
-    Case("quad2d", "barriernet", "Quad2D", "BarrierNet", "safe_control/position_control/BarrierNet/checkpoints/Quad2D_barriernet.pth"),
-    Case("quad2d", "ours_fc", "Quad2D", "Online Adaptive MPC-CBF MLP", "nn_model/checkpoint/Quad2D_1120_mlp_1230_epoch_400.pth", "0.897910"),
-    Case("quad2d", "ours_gat", "Quad2D", "Online Adaptive MPC-CBF GAT", "nn_model/checkpoint/Quad2D_1106_gat_2230_epoch_200.pth", "0.022786"),
-
-    Case("quad3d", "fixed_low", "Quad3D", "MPC-CBF low fixed param"),
-    Case("quad3d", "fixed_high", "Quad3D", "MPC-CBF high fixed param"),
-    Case("quad3d", "od_cbf_mpc", "Quad3D", "Optimal Decay MPC-CBF"),
-    Case("quad3d", "barriernet", "Quad3D", "BarrierNet", "safe_control/position_control/BarrierNet/checkpoints/Quad3D_barriernet.pth"),
-    Case("quad3d", "ours_fc", "Quad3D", "Online Adaptive MPC-CBF MLP", "nn_model/checkpoint/Quad3D_1207_mlp_1230_epoch_800.pth", "13.608210"),
-    Case("quad3d", "ours_gat", "Quad3D", "Online Adaptive MPC-CBF GAT", "nn_model/checkpoint/Quad3D_1103_gat_0230_epoch_600.pth", "0.877601"),
-
-    Case("kinematic_bicycle_dpcbf", "fixed_low", "KinematicBicycle2D_DPCBF", "CBF-QP low fixed param"),
-    Case("kinematic_bicycle_dpcbf", "fixed_high", "KinematicBicycle2D_DPCBF", "CBF-QP high fixed param"),
-    Case("kinematic_bicycle_dpcbf", "od_cbf_qp", "KinematicBicycle2D_DPCBF", "Optimal Decay CBF-QP"),
-    Case("kinematic_bicycle_dpcbf", "barriernet", "KinematicBicycle2D_DPCBF", "BarrierNet", "safe_control/position_control/BarrierNet/checkpoints/KinematicBicycle2D_DPCBF_barriernet.pth"),
-    Case("kinematic_bicycle_dpcbf", "ours_fc", "KinematicBicycle2D_DPCBF", "Online Adaptive CBF-QP MLP", "nn_model/checkpoint/KinematicBicycle2D_DPCBF_1207_mlp_1230_epoch_200.pth", "0.024335"),
-    Case("kinematic_bicycle_dpcbf", "ours_gat", "KinematicBicycle2D_DPCBF", "Online Adaptive CBF-QP GAT", "nn_model/checkpoint/KinematicBicycle2D_DPCBF_1101_gat_1730_epoch_200.pth", "0.2930126190185547"),
-]
 
 NARROW_OBS_ID = {
     "dynamic_unicycle": 390,
@@ -856,14 +817,6 @@ def route_length(route_points: np.ndarray) -> float:
     return float(np.sum(np.linalg.norm(np.diff(pts, axis=0), axis=1)))
 
 
-def synthetic_motion_limits(case: Case) -> tuple[float, float]:
-    if case.robot == "DynamicUnicycle2D":
-        return 0.95, 0.75
-    if case.robot == "KinematicBicycle2D_DPCBF":
-        return 1.05, 0.55
-    if case.robot == "Quad2D":
-        return 0.85, 1.25
-    return 0.85, 1.0
 
 
 def collision_index(states: list[np.ndarray], obstacle_frames: list[np.ndarray], robot_radius: float) -> int | None:
@@ -958,179 +911,8 @@ def audit_trace_collisions(trace: Trace) -> Trace:
     return trace
 
 
-def push_clear_of_obstacles(pos: np.ndarray, obstacles: np.ndarray, robot_radius: float, env_size: dict[str, float], clearance: float = 0.045) -> np.ndarray:
-    pos = np.asarray(pos, dtype=float).copy()
-    if obstacles is None or len(obstacles) == 0:
-        return pos
-    obs = np.asarray(obstacles, dtype=float)
-    for _ in range(10):
-        moved = False
-        for row in obs[np.argsort(np.linalg.norm(obs[:, :2] - pos.reshape(1, 2), axis=1))]:
-            vec = pos - row[:2]
-            dist = float(np.linalg.norm(vec))
-            target = robot_radius + float(row[2]) + clearance
-            if dist < target:
-                if dist < 1e-6:
-                    vec = np.array([1.0, 0.0])
-                    dist = 1.0
-                pos += (target - dist) * vec / dist
-                moved = True
-        pos[0] = np.clip(pos[0], robot_radius, env_size["width"] - robot_radius)
-        pos[1] = np.clip(pos[1], robot_radius, env_size["height"] - robot_radius)
-        if not moved:
-            break
-    return pos
 
 
-def synthetic_wide_trace(case: Case, obs_id: int, max_t: float, env_size: dict[str, float], x_init: np.ndarray, waypoints: np.ndarray, obstacles: np.ndarray) -> Trace:
-    profiles = {
-        "ours_gat": dict(duration=88.0, final=1.0, amp=0.20, reached=True, unsafe=False, failure_mode="", alpha_hi=0.98),
-        "ours_fc": dict(duration=58.0, final=0.62, amp=0.54, reached=False, unsafe=True, failure_mode="collision", alpha_hi=0.72),
-        "fixed_low": dict(duration=min(max_t, 150.0), final=0.70, amp=0.08, reached=False, unsafe=False, failure_mode="timeout", alpha_hi=None),
-        "fixed_high": dict(duration=26.0, final=0.32, amp=0.03, reached=False, unsafe=False, failure_mode="infeasible", alpha_hi=None),
-        "od_cbf_qp": dict(duration=34.0, final=0.40, amp=-0.36, reached=False, unsafe=True, failure_mode="collision", alpha_hi=None),
-        "od_cbf_mpc": dict(duration=118.0, final=0.88, amp=0.12, reached=False, unsafe=False, failure_mode="timeout", alpha_hi=None),
-        "barriernet": dict(duration=18.0, final=0.22, amp=-0.42, reached=False, unsafe=False, failure_mode="infeasible", alpha_hi=None),
-    }
-    prof = profiles.get(case.method, profiles["fixed_low"])
-    duration = float(min(max_t, prof["duration"]))
-    steps = max(2, int(duration / ae.DT) + 1)
-    times = [i * ae.DT for i in range(steps)]
-    final_progress = float(prof["final"])
-    amp = float(prof["amp"])
-    if case.method == "ours_gat":
-        if case.robot == "Quad3D":
-            amp = 0.38
-        elif case.robot == "DynamicUnicycle2D":
-            amp = 0.30
-        elif case.robot == "Quad2D":
-            amp = 0.28
-    corner_radius = 0.75 if case.robot == "KinematicBicycle2D_DPCBF" else 0.62
-    route_points = rounded_polyline_points(waypoints, corner_radius=corner_radius)
-    route_dist = max(route_length(route_points), 1e-9)
-    max_speed, max_turn_rate = synthetic_motion_limits(case)
-    states: list[np.ndarray] = []
-    controls: list[np.ndarray] = []
-    alphas: list[tuple[float | None, float | None]] = []
-    nearest: list[np.ndarray | None] = []
-    obstacle_frames: list[np.ndarray] = []
-    last_heading = 0.0
-    last_pos_for_heading: np.ndarray | None = None
-    robot_radius = min(get_robot_spec_and_obs(case.robot)[0].get("radius", 0.3), 0.20)
-
-    for t in times:
-        tau = min(t / max(duration, ae.DT), 1.0)
-        ease = 3.0 * tau**2 - 2.0 * tau**3
-        progress = final_progress * ease
-        pos, tangent = sample_route_points(route_points, progress)
-        normal = np.array([-tangent[1], tangent[0]])
-        phase = 0.7 if case.method == "ours_gat" else 0.0
-        wiggle_envelope = math.sin(math.pi * tau) if bool(prof["reached"]) else 1.0
-        wiggle = amp * wiggle_envelope * math.sin(2.4 * math.pi * progress + phase)
-        pos = pos + wiggle * normal
-        pos[0] = np.clip(pos[0], 0.25, env_size["width"] - 0.25)
-        pos[1] = np.clip(pos[1], 0.25, env_size["height"] - 0.25)
-        obs_frame = obstacle_frame_at(obstacles, t, env_size, bounce=True)
-        if not bool(prof["unsafe"]) and not (bool(prof["reached"]) and tau > 0.965):
-            pos = push_clear_of_obstacles(pos, obs_frame, robot_radius, env_size)
-        if last_pos_for_heading is not None:
-            step_vec = pos - last_pos_for_heading
-            step_norm = float(np.linalg.norm(step_vec))
-            max_step = max_speed * ae.DT
-            if step_norm > max_step:
-                pos = last_pos_for_heading + step_vec / step_norm * max_step
-        if not bool(prof["unsafe"]) and not (bool(prof["reached"]) and tau > 0.985):
-            pos = push_clear_of_obstacles(pos, obs_frame, robot_radius, env_size, clearance=0.025)
-        if bool(prof["reached"]) and tau > 0.94:
-            goal = waypoints[-1, :2]
-            goal_blend = (tau - 0.94) / 0.06
-            pos = (1.0 - goal_blend) * pos + goal_blend * goal
-        if last_pos_for_heading is not None and float(np.linalg.norm(pos - last_pos_for_heading)) > 1e-5:
-            heading = math.atan2(float(pos[1] - last_pos_for_heading[1]), float(pos[0] - last_pos_for_heading[0]))
-        else:
-            heading = math.atan2(tangent[1], tangent[0])
-        if last_pos_for_heading is not None:
-            heading_delta = angle_wrap(heading - last_heading)
-            max_heading_delta = max_turn_rate * ae.DT
-            if abs(heading_delta) > max_heading_delta:
-                heading = angle_wrap(last_heading + math.copysign(max_heading_delta, heading_delta))
-        speed = final_progress / max(duration, ae.DT) * route_dist
-        if last_pos_for_heading is not None:
-            speed = min(max_speed, float(np.linalg.norm(pos - last_pos_for_heading)) / ae.DT)
-
-        if case.robot == "Quad3D":
-            state = np.zeros(12, dtype=float)
-            state[0], state[1] = pos
-            state[3] = 0.055 * math.cos(heading)
-            state[4] = -0.055 * math.sin(heading)
-            state[5] = heading
-            state[6] = speed * math.cos(heading)
-            state[7] = speed * math.sin(heading)
-            control = np.zeros(4, dtype=float)
-        elif case.robot == "Quad2D":
-            pitch = float(np.clip(-0.16 * speed * math.cos(heading), -0.30, 0.30))
-            state = np.array([
-                pos[0],
-                pos[1],
-                pitch,
-                speed * math.cos(heading),
-                speed * math.sin(heading),
-                0.0,
-            ], dtype=float)
-            control = np.zeros(2, dtype=float)
-        else:
-            state = np.array([pos[0], pos[1], heading, max(speed, 0.15)], dtype=float)
-            beta = np.clip((heading - last_heading) * 0.65, -0.35, 0.35)
-            control = np.array([0.0, beta], dtype=float)
-        last_heading = heading
-        last_pos_for_heading = pos.copy()
-        states.append(state)
-        controls.append(control)
-
-        obstacle_frames.append(obs_frame)
-        clearances = np.linalg.norm(obs_frame[:, :2] - pos.reshape(1, 2), axis=1) - obs_frame[:, 2]
-        nearest.append(obs_frame[np.argsort(clearances)[:6]].copy())
-
-        if case.method in ("ours_gat", "ours_fc"):
-            hi = float(prof["alpha_hi"])
-            if case.robot == "DynamicUnicycle2D":
-                hi = min(hi, 0.35)
-            elif case.robot == "KinematicBicycle2D_DPCBF":
-                hi = min(hi, 1.5)
-            lo = 0.01 if case.robot == "Quad3D" else 0.1
-            signed_clearance = float(np.min(clearances - robot_radius)) if len(clearances) else 1.0
-            risk_signal = math.exp(-max(signed_clearance, 0.0) / 0.26)
-            val = lo + (hi - lo) * (0.18 + 0.62 * risk_signal + 0.18 * ease) + 0.04 * math.sin(5.0 * math.pi * tau)
-            val = float(np.clip(val, lo, hi))
-            if case.robot in ("DynamicUnicycle2D", "Quad2D"):
-                val1 = lo + (hi - lo) * (0.22 + 0.56 * risk_signal + 0.18 * ease) + 0.035 * math.cos(4.0 * math.pi * tau)
-                alphas.append((val, float(np.clip(val1, lo, hi))))
-            else:
-                alphas.append((val, None))
-        else:
-            alphas.append((None, None))
-
-    trace = Trace(
-        case,
-        obs_id,
-        states,
-        controls,
-        times,
-        alphas,
-        nearest,
-        obstacles,
-        obstacle_frames,
-        waypoints,
-        env_size,
-        bool(prof["reached"]),
-        False,
-        False,
-        times[-1],
-        0.0,
-        "wide",
-        "" if bool(prof["reached"]) else str(prof["failure_mode"]),
-    )
-    return audit_trace_collisions(trace)
 
 
 def record_control(tracker) -> np.ndarray:
@@ -1169,8 +951,6 @@ def simulate(case: Case, obs_id: int, max_t: float, log_file: Path, scene_kind: 
         torch.manual_seed(0)
     env_size, x_init, waypoints, obstacles = make_scene(case.robot, obs_id, scene_kind)
     configure_env_for_case(case, max_t)
-    if scene_kind == "wide" and case.group in ("dynamic_unicycle", "quad2d", "quad3d", "kinematic_bicycle_dpcbf"):
-        return synthetic_wide_trace(case, obs_id, max_t, env_size, x_init, waypoints, obstacles)
 
     with log_file.open("w") as log, contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
         tracker, ctrl_type = build_tracker(case, x_init, waypoints, obstacles, scene_kind=scene_kind)
@@ -1215,9 +995,6 @@ def simulate(case: Case, obs_id: int, max_t: float, log_file: Path, scene_kind: 
                 break
 
             ret = tracker.control_step()
-            if case.robot == "Quad3D" and scene_kind in ("narrow", "wide"):
-                tracker.robot.X[2, 0] = 0.0
-                tracker.robot.X[8, 0] = 0.0
             if ret in (-1, -2):
                 if ret == -1:
                     reached = np.linalg.norm(tracker.robot.X[:2, 0] - waypoints[-1][:2]) < tracker.reached_threshold

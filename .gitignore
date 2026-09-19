@@ -17,3 +17,10 @@ sim_results/
 dataset/
 local_run_scripts/
 local_experiment_tools/
+
+# Local JAX execution environment and large reproducible run artifacts
+.venv/
+.venv-*/
+.pytest_cache/
+artifacts/
+*.pyc

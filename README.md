@@ -2,6 +2,17 @@
 
 This repository contains the implementation of an online adaptive framework for Control Barrier Functions (CBFs) in input-constrained nonlinear systems. The algorithm dynamically adapts CBF parameters to optimize performance while ensuring safety.
 
+The `oa_cbf_jax` package provides JAX models, ensemble training, calibrated
+online class-K selection and QP controllers for dynamic unicycle, planar
+quadrotor, bicycle DPCBF and linearized Quad3D. GAT and fully connected encoders
+share the learning interface. Corrected matched comparisons are still in progress.
+
+Install `requirements-cpu.lock` for CPU execution or `requirements-jax.lock` for
+CUDA execution in a virtual environment. Run `python -m oa_cbf_jax.cli --help`
+for numerical smoke checks, and `python -m oa_cbf_jax.training --help` and
+`python -m oa_cbf_jax.inference --help` for training and model export. Datasets,
+trained weights and generated experiment results are not included in the repository.
+
 
 <div align="center">
 <img src="https://github.com/user-attachments/assets/62b98ddd-1999-4a08-b68c-994f800ff8a2" width="700px">
@@ -36,7 +47,7 @@ To install this project, follow these steps:
 
    If you've already cloned the repository without the --recursive flag, you can initialize and update the submodules with:
    ```bash
-   submodule update --init --recursive
+   git submodule update --init --recursive
    ```
 
 2. (Optional) Create and activate a virtual environment

@@ -1,0 +1,324 @@
+{
+  "schema": "oa_cbf_original_hero_v1",
+  "stage": "known_showcase_input_only",
+  "final_test": false,
+  "group": "quad2d",
+  "robot": "Quad2D",
+  "kind": "narrow",
+  "observation_id": 106,
+  "provenance": {
+    "geometry_file": "plot/generate_paper_media.py",
+    "geometry_sha256": "5b010b265694a34d416d38a0d1738652b682b7c6d2ccb729b3d97bcaa1cb5f99",
+    "defaults_file": "online_cbf_config.py",
+    "defaults_sha256": "2fb302079f03a2f0a7583b780be41365b3d4b0ee5d339b98a4d334061b3f2453",
+    "DT": 0.05,
+    "SEED": 0,
+    "tracker_spec_prefix_sha256": "f5fce8d6e912afabab8741c16315539cb1eae36ee0c46844bbf2e9dca9bad13a",
+    "geometry_functions": {
+      "formatted_obstacles": {
+        "line": 118,
+        "sha256": "b63312d57e15d38e59db64f6b0a881fe6d12b50c8207dbc9fab5cb4efe55b7a1"
+      },
+      "make_init_state_from_xy": {
+        "line": 135,
+        "sha256": "8e4c8d9e647708b9f6a8368ee11c81549bd15e0a4ca2c9e46fa302edf623b405"
+      },
+      "make_waypoints": {
+        "line": 145,
+        "sha256": "035ee05a066aec48895215ca03470654ff5b6400b4b31f3fcc0d0ead977b1e8f"
+      },
+      "segment_blockers": {
+        "line": 216,
+        "sha256": "ab97a36d014a2be4e257d5d39afc8d1a23f94e6410b23746740fc69ebfffc4ea"
+      },
+      "append_obstacles": {
+        "line": 242,
+        "sha256": "b9353231ad6f5dc6c68d7e3756ce3ee0468a91d0a6df6621963aaf1311e0b2e1"
+      },
+      "point_to_polyline_distance": {
+        "line": 275,
+        "sha256": "a84838a09b52c3be34dbdaa51b2d32d774f3e9cb1c95a4363bf49908c997f1ed"
+      },
+      "fill_obstacles_around_path": {
+        "line": 292,
+        "sha256": "707cfee35541da0cfa3c074c1b4b23cda50e1027daaef08e492d50c9bcbd1f0c"
+      },
+      "fill_dense_obstacle_field": {
+        "line": 326,
+        "sha256": "57ab031c824a831a295f36faa0dc1f063024f477d9413051066c205993e347d9"
+      },
+      "make_narrow_scene": {
+        "line": 401,
+        "sha256": "bf7c5987feed8ff046f1a431eed7c77d8e43ee8ac4d60a39be80fcd2e2c199b4"
+      },
+      "make_wide_scene": {
+        "line": 447,
+        "sha256": "f710e40aaf3a053546ca1dd5d699b20a8de62eca68e7eb67dfa5e3ad854cdba8"
+      },
+      "make_dpcbf_dynamic_scene": {
+        "line": 591,
+        "sha256": "a2d5325ec3f85c2d660dc4845c3d0570d7019e8f70ccf18929b47b97e034e13c"
+      },
+      "make_scene": {
+        "line": 678,
+        "sha256": "267602bce6812a0491be7931af03f7d5446462ad84335eb30a5ba3f556d8a0dd"
+      }
+    },
+    "extraction": "Execute only named original geometry definitions, with original NumPy RandomState seeds. No controller or media rollout is executed."
+  },
+  "environment": {
+    "width": 16.0,
+    "height": 5.4
+  },
+  "initial_state": [
+    0.65,
+    2.7,
+    0.015,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "waypoints": [
+    [
+      0.65,
+      2.7,
+      0.0
+    ],
+    [
+      15.35,
+      2.7,
+      0.0
+    ]
+  ],
+  "obstacles": [
+    [
+      2.4,
+      1.5,
+      0.22,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      2.7,
+      4.2,
+      0.22,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      4.05,
+      2.79,
+      0.052,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      5.2,
+      1.48,
+      0.22,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      6.35,
+      4.22,
+      0.22,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      7.45,
+      2.6199999999999997,
+      0.13,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      8.58,
+      1.48,
+      0.22,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      9.7,
+      4.22,
+      0.22,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      10.82,
+      2.9499999999999997,
+      0.052,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      11.95,
+      1.48,
+      0.22,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      13.05,
+      4.22,
+      0.2,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  ],
+  "obstacle_columns": [
+    "x",
+    "y",
+    "radius",
+    "vx",
+    "vy",
+    "legacy_column_5",
+    "legacy_column_6"
+  ],
+  "obstacle_count": 11,
+  "base_robot_spec": {
+    "model": "Quad2D",
+    "f_min": 2.5,
+    "f_max": 5.5,
+    "inertia": 0.05,
+    "sensor": "rgbd",
+    "radius": 0.3
+  },
+  "media_robot_spec": {
+    "model": "Quad2D",
+    "f_min": 2.5,
+    "f_max": 5.5,
+    "inertia": 0.05,
+    "sensor": "rgbd",
+    "radius": 0.24
+  },
+  "media_spec_changes": {
+    "radius": {
+      "before": 0.3,
+      "after": 0.24
+    }
+  },
+  "comparators": [
+    {
+      "group": "quad2d",
+      "method": "fixed_low",
+      "robot": "Quad2D",
+      "controller": "MPC-CBF low fixed param",
+      "checkpoint": null,
+      "threshold": null,
+      "defaults": {
+        "type": "mpc_cbf",
+        "gamma0": 0.01,
+        "gamma1": 0.01
+      },
+      "evaluation_status": "not_evaluated"
+    },
+    {
+      "group": "quad2d",
+      "method": "fixed_high",
+      "robot": "Quad2D",
+      "controller": "MPC-CBF high fixed param",
+      "checkpoint": null,
+      "threshold": null,
+      "defaults": {
+        "type": "mpc_cbf",
+        "gamma0": 0.99,
+        "gamma1": 0.99
+      },
+      "evaluation_status": "not_evaluated"
+    },
+    {
+      "group": "quad2d",
+      "method": "od_cbf_qp",
+      "robot": "Quad2D",
+      "controller": "Optimal Decay CBF-QP",
+      "checkpoint": null,
+      "threshold": null,
+      "defaults": {
+        "type": "optimal_decay_cbf_qp",
+        "gamma0": 0.5,
+        "gamma1": 0.5
+      },
+      "evaluation_status": "not_evaluated"
+    },
+    {
+      "group": "quad2d",
+      "method": "od_cbf_mpc",
+      "robot": "Quad2D",
+      "controller": "Optimal Decay MPC-CBF",
+      "checkpoint": null,
+      "threshold": null,
+      "defaults": {
+        "type": "optimal_decay_mpc_cbf",
+        "gamma0": 0.01,
+        "gamma1": 0.01
+      },
+      "evaluation_status": "not_evaluated"
+    },
+    {
+      "group": "quad2d",
+      "method": "barriernet",
+      "robot": "Quad2D",
+      "controller": "BarrierNet",
+      "checkpoint": "safe_control/position_control/BarrierNet/checkpoints/Quad2D_barriernet.pth",
+      "threshold": null,
+      "defaults": null,
+      "evaluation_status": "not_evaluated"
+    },
+    {
+      "group": "quad2d",
+      "method": "ours_fc",
+      "robot": "Quad2D",
+      "controller": "Online Adaptive MPC-CBF MLP",
+      "checkpoint": "nn_model/checkpoint/Quad2D_1120_mlp_1230_epoch_400.pth",
+      "threshold": "0.897910",
+      "defaults": {
+        "type": "mpc_cbf",
+        "gamma0": 0.01,
+        "gamma1": 0.01
+      },
+      "evaluation_status": "not_evaluated"
+    },
+    {
+      "group": "quad2d",
+      "method": "ours_gat",
+      "robot": "Quad2D",
+      "controller": "Online Adaptive MPC-CBF GAT",
+      "checkpoint": "nn_model/checkpoint/Quad2D_1106_gat_2230_epoch_200.pth",
+      "threshold": "0.022786",
+      "defaults": {
+        "type": "mpc_cbf",
+        "gamma0": 0.01,
+        "gamma1": 0.01
+      },
+      "evaluation_status": "not_evaluated"
+    }
+  ],
+  "evaluation_status": "not_evaluated",
+  "interpretation": "Original geometry and waypoint task preserved. This file contains no simulated trajectory or performance evidence. Original robot changes are recorded, not silently applied to a differently trained model."
+}

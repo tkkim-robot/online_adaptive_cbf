@@ -1,0 +1,15 @@
+{
+  "schema": "oa_cbf_original_hero_manifest_v1",
+  "final_test": false,
+  "scenes": {
+    "dynamic_unicycle_narrow": "130c386762402f47761d8fd08fd368b8c3ce356e4d5d146da2bc84cb13a93ae3",
+    "dynamic_unicycle_wide": "472dca8ec0ff49d45ca0a839ac92e078dfbff2103486581adc81564190444c45",
+    "quad2d_narrow": "7ceb8e4a7bf7ef6cf2262dc585667d967b168c53ff16663659039043e5ed6ba9",
+    "quad2d_wide": "20d14538a335e9efed975f6dc55cf8364d4e35c879057293288c031f2df37c35",
+    "quad3d_narrow": "a6bc90ecc1701e698319d1f3592505e073aa8dbdfa6e8f05ea993c44d57748f9",
+    "quad3d_wide": "f31eb69c1ae1065f9efdccfc43282c2fcf7a948d9f12ac9976c97a3b7d3c59ed",
+    "kinematic_bicycle_dpcbf_narrow": "6c59d46232e950ef258701390e5e7d34038811f5c18b049f987bec84456abca1",
+    "kinematic_bicycle_dpcbf_wide": "578aefe94e2c6232f5510e0e7b306e6160aa1c29daf935e42766b53dc6ec2657"
+  },
+  "note": "Frozen original inputs. Unicycle wide exceeds the current 16-obstacle learned contract. Preserve every obstacle; do not truncate to make a model run."
+}

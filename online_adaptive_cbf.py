@@ -12,7 +12,10 @@ if _cvar_path not in sys.path:
 
 import csv
 import copy
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None  # Fixed-gain utilities do not require the optional legacy learner.
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import norm
@@ -20,7 +23,6 @@ from sklearn.preprocessing import MinMaxScaler
 from safe_control.utils import plotting, env
 from safe_control.tracking import LocalTrackingController
 from safe_control.dynamic_env.main import LocalTrackingControllerDyn
-from nn_model.penn.nn_iccbf_predict import ProbabilisticEnsembleNN
 from cvar_gmm_filter.distributionally_robust_cvar import DistributionallyRobustCVaR
 from online_cbf_config import ALL_DEFAULTS, ADAPTIVE_MODELS
 
@@ -52,6 +54,8 @@ class OnlineCBFAdapter:
         """
         Initialize the adaptive CBF parameter selector
         """
+        if torch is None:
+            raise ModuleNotFoundError("Legacy learned inference needs PyTorch; use oa_cbf_jax for the new implementation")
         self.print_info = print_info
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         # self.device = 'cpu'
@@ -99,6 +103,7 @@ class OnlineCBFAdapter:
             self.gat_module = GATModule().to(self.device)
             self.penn = ProbabilisticEnsembleGAT(self.gat_module, device=self.device, gamma_dim=self.gamma_dim)
         else:
+            from nn_model.penn.nn_iccbf_predict import ProbabilisticEnsembleNN
             self.penn = ProbabilisticEnsembleNN(n_states=self.n_states, device=self.device, theta_index=self.theta_index)
             if scaler_name:
                 self.penn.load_scaler(scaler_name)
