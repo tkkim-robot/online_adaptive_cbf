@@ -17,6 +17,7 @@ from .barriernet_inference import make_policy
 from .barriernet_audit import numpy_features,numpy_constraints
 from .cli import sanitize
 from .config import UnicycleConfig
+from .unicycle_inputs import source_robot
 from .dataset import source_fingerprint,sha256
 from .io import write_json
 from .physical_kernels import PhysicalKernels
@@ -129,7 +130,7 @@ def run(source,output,bundle,noise_scale=0.,steps=800,limit=None,ordered_waypoin
         if len(r['scene']['obstacles'])!=capacity:raise ValueError('Mixed obstacle capacities')
         if np.shape(r[field]['points'])!=((3,route_capacity,2) if ordered_waypoints else (route_capacity,2)):raise ValueError('Mixed route capacities')
         if ordered_waypoints and (not 1<=r['waypoint_count']<=3 or not np.array_equal(r['waypoint_goals'][r['waypoint_count']-1],r['scene']['goal'])):raise ValueError('Invalid ordered goal contract')
-    root=Path(output);root.mkdir(parents=True,exist_ok=False);robot=UnicycleConfig()
+    root=Path(output);root.mkdir(parents=True,exist_ok=False);robot=source_robot(source)
     controller=Controller(bundle,capacity,robot);kernels=PhysicalKernels(capacity,route_capacity,steps,robot)
     contract=dict(name='pinned_native_barriernet_jax',obstacle_rows=5,barrier='static-center HOCBF,1.01 squared-radius multiplier',
         weights_sha256=controller.manifest['weights_sha256'],bundle=str(Path(bundle).resolve()),bundle_manifest_sha256=sha256(Path(bundle)/'manifest.json'),

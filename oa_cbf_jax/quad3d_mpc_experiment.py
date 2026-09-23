@@ -144,11 +144,14 @@ def worker(task):
 
 def collect(source,output,method,slot=0,workers=12,limit=None):
     source=Path(source);out=Path(output);out.mkdir(parents=True,exist_ok=False);sm=read(source/'manifest.json')
-    assert sm['schema'] in ('quad3d_fresh_learned_policy_v100','quad3d_fresh_learned_policy_v108') and not sm['weight_fit_authorized']
+    assert sm['schema'] in ('quad3d_fresh_learned_policy_v100','quad3d_fresh_learned_policy_v108','quad3d_matched_static_policy') and not sm['weight_fit_authorized']
     version=109 if sm['schema']=='quad3d_fresh_learned_policy_v108' else 101
-    storage_floor=100. if version==109 else 125.
+    storage_floor=sm.get('storage_floor_gib',100. if version==109 else 125.)
     assert sm['parents_sha256']==sha256(source/'parents.json')
     pp=[p for p in read(source/'parents.json') if p['partition']=='policy_audit']
+    if sm['schema']=='quad3d_matched_static_policy':
+        from .comparison_contracts import physical_obstacle_scope
+        for parent in pp:physical_obstacle_scope('quad3d',parent['obstacles'],parent['mask'])
     if limit is not None:pp=pp[:limit]
     parents=[p for p in pp if (p['index']//12)%4==slot]
     assert parents and 0<=slot<4 and 1<=workers<=12

@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 from scipy.integrate import solve_ivp
 from .quad2d import Quad2DConfig
-from .quad2d_control import FlightConfig
+from .quad2d_control import FlightConfig,flight_config_from_contract
 from .quad2d_rollout import NAMES,COLLISION,GOAL,TIMEOUT
 from .dataset import sha256,source_fingerprint
 from .io import write_json
@@ -140,7 +140,7 @@ def check_gain_sources(data,policy,candidates,initial_gain=(4.,4.)):
         expected=np.where(data['requery'],2,4)  # Fixed selection or held fixed gain.
         if np.any(data['source'][data['active']]!=expected[data['active']]):raise ValueError('Wrong fixed behavior source')
         return
-    previous=np.asarray(initial_gain);candidates=np.asarray(candidates);backups=np.asarray(policy['backup_gains'])
+    previous=np.asarray(initial_gain);candidates=np.asarray(candidates);backups=np.asarray(policy['backup_gains']).reshape(-1,2)
     for k,gain in enumerate(data['gain']):
         if not data['active'][k] and not data['requery'][k]:continue
         source=int(data['source'][k]);stages=data['stages'][k]
@@ -185,6 +185,8 @@ def check_trace(data,summary,observation,obstacles,mask,noise,gains,config,*,com
     observer reconstruction at the caller. Raw sensors are always audited here.
     """
     c=config.robot;x0=data['true_initial_state'].astype(float);truth=data['true_obstacles'].astype(float)
+    if config.stationary_obstacles and np.any(truth[mask,3:5]!=0.):
+        raise ValueError('Static experiment contains moving physical obstacles')
     if command_obstacles is not None:
         command_obstacles=np.asarray(command_obstacles)
         if command_obstacles.shape!=data['observed_obstacles'].shape or not np.isfinite(command_obstacles).all():
@@ -232,11 +234,11 @@ def check_trace(data,summary,observation,obstacles,mask,noise,gains,config,*,com
 
 
 def audit(dataset):
-    root=Path(dataset);manifest=json.loads((root/'manifest.json').read_text());config_values=dict(manifest['config'])
-    config_values['robot']=Quad2DConfig(**config_values['robot']);config=FlightConfig(**config_values)
+    root=Path(dataset);manifest=json.loads((root/'manifest.json').read_text());config=flight_config_from_contract(manifest['config'])
     source=Path(manifest['source'])
     if sha256(source/'manifest.json')!=manifest['source_manifest_sha256']:raise ValueError('Source contract changed')
     source_manifest=json.loads((source/'manifest.json').read_text())
+    if flight_config_from_contract(source_manifest['config'])!=config:raise ValueError('Source physical contract changed')
     if sha256(source/'scenes.json')!=source_manifest['scenes_sha256']:raise ValueError('Source observations changed')
     relabeled=manifest['schema']=='oa_cbf_quad2d_initial_hurdle_v2'
     guided=manifest['schema']=='oa_cbf_quad2d_guided_hurdle_v1'

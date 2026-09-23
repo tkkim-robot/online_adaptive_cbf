@@ -4,14 +4,14 @@ Fixed policies here are matched OA component ablations, NOT original compared
 methods. No choice/filtering by eventual outcome; all parents are retained.
 """
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 import time
 import numpy as np
 import jax
-from .quad2d_policy import FlightPolicy,FlightPolicyConfig,SOURCE_NAMES
-from .quad2d_control import FlightConfig
+from .quad2d_policy import FlightPolicy,FlightPolicyConfig,ProgressAdmissionPolicyConfig,FeasibilityTriggeredPolicyConfig,IncumbentProgressPolicyConfig,SOURCE_NAMES
+from .quad2d_control import FlightConfig,flight_config_from_contract
 from .quad2d_rollout import NAMES,GOAL,COLLISION,TIMEOUT
 from .quad2d_audit import check_trace,check_guidance_trace
 from .dataset import sha256,source_fingerprint
@@ -19,13 +19,22 @@ from .io import write_json
 from .cli import sanitize
 
 
-def run(source,dataset,output,bundle=None,calibration=None,mode='learned',gain=4.,steps=1600,batch=8,guidance_horizon=0,noise_clearance_weight=0.,terminal_transition_distance=0.,clearance_guard='none',motion_window=0,motion_application='forecast',record_query_statistics=False):
+def run(source,dataset,output,bundle=None,calibration=None,mode='learned',gain=4.,steps=1600,batch=8,guidance_horizon=0,noise_clearance_weight=0.,terminal_transition_distance=0.,clearance_guard='none',motion_window=0,motion_application='forecast',record_query_statistics=False,fallback_mode='fixed_set',progress_admission=False,query_trigger='periodic',incumbent_progress=False):
+    if incumbent_progress and (progress_admission or query_trigger!='periodic'):
+        raise ValueError('Incumbent comparison is a separate policy experiment')
+    if query_trigger not in ('periodic','previous_gain_infeasible_v1') or (query_trigger!='periodic' and progress_admission):
+        raise ValueError('Unknown or incompatible query-trigger policy')
+    if fallback_mode not in ('fixed_set','hold_previous'):
+        raise ValueError('Unknown fallback mode')
+    if fallback_mode=='hold_previous' and (mode=='fixed' or not guidance_horizon):
+        raise ValueError('Held-gain fallback requires guided learned/component evaluation')
     root=Path(output);root.mkdir(parents=True,exist_ok=False);source=Path(source);dataset=Path(dataset)
     sm=json.loads((source/'manifest.json').read_text());rows=json.loads((source/'scenes.json').read_text())
     if any('waypoint_goals' in row for row in rows):raise ValueError('Use the ordered flight runner; final-goal bypass forbidden')
-    config=FlightConfig();policy_config=FlightPolicyConfig(mode=mode,fixed_gain=(gain,gain))
-    if sm['scenes_sha256']!=sha256(source/'scenes.json') or sm['config']!=asdict(config):raise ValueError('Changed physical scene contract')
+    config=flight_config_from_contract(sm['config']);policy_config=FlightPolicyConfig(mode=mode,fixed_gain=(gain,gain))
+    if sm['scenes_sha256']!=sha256(source/'scenes.json'):raise ValueError('Changed physical scene contract')
     dm=json.loads((dataset/'manifest.json').read_text());entry=json.loads((dataset/'index.json').read_text())[0]
+    if flight_config_from_contract(dm['config'])!=config:raise ValueError('Candidate data uses a different physical contract')
     if sha256(dataset/entry['file'])!=entry['sha256']:raise ValueError('Changed gain-bank source')
     with np.load(dataset/entry['file']) as f:candidates=f['gains'][0,::dm['replicas']].copy()
     if {r['group_id'] for r in rows}&{g['group_id'] for g in dm['groups']}:raise ValueError('Episode parents overlap training/calibration')
@@ -57,6 +66,19 @@ def run(source,dataset,output,bundle=None,calibration=None,mode='learned',gain=4
         cls=ObservedMotionGuidanceConfig if motion_application=='current_and_future' else ForecastMotionGuidanceConfig
         guidance=cls(**asdict(guidance),motion_window=motion_window)
     if guidance is not None and mode in ('learned','backup'):policy_config=FlightPolicyConfig(mode=mode,fixed_gain=(gain,gain),validation_horizon=guidance.horizon)
+    if fallback_mode=='hold_previous':policy_config=replace(policy_config,backup_gains=())
+    if progress_admission:
+        if type(guidance) is not TerminalGuidanceConfig or mode not in ('learned','backup'):
+            raise ValueError('Progress admission requires the raw terminal-guidance contract')
+        policy_config=ProgressAdmissionPolicyConfig(**asdict(policy_config))
+    if query_trigger!='periodic':
+        if type(guidance) is not TerminalGuidanceConfig:
+            raise ValueError('Feasibility trigger requires raw terminal guidance')
+        policy_config=FeasibilityTriggeredPolicyConfig(**asdict(policy_config))
+    if incumbent_progress:
+        if type(guidance) is not TerminalGuidanceConfig:
+            raise ValueError('Incumbent comparison requires raw terminal guidance')
+        policy_config=IncumbentProgressPolicyConfig(**asdict(policy_config))
     policy=FlightPolicy(bundle,calibration,config,policy_config,guidance,record_query_statistics)
     if mode=='learned' and policy.metadata['dataset_manifest_sha256']!=sha256(dataset/'manifest.json'):raise ValueError('Candidate source does not match trained model')
     manifest=dict(schema='oa_cbf_quad2d_episode_development_v1',source=str(source.resolve()),source_manifest_sha256=sha256(source/'manifest.json'),
@@ -70,6 +92,7 @@ def run(source,dataset,output,bundle=None,calibration=None,mode='learned',gain=4
     if guidance is not None:
         manifest['predictive_guidance']=asdict(guidance)
         manifest['validation']=f'One{guidance.horizon}tickheld-gain/profile witness from each shortlisted observed-state guidance prediction; returned currentQP reused, requery every4ticks or failed held-profile prediction.' if mode!='fixed' else 'Fixed-gain predictive guidance component ablation'
+        if query_trigger!='periodic':manifest['validation']='Check the previous gain with the observed QP/CBF and predictive guidance at every tick; query the learned gain pool only when that check fails.'
     write_json(root/'manifest.json',manifest)
     compile_seconds=policy.warm(candidates,batch,64,64,steps);print(json.dumps(dict(stage='warmed',compile_seconds=compile_seconds)),flush=True)
     index=[];start=time.perf_counter()
@@ -105,11 +128,21 @@ def run(source,dataset,output,bundle=None,calibration=None,mode='learned',gain=4
 
 
 def audit(directory):
-    root=Path(directory);manifest=json.loads((root/'manifest.json').read_text());config=FlightConfig()
-    if manifest['config']!=asdict(config):raise ValueError('Wrong flight physical audit config')
+    root=Path(directory);manifest=json.loads((root/'manifest.json').read_text());config=flight_config_from_contract(manifest['config'])
     source=Path(manifest['source']);sm=json.loads((source/'manifest.json').read_text())
+    if flight_config_from_contract(sm['config'])!=config:raise ValueError('Wrong flight physical audit config')
     if sha256(source/'manifest.json')!=manifest['source_manifest_sha256'] or sm['scenes_sha256']!=sha256(source/'scenes.json'):raise ValueError('Scene source changed')
     parents=json.loads((source/'scenes.json').read_text());index=json.loads((root/'index.json').read_text());reports=[]
+    trigger_audit=None
+    incumbent_audit=None
+    if manifest['policy'].get('incumbent_progress') and manifest['policy']['mode']=='learned':
+        from .quad2d_incumbent_progress import make_auditor
+        incumbent_audit=make_auditor(config,manifest['predictive_guidance'],manifest['batch'],manifest['candidates'])
+    if manifest['policy'].get('query_trigger'):
+        from .quad2d_policy import flight_policy_from_contract
+        from .quad2d_gain_trigger import make_trigger_auditor
+        flight_policy_from_contract(manifest['policy'])
+        trigger_audit=make_trigger_auditor(config,manifest['predictive_guidance'],manifest['batch'])
     if [r['group_id'] for r in index]!=[r['group_id'] for r in parents]:raise ValueError('Lost, duplicated or reordered evaluation parents')
     for row,parent in zip(index,parents):
         if sha256(root/row['file'])!=row['sha256']:raise ValueError('Episode trace changed')
@@ -134,10 +167,12 @@ def audit(directory):
         if row['status_code']==TIMEOUT and row['steps']!=manifest['steps']:raise ValueError('Censored future counted as timeout')
         if row['status_code']==6 and not (data['source'][-1]==3 and not data['active'][-1]):raise ValueError('Missing recorded policy rejection')
         if 'predictive_guidance' in manifest:
-            check_guidance_trace(data,manifest['predictive_guidance'])
+            check_guidance_trace(data,manifest['predictive_guidance'],config)
+            if trigger_audit is not None:result.update(trigger_audit(data))
+            if incumbent_audit is not None:result.update(incumbent_audit(data))
             if manifest['policy']['mode']=='fixed':np.testing.assert_array_equal(data['gain'],np.broadcast_to(manifest['policy']['fixed_gain'],data['gain'].shape))
             else:
-                candidates=np.asarray(manifest['candidates']);previous=np.array([4.,4.]);backups=np.asarray(manifest['policy']['backup_gains'])
+                candidates=np.asarray(manifest['candidates']);previous=np.array([4.,4.]);backups=np.asarray(manifest['policy']['backup_gains']).reshape(-1,2)
                 for k,gain in enumerate(data['gain']):
                     if not data['active'][k] and not data['requery'][k]:continue
                     source=int(data['source'][k]);stages=data['stages'][k]
@@ -176,5 +211,9 @@ if __name__=='__main__':
     r.add_argument('--motion-window',type=int,default=0,help='Forecast-only causal obstacle observer pilot; requires new labels before learned use')
     r.add_argument('--motion-application',choices=['forecast','current_and_future'],default='forecast',help='Explicit current-and-future measurement ablation; raw physical sensors always retained')
     r.add_argument('--record-query-statistics',action='store_true',help='Save the actual neural statistics used by each queried policy decision for trajectory calibration')
+    r.add_argument('--incumbent-progress',action='store_true')
+    r.add_argument('--fallback-mode',choices=['fixed_set','hold_previous'],default='fixed_set',help='Matched policy candidate: validate only the previous accepted gain when learned proposals fail; no alternative fallback gain search')
+    r.add_argument('--progress-admission',action='store_true')
+    r.add_argument('--query-trigger',choices=['periodic','previous_gain_infeasible_v1'],default='periodic')
     a=sub.add_parser('audit');a.add_argument('--directory',required=True)
     args=vars(p.parse_args());action=args.pop('action');run(**args) if action=='run' else audit(**args)

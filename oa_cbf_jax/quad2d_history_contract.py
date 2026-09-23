@@ -6,19 +6,23 @@ from pathlib import Path
 from .dataset import sha256, source_fingerprint
 from .io import write_json
 from .quad2d_history import SCHEMA, GRAPH_SCHEMA
-from .quad2d_control import FlightConfig
+from .quad2d_control import FlightConfig,flight_config_from_contract,normalize_flight_contract
 from .quad2d_guidance import ObservedMotionGuidanceConfig
 from .quad2d_task_targets import contract
 from .quad2d_relabel import TARGETS
 
 
 def validate_manifest(m):
-    c = asdict(FlightConfig())
+    try:
+        saved = flight_config_from_contract(m['config'])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError('Reviewed observed-history graph/controller/target contract required') from error
+    c = asdict(FlightConfig(stationary_obstacles=saved.stationary_obstacles))
     g = json.loads(json.dumps(asdict(ObservedMotionGuidanceConfig(noise_clearance_weight=1.))))
     controller = m.get('controller', {})
     if (m.get('schema') != SCHEMA or m.get('graph_schema') != GRAPH_SCHEMA
-            or m.get('graph_features') != 50 or m.get('config') != c
-            or controller.get('config') != c or controller.get('dynamics') != 'Quad2D'
+            or m.get('graph_features') != 50 or asdict(saved) != c
+            or normalize_flight_contract(controller.get('config', {})) != c or controller.get('dynamics') != 'Quad2D'
             or controller.get('predictive_guidance') != g
             or controller.get('graph_schema') != GRAPH_SCHEMA
             or controller.get('initial_gain') != [4., 4.]

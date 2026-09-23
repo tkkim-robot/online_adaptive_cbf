@@ -28,7 +28,11 @@ def validate_derivation(root,metadata):
         limitation='Derived numerical inference of unchanged FP32-trained weights. Requires its own prediction fit, trajectory gate and physical validation. No new training or final promotion.')
     if metadata!=expected or proof['source_weights_sha256']!=trained['weights_sha256'] or sha256(root/'weights.msgpack')!=trained['weights_sha256']:
         raise ValueError('Numerical port changed trained parameters or model semantics')
-    if trained['architecture']['encoder']!='gat' or trained.get('graph_features')!=35 or trained.get('gain_dimension')!=1:
+    motion=trained['architecture'].get('bicycle_motion_history',False)
+    if motion:
+        from .bicycle_motion_runtime import validate_metadata
+        validate_metadata(trained)
+    if trained['architecture']['encoder'] not in ('gat','matched_fc') or trained.get('graph_features')!=(39 if motion else 35) or trained.get('gain_dimension')!=1:
         raise ValueError('Only the observed bicycle GAT port is qualified here')
     return proof
 

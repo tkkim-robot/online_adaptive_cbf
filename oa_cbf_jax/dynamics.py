@@ -4,6 +4,10 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+# Explicit doubles keep integration accurate without changing network/input
+# default dtypes. Set this before tracing; local dtype contexts break nested scans.
+jax.config.update('jax_explicit_x64_dtypes', 'allow')
+
 
 def unicycle_flow(x, u):
     return jnp.stack((x[3] * jnp.cos(x[2]), x[3] * jnp.sin(x[2]), u[1], u[0]))
@@ -25,15 +29,22 @@ def rk4_step(x, u, dt):
 @partial(jax.jit, static_argnames=("substeps",))
 def integrate_unicycle(x, u, dt, substeps=4):
     """RK4 positions, exact linear heading/speed flow; no physical projection."""
+    output_dtype = x.dtype
+    x, u, dt = x.astype(jnp.float64), u.astype(jnp.float64), jnp.asarray(dt, jnp.float64)
+    # Position does not enter this vector field. Integrate displacement in a
+    # local frame so each substep does not repeatedly round a tiny motion onto
+    # a large world coordinate. Add the origin once to each reported sample.
+    local = x.at[:2].set(jnp.zeros_like(x[:2]))
     def step(carry, index):
         y = rk4_step(carry, u, dt / substeps)
         time=(index+1)*(dt/substeps)
         y=y.at[2].set(x[2]+time*u[1]).at[3].set(x[3]+time*u[0])
         return y, y
-    _,states=jax.lax.scan(step,x,jnp.arange(substeps))
+    _,states=jax.lax.scan(step,local,jnp.arange(substeps))
+    states=states.at[:,:2].add(x[:2])
     heading=states[:,2]
     heading=jnp.where(jnp.abs(heading)<=jnp.pi,heading,jnp.arctan2(jnp.sin(heading),jnp.cos(heading)))
-    states=states.at[:,2].set(heading)
+    states=states.at[:,2].set(heading).astype(output_dtype)
     return states[-1],states
 
 

@@ -42,20 +42,82 @@ def check_graph(features,node_mask,args):
     raise ValueError('Observed bicycle graph differs from independent reference')
 
 
-def reference_route_coordinate(position,points,mask,cursor):
+def reference_route_coordinate(position,points,mask,cursor,projection_index=None):
     points=np.asarray(points,float);position=np.asarray(position,float);v=np.diff(points,axis=0);valid=mask[:-1]&mask[1:]
     length=np.where(valid,np.linalg.norm(v,axis=1),0.);cs=np.r_[0.,np.cumsum(length)]
     lo=np.maximum(cs[:-1],cursor-1.);hi=np.minimum(cs[1:],cursor+1.);eligible=valid&(lo<=hi)
     fraction=np.sum((position-points[:-1])*v,axis=1)/np.maximum(length**2,1e-12)
     coordinate=np.clip(cs[:-1]+fraction*length,lo,np.maximum(lo,hi))
     projected=points[:-1]+((coordinate-cs[:-1])/np.maximum(length,1e-12))[:,None]*v
-    return float(coordinate[np.argmin(np.where(eligible,np.sum((projected-position)**2,axis=1),np.inf))])
+    index=np.argmin(np.where(eligible,np.sum((projected-position)**2,axis=1),np.inf)) if projection_index is None else projection_index
+    return float(coordinate[index])
+
+
+def route_coordinate_candidates(position,points,mask,cursor):
+    """Possible nearest segments under FP32 clipped arclength projection.
+
+    Outward operation intervals cover both fused and separate arithmetic.
+    Positive prefix sums use a gamma_n bound valid for any summation tree.
+    Only numerically overlapping distances may supply an alternate segment;
+    the returned coordinates are still recomputed independently in FP64.
+    """
+    from .route_audit import _exact,_outward,_add,_sub,_mul,_square,_sum2
+    points=np.asarray(points,float);position=np.asarray(position,float);mask=np.asarray(mask,bool)
+    valid=mask[:-1]&mask[1:];p=_exact(points[:-1]);v=_sub(_exact(points[1:]),p)
+    squared=_sum2(_square(v))
+    length=_outward(np.sqrt(np.maximum(squared[0],0.)),np.sqrt(np.maximum(squared[1],0.)))
+    length=tuple(np.where(valid,a,0.) for a in length)
+    count=np.arange(1,len(points));unit=np.finfo(np.float32).eps/2
+    gamma=count*unit/(1-count*unit)
+    cumulative=_outward(np.r_[0.,np.cumsum(length[0])*(1-gamma)],np.r_[0.,np.cumsum(length[1])*(1+gamma)])
+    # The first prefix is exactly the explicitly stored zero, not a sum.
+    for a in cumulative:a[0]=0.
+    start=tuple(a[:-1] for a in cumulative);end=tuple(a[1:] for a in cumulative)
+    window_low=_sub(_exact(cursor),_exact(1.));window_high=_add(_exact(cursor),_exact(1.))
+    low=tuple(np.maximum(a,b) for a,b in zip(start,window_low))
+    high=tuple(np.minimum(a,b) for a,b in zip(end,window_high))
+    possible=valid&(low[0]<=high[1]);certain=valid&(low[1]<=high[0])
+    def divide(a,b):
+        b=tuple(np.maximum(x,1e-12) for x in b)
+        return _mul(a,_outward(1/b[1],1/b[0]))
+    fraction=divide(_sum2(_mul(_sub(_exact(position),p),v)),_square(length))
+    coordinate=_add(start,_mul(fraction,length))
+    upper=tuple(np.maximum(a,b) for a,b in zip(low,high))
+    coordinate=tuple(np.minimum(np.maximum(a,b),c) for a,b,c in zip(coordinate,low,upper))
+    t=divide(_sub(coordinate,start),length)
+    projected=_add(p,_mul(tuple(a[:,None] for a in t),v))
+    distance=_sum2(_square(_sub(projected,_exact(position))))
+    indices=np.flatnonzero(possible&(distance[0]<=np.min(distance[1][certain],initial=np.inf)))
+    return [reference_route_coordinate(position,points,mask,cursor,int(i)) for i in indices]
+
+
+def check_route_progress(saved,initial,final,points,mask,initial_cursor,final_cursor):
+    """Check a retained progress label, including genuine nearest-segment ties."""
+    args=(points,mask)
+    expected=reference_route_coordinate(final,*args,final_cursor)-reference_route_coordinate(initial,*args,initial_cursor)
+    if np.isclose(saved,expected,atol=3e-5,rtol=2e-6):return False
+    starts=route_coordinate_candidates(initial,*args,initial_cursor)
+    ends=route_coordinate_candidates(final,*args,final_cursor)
+    if any(np.isclose(saved,end-start,atol=3e-5,rtol=2e-6) for start in starts for end in ends):return True
+    raise ValueError('Route progress differs from every numerically admissible projection')
+
+
+def recorded_gain(data,mask):
+    """Preserve legacy scalar traces; require explicit offline vector semantics."""
+    value=np.asarray(data['alpha'])
+    if not bool(data.get('per_obstacle_gain',False)):
+        if value.ndim:raise ValueError('Vector bicycle gain requires an explicit per-obstacle declaration')
+        return float(value)
+    if (value.shape!=np.asarray(mask).shape or not np.isfinite(value).all()
+            or np.any((value<.5)|(value>8.)) or 'controller_gain' in data):
+        raise ValueError('Invalid or mixed fixed per-obstacle gain contract')
+    return value.astype(float)
 
 
 def audit_trace(d,config=BicycleControlConfig()):
     from .route_audit import check_transition
     c=config.robot;physical=d['initial'].astype(float);obs=d['obstacles'].astype(float);mask=d['mask'].astype(bool);noise=d['noise'].astype(float)
-    bias_x=d['bias_x'].astype(float);bias_o=d['bias_o'].astype(float);alpha=float(d['alpha']);status=int(d['final_status']);count=int(d['expected_steps']);horizon=int(d['horizon'])
+    bias_x=d['bias_x'].astype(float);bias_o=d['bias_o'].astype(float);alpha=recorded_gain(d,mask);status=int(d['final_status']);count=int(d['expected_steps']);horizon=int(d['horizon'])
     error=1.15*noise[2]+(5e-7 if noise[2]>0 else 0.)
     xs=noise[[0,0,1,2]];os=noise[[3,3,5,4,4]]
     assert np.linalg.norm(bias_x[:2])<=noise[0]+1e-7 and abs(bias_x[2])<=noise[1]+1e-7 and abs(bias_x[3])<=noise[2]+1e-7

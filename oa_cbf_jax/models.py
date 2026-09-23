@@ -29,30 +29,76 @@ class GATConfig:
     paired_gain_quadratic: bool = False
     continuous_log_variance_min: float = -10.
     quad3d_obstacle_pooling: bool = False
+    flight_obstacle_pooling: bool = False
+    flight_gain_basis: bool = False
+    bicycle_history_invariant: bool = False
+    bicycle_obstacle_pooling: bool = False
+    bicycle_route_context: bool = False
+    bicycle_reserve_auxiliary: bool = False
+    bicycle_constraint_features: bool = False
+    bicycle_affine_gain: bool = False
+    bicycle_motion_history: bool = False
+    bicycle_candidate_encoding: bool = False
 
     def __post_init__(self):
+        if (not isinstance(self.bicycle_candidate_encoding,bool) or self.bicycle_candidate_encoding and
+                (not self.bicycle_constraint_features or self.bicycle_affine_gain or self.bicycle_motion_history)):
+            raise ValueError('Candidate encoding requires the matched bicycle current-constraint graph35 treatment')
+        if (not isinstance(self.bicycle_motion_history,bool) or self.bicycle_motion_history and
+                (not self.bicycle_constraint_features or self.bicycle_affine_gain)):
+            raise ValueError("Motion history requires the original matched bicycle constraint-feature model")
+        if (not isinstance(self.bicycle_affine_gain,bool) or self.bicycle_affine_gain and
+                (self.encoder not in ('gat','matched_fc') or not self.bicycle_constraint_features)):
+            raise ValueError('Affine gain coordinates require matched bicycle constraint-feature encoders')
+        if (not isinstance(self.bicycle_constraint_features,bool) or self.bicycle_constraint_features and
+                (self.encoder not in ('gat','matched_fc') or not self.bicycle_history_invariant
+                 or not self.bicycle_obstacle_pooling or not self.scalar_gain_quadratic
+                 or self.bicycle_route_context or self.bicycle_reserve_auxiliary)):
+            raise ValueError('Current constraint features require matched bicycle graph35 without other feature/auxiliary treatments')
+        if (not isinstance(self.bicycle_reserve_auxiliary, bool) or self.bicycle_reserve_auxiliary and
+                (self.encoder not in ('gat', 'matched_fc') or not self.bicycle_history_invariant
+                 or not self.bicycle_obstacle_pooling or not self.scalar_gain_quadratic or self.bicycle_route_context)):
+            raise ValueError('Reserve auxiliary requires matched bicycle graph35 learning')
+        if (not isinstance(self.bicycle_route_context, bool) or self.bicycle_route_context and
+                (self.encoder not in ('gat', 'matched_fc') or not self.bicycle_history_invariant
+                 or not self.bicycle_obstacle_pooling or not self.scalar_gain_quadratic)):
+            raise ValueError('Bicycle route context requires its matched history-invariant pooled encoder')
+        if (not isinstance(self.bicycle_obstacle_pooling,bool) or self.bicycle_obstacle_pooling and
+                (self.encoder not in ('gat','matched_fc') or self.flight_obstacle_pooling
+                 or self.quad3d_obstacle_pooling or self.flight_history_invariant
+                 or self.quad3d_history_invariant or self.flight_gain_basis or self.paired_gain_quadratic)):
+            raise ValueError('Bicycle pooling requires a matched encoder and its declared observed graph')
+        if (not isinstance(self.bicycle_history_invariant,bool) or self.bicycle_history_invariant and
+                (self.encoder not in ('gat','matched_fc') or self.flight_history_invariant or self.quad3d_history_invariant)):
+            raise ValueError('Bicycle history invariance requires its matched observed-state encoder')
+        if (not isinstance(self.flight_gain_basis,bool) or self.flight_gain_basis and
+                (self.encoder not in ('gat','matched_fc') or self.scalar_gain_quadratic or self.paired_gain_quadratic)):
+            raise ValueError('Planar gain basis requires its matched two-gain head')
+        if (not isinstance(self.flight_obstacle_pooling,bool)
+                or self.flight_obstacle_pooling and (self.encoder not in ('gat','matched_fc') or self.quad3d_obstacle_pooling)):
+            raise ValueError('Planar flight pooling requires a matched encoder and its own feature contract')
         if self.width <= 0 or self.heads <= 0 or self.width % self.heads or self.layers < 1:
             raise ValueError("Invalid attention configuration")
-        if self.encoder not in ('gat','legacy_fc','full_fc'):
+        if self.encoder not in ('gat','legacy_fc','full_fc','matched_fc'):
             raise ValueError('Unknown model encoder')
-        if self.encoder!='gat' and self.layers!=4:
+        if self.encoder in ('legacy_fc','full_fc') and self.layers!=4:
             raise ValueError('FC baselines use the repository four-hidden-layer architecture')
-        if not isinstance(self.flight_history_invariant,bool) or (self.flight_history_invariant and self.encoder!='gat'):
+        if not isinstance(self.flight_history_invariant,bool) or (self.flight_history_invariant and self.encoder not in ('gat','matched_fc')):
             raise ValueError('Flight history invariance is an explicit OA GAT variant')
         if (not math.isfinite(self.risk_log_variance_min) or not -10.<=self.risk_log_variance_min<=0.
-                or (self.encoder!='gat' and self.risk_log_variance_min!=-10.)):
+                or (self.encoder not in ('gat','matched_fc') and self.risk_log_variance_min!=-10.)):
             raise ValueError('Risk variance floor is an explicit bounded OA GAT setting')
-        if not isinstance(self.scalar_gain_quadratic,bool) or (self.scalar_gain_quadratic and self.encoder!='gat'):
+        if not isinstance(self.scalar_gain_quadratic,bool) or (self.scalar_gain_quadratic and self.encoder not in ('gat','matched_fc')):
             raise ValueError('Scalar gain basis is an explicit OA GAT variant')
-        if self.compute_dtype not in ('float32','float64') or (self.compute_dtype!='float32' and self.encoder!='gat'):
+        if self.compute_dtype not in ('float32','float64') or (self.compute_dtype!='float32' and self.encoder not in ('gat','matched_fc')):
             raise ValueError('Higher precision is an explicit OA GAT variant')
         if any(not isinstance(v,bool) for v in (self.quad3d_history_invariant,self.paired_gain_quadratic,self.quad3d_obstacle_pooling)):
             raise ValueError('Quad3D feature variants must be explicit booleans')
-        if (self.quad3d_history_invariant or self.paired_gain_quadratic or self.quad3d_obstacle_pooling) and self.encoder!='gat':
+        if (self.quad3d_history_invariant or self.paired_gain_quadratic or self.quad3d_obstacle_pooling) and self.encoder not in ('gat','matched_fc'):
             raise ValueError('Quad3D feature variants are restricted to OA GAT')
         if self.quad3d_history_invariant and self.flight_history_invariant or self.paired_gain_quadratic and self.scalar_gain_quadratic:
             raise ValueError('Incompatible dynamics feature transforms')
-        if not math.isfinite(self.continuous_log_variance_min) or not -10.<=self.continuous_log_variance_min<=0. or self.continuous_log_variance_min!=-10. and self.encoder!='gat':
+        if not math.isfinite(self.continuous_log_variance_min) or not -10.<=self.continuous_log_variance_min<=0. or self.continuous_log_variance_min!=-10. and self.encoder not in ('gat','matched_fc'):
             raise ValueError('Continuous variance floor is an explicit OA GAT variant')
 
 
@@ -119,6 +165,20 @@ class AttentionBlock(nn.Module):
         return jnp.where(mask[:,:,None],nodes+residual,0.)
 
 
+def flight_gain_coordinates(gains):
+    """Two ordered gains, log curvature, and the actual HOCBF coefficients.
+
+    Center at the declared gain4 reference. These are deterministic candidate
+    features, with no physical rollout, selected gain, fitted target or search.
+    Ordered coordinates retain the distinct first-stage domain dependence.
+    """
+    if gains.shape[-1]!=2:raise ValueError('Planar gain basis requires two ordered gains')
+    coordinate=(jnp.log(jnp.maximum(gains,1e-6))-math.log(4.))/math.log(2.)
+    return jnp.concatenate((coordinate,coordinate**2,
+        (coordinate[...,0]*coordinate[...,1])[...,None],
+        (gains.sum(-1)/8.-1.)[...,None],(gains.prod(-1)/16.-1.)[...,None]),axis=-1)
+
+
 class CandidateGAT(nn.Module):
     config:GATConfig=GATConfig()
 
@@ -129,10 +189,22 @@ class CandidateGAT(nn.Module):
         self.head1=Dense(self.config.width)
         self.head2=Dense(self.config.width)
         self.output=Dense(2*self.config.continuous_outputs+self.config.event_outputs)
+        if self.config.bicycle_reserve_auxiliary:
+            self.prefix_reserve=Dense(1)
 
-    def encode(self,features,mask):
+    def prepare_features(self,features,mask):
+        if self.config.flight_gain_basis and features.shape[-1]!=40:
+            raise ValueError('Planar gain basis requires the declared flight graph40')
         if self.config.compute_dtype=='float64':
             features=features.astype(jnp.float64)
+        if self.config.bicycle_history_invariant:
+            expected = 59 if self.config.bicycle_route_context else 39 if self.config.bicycle_motion_history else 35
+            if features.shape[-1]!=expected:raise ValueError(f'Bicycle history invariance requires its declared observed graph ({expected}-column)')
+            # The fixed-candidate branch takes its new gain separately and has
+            # no actuator lag, past-input cost, or previous-gain argument. Keep
+            # current observations, committed route memory and noise features;
+            # raw acquisition history remains in the independently audited data.
+            features=features.at[...,26:29].set(0.)
         if self.config.quad3d_history_invariant:
             if features.shape[-1]!=58:raise ValueError('Quad3D history invariance requires the58-column observer graph')
             # The fixed-candidate branch skips the observer update at tick zero,
@@ -150,15 +222,27 @@ class CandidateGAT(nn.Module):
             # but enforce the exact target invariance before neural encoding.
             features=features.at[...,29:33].set(0.)
         clean=jnp.where(mask[:,:,None],features,0.)
+        if self.config.bicycle_constraint_features:
+            from .bicycle_constraint_features import append_constraints
+            derived=append_constraints(clean[...,:35],mask)[...,35:]
+            clean=jnp.concatenate((clean,derived),axis=-1)
+        return clean
+
+    def encode(self,features,mask,candidate=None):
+        clean=self.prepare_features(features,mask)
+        if self.config.bicycle_candidate_encoding:
+            from .bicycle_candidate_features import condition_nodes
+            clean=condition_nodes(clean,mask,candidate)
         nodes=self.project(clean)
         positions=clean[:,:,3:5]
         delta=positions[:,:,None,:]-positions[:,None,:,:]
         relative=jnp.concatenate((delta,jnp.sqrt(jnp.sum(delta**2,axis=-1,keepdims=True)+1e-12)),axis=-1)
         for block in self.blocks:
             nodes=block(nodes,mask,relative)
-        if not self.config.quad3d_obstacle_pooling:
+        if not (self.config.quad3d_obstacle_pooling or self.config.flight_obstacle_pooling or self.config.bicycle_obstacle_pooling):
             return self.norm(nodes[:,0,:])
-        if features.shape[-1]!=58:raise ValueError('Quad3D obstacle pooling requires the58-column observer graph')
+        expected=(59 if self.config.bicycle_route_context else 39 if self.config.bicycle_motion_history else 35) if self.config.bicycle_obstacle_pooling else 40 if self.config.flight_obstacle_pooling else 58
+        if features.shape[-1]!=expected:raise ValueError(f'Obstacle pooling requires the declared {"bicycle" if self.config.bicycle_obstacle_pooling else "flight"} graph ({expected}-column)')
         # Retain ego attention and expose obstacle extrema/means directly to
         # the candidate head. Raw observed context bypasses the attention
         # bottleneck; no physical future, target or gain search enters here.
@@ -175,12 +259,14 @@ class CandidateGAT(nn.Module):
         weights=jnp.where(om,jnp.exp(-jnp.maximum(clearance-nearest,0.)),0.)
         weights=weights/jnp.maximum(weights.sum(-1,keepdims=True),1e-12)
         geometry=jnp.sum(weights[...,None]*clean[:,2:,3:9],axis=1)
-        return jnp.concatenate((z[:,0,:],average,maximum,clean[:,0,:],geometry,nearest),axis=-1)
+        return jnp.concatenate((z[:,0,:],average,maximum,clean[:,0,:features.shape[-1]],geometry,nearest),axis=-1)
 
     def score(self,context,gains):
         """context [B,W], gains [B,K,D]; one scalar or a declared gain pair."""
         broadcast=jnp.broadcast_to(context[:,None,:],(*gains.shape[:2],context.shape[-1]))
         log_gain=jnp.log(jnp.maximum(gains,1e-6))
+        if self.config.flight_gain_basis:
+            log_gain=flight_gain_coordinates(gains)
         if self.config.paired_gain_quadratic:
             if gains.shape[-1]!=4:raise ValueError('Paired gain basis requires four Quad3D gains')
             # Keep all four coordinates so unequal pairs cannot silently alias.
@@ -194,6 +280,9 @@ class CandidateGAT(nn.Module):
             # polynomial or introducing any physical rollout in inference.
             coordinate=(log_gain-math.log(2.))/math.log(4.)
             log_gain=jnp.concatenate((coordinate,coordinate**2),axis=-1)
+        if self.config.bicycle_affine_gain:
+            from .bicycle_gain_features import coordinates
+            log_gain=coordinates(gains)
         z=jnp.concatenate((broadcast,log_gain),axis=-1)
         z=nn.gelu(self.head1(z));z=z+nn.gelu(self.head2(z))
         out=self.output(z);d=self.config.continuous_outputs
@@ -203,9 +292,21 @@ class CandidateGAT(nn.Module):
             # remain exact; a changed floor requires a new trained/calibrated
             # bundle, but does not change the physical target or control law.
             variance=variance.at[...,0].set(jnp.clip(out[...,d],self.config.risk_log_variance_min,3.))
-        return dict(mean=out[...,:d],log_variance=variance,event_logits=out[...,2*d:])
+        result=dict(mean=out[...,:d],log_variance=variance,event_logits=out[...,2*d:])
+        if self.config.bicycle_reserve_auxiliary:
+            result['prefix_reserve']=self.prefix_reserve(z)
+        return result
 
     def __call__(self,features,mask,gains):
+        if self.config.bicycle_candidate_encoding:
+            if gains.shape[-1]!=1:raise ValueError('Bicycle candidate encoding requires one scalar gain')
+            batch,count=gains.shape[:2]
+            expanded=jnp.broadcast_to(features[:,None],(batch,count,*features.shape[1:])).reshape(batch*count,*features.shape[1:])
+            expanded_mask=jnp.broadcast_to(mask[:,None],(batch,count,mask.shape[1])).reshape(batch*count,mask.shape[1])
+            candidates=gains.reshape(batch*count,1)
+            encoded=self.encode(expanded,expanded_mask,candidates)
+            prediction=self.score(encoded,candidates[:,None])
+            return jax.tree.map(lambda a:a.reshape(batch,count,a.shape[-1]),prediction)
         return self.score(self.encode(features,mask),gains)
 
 
@@ -256,7 +357,52 @@ selection framework. Neither is BarrierNet or a direct-gain imitation policy.
         return self.score(self.encode(features,mask),gains)
 
 
+class CandidateMatchedFC(CandidateGAT):
+    """Encoder-only ablation: all observed nodes -> dense scene embedding.
+
+    Uses the same preprocessing, candidate basis, head, precision and variance
+    floors as CandidateGAT. Original FC/PENN checkpoints remain separate.
+    """
+
+    def setup(self):
+        self.project=Dense(self.config.width)
+        self.blocks=[Dense(self.config.width) for _ in range(self.config.layers)]
+        self.context_projection=Dense(self.config.width*(3 if self.config.quad3d_obstacle_pooling or self.config.flight_obstacle_pooling or self.config.bicycle_obstacle_pooling else 1))
+        self.norm=nn.LayerNorm()
+        self.head1=Dense(self.config.width)
+        self.head2=Dense(self.config.width)
+        self.output=Dense(2*self.config.continuous_outputs+self.config.event_outputs)
+        if self.config.bicycle_reserve_auxiliary:
+            self.prefix_reserve=Dense(1)
+
+    def encode(self,features,mask,candidate=None):
+        clean=self.prepare_features(features,mask)
+        if self.config.bicycle_candidate_encoding:
+            from .bicycle_candidate_features import condition_nodes
+            clean=condition_nodes(clean,mask,candidate)
+        obstacles=clean[:,2:];om=mask[:,2:]
+        keys=(obstacles[:,:,6],obstacles[:,:,5],obstacles[:,:,7],obstacles[:,:,4],obstacles[:,:,3],
+              jnp.where(om,obstacles[:,:,8],jnp.inf))
+        order=jnp.lexsort(keys,axis=1)
+        ordered=jnp.take_along_axis(obstacles,order[...,None],axis=1)
+        values=jnp.concatenate((clean[:,:2],ordered),axis=1).reshape(len(clean),-1)
+        values=nn.gelu(self.project(values))
+        for layer in self.blocks:values=values+nn.gelu(layer(values))
+        context=self.norm(self.context_projection(values))
+        if not (self.config.quad3d_obstacle_pooling or self.config.flight_obstacle_pooling or self.config.bicycle_obstacle_pooling):return context
+        expected=(59 if self.config.bicycle_route_context else 39 if self.config.bicycle_motion_history else 35) if self.config.bicycle_obstacle_pooling else 40 if self.config.flight_obstacle_pooling else 58
+        if features.shape[-1]!=expected:raise ValueError(f'Obstacle pooling requires the declared {"bicycle" if self.config.bicycle_obstacle_pooling else "flight"} graph ({expected}-column)')
+        clearance=clean[:,2:,8]
+        nearest=jnp.min(jnp.where(om,clearance,jnp.inf),axis=1,keepdims=True)
+        nearest=jnp.where(om.any(-1,keepdims=True),nearest,0.)
+        weights=jnp.where(om,jnp.exp(-jnp.maximum(clearance-nearest,0.)),0.)
+        weights=weights/jnp.maximum(weights.sum(-1,keepdims=True),1e-12)
+        geometry=jnp.sum(weights[...,None]*clean[:,2:,3:9],axis=1)
+        return jnp.concatenate((context,clean[:,0,:features.shape[-1]],geometry,nearest),axis=-1)
+
+
 def make_model(config):
+    if config.encoder=='matched_fc':return CandidateMatchedFC(config)
     return CandidateGAT(config) if config.encoder=='gat' else CandidateFC(config)
 
 
@@ -267,6 +413,16 @@ def initialize_ensemble(model,key,features,mask,gains,members=4):
 
 
 def predict_ensemble(model,params,features,mask,gains):
+    if model.config.encoder=='matched_fc':
+        width=params['project']['kernel'].shape[-2]
+        encoded_width=features.shape[-1]+(6 if model.config.bicycle_constraint_features else 0)+(2 if model.config.bicycle_candidate_encoding else 0)
+        nodes,remainder=divmod(width,encoded_width)
+        if remainder or nodes<2 or features.shape[1]>nodes:
+            raise ValueError('Matched-FC input capacity mismatch; truncation is forbidden')
+        extra=nodes-features.shape[1]
+        if extra:
+            features=jnp.pad(features,((0,0),(0,extra),(0,0)))
+            mask=jnp.pad(mask,((0,0),(0,extra)),constant_values=False)
     if model.config.encoder=='full_fc':
         # The first learned matrix fixes the flattened observation width. Pad
         # neural inputs only: resizing physical obstacles would change the

@@ -215,3 +215,11 @@ def predictive_flight_control(x,goal,obs,mask,gains,points,rm,cursor,config=Flig
         info['approved'] &= current['lower_clearance']>0
     if isinstance(guidance,InflatedGuidanceConfig):info['cbf_clearance_inflation']=inflation
     return (qp,h,psi,domain,proposed,remaining,target),info
+
+
+def terminal_guidance_from_contract(contract):
+    from .quad2d_guidance import TerminalGuidanceConfig
+    fields=dict(contract)
+    for key in ('angles_degrees','speed_scales'):
+        fields[key]=tuple(fields[key])
+    return TerminalGuidanceConfig(**fields)

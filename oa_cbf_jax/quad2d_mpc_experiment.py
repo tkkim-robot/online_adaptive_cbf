@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from .quad2d import integrate_quad2d
-from .quad2d_control import FlightConfig, flight_arrived, physical_envelope_violation
+from .quad2d_control import FlightConfig, flight_arrived, physical_envelope_violation, flight_config_from_contract
 from .quad2d_rollout import flight_sensor_model, NAMES, GOAL, COLLISION, TIMEOUT, STATE_BOUND, PLANNER_FAILURE
 from .quad2d_mpc import Quad2DMPC, DEFAULTS, numpy_barrier, prediction_residual
 from .quad2d_audit import check_trace
@@ -32,7 +32,7 @@ class FlightPhysicalKernels:
         c = config.robot; x = jnp.zeros(6); obs = jnp.zeros((capacity, 5)); mask = jnp.zeros(capacity, bool)
         noise = jnp.zeros(7); points = jnp.zeros((route_capacity, 2)); rm = jnp.ones(route_capacity, bool)
         start = time.perf_counter()
-        self.prepare = jax.jit(lambda x, o, m, n, key: flight_sensor_model(x, o, m, n, key, steps)).lower(x, obs, mask, noise, jax.random.PRNGKey(0)).compile()
+        self.prepare = jax.jit(lambda x, o, m, n, key: flight_sensor_model(x, o, m, n, key, steps,config.stationary_obstacles)).lower(x, obs, mask, noise, jax.random.PRNGKey(0)).compile()
         def sense(x, truth, xb, ob, xs, os, innovation, k):
             seen = truth.at[:, :2].set(truth[:, :2]+k*c.dt*truth[:, 3:5])-ob+.15*os*innovation[6:].reshape(obs.shape)
             return x-xb+.15*xs*innovation[:6], seen
@@ -133,10 +133,11 @@ def episode(parent, solver, kernels, steps, ordered=False):
 
 
 def run(source, output, method, steps=1600, shard_index=0, shards=1):
-    source = Path(source); root = Path(output); root.mkdir(parents=True, exist_ok=False); config = FlightConfig()
+    source = Path(source); root = Path(output); root.mkdir(parents=True, exist_ok=False)
     sm = json.loads((source/'manifest.json').read_text()); parents = json.loads((source/'scenes.json').read_text())
+    config = flight_config_from_contract(sm['config'])
     if any('waypoint_goals' in p for p in parents):raise ValueError('Use the ordered flight runner; final-goal bypass forbidden')
-    if sm['scenes_sha256'] != sha256(source/'scenes.json') or sm['config'] != asdict(config): raise ValueError('Changed common flight source')
+    if sm['scenes_sha256'] != sha256(source/'scenes.json'): raise ValueError('Changed common flight source')
     if steps < 1 or not 0 <= shard_index < shards or not parents[shard_index::shards]: raise ValueError('Invalid episode/shard budget')
     selected = parents[shard_index::shards]
     solver = Quad2DMPC(len(parents[0]['obstacles']), method, config)
@@ -215,9 +216,10 @@ def audit_episode(data, row, config, gains, waypoint_parent=None):
 
 
 def audit(directory):
-    root = Path(directory); manifest = json.loads((root/'manifest.json').read_text()); config = FlightConfig()
-    if manifest['schema'] != 'oa_cbf_quad2d_default_mpc_development_v1' or manifest['config'] != asdict(config): raise ValueError('Changed MPC physical contract')
+    root = Path(directory); manifest = json.loads((root/'manifest.json').read_text()); config = flight_config_from_contract(manifest['config'])
+    if manifest['schema'] != 'oa_cbf_quad2d_default_mpc_development_v1': raise ValueError('Changed MPC physical contract')
     source = Path(manifest['source']); sm = json.loads((source/'manifest.json').read_text())
+    if flight_config_from_contract(sm['config']) != config: raise ValueError('Changed MPC source physical contract')
     if sha256(source/'manifest.json') != manifest['source_manifest_sha256'] or sm['scenes_sha256'] != sha256(source/'scenes.json'): raise ValueError('Changed source')
     parents = json.loads((source/'scenes.json').read_text())[manifest['shard_index']::manifest['shards']]
     index = json.loads((root/'index.json').read_text()); reports = []

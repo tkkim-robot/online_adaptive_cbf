@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from scipy.stats import qmc
-from .quad2d_control import FlightConfig
+from .quad2d_control import FlightConfig,flight_config_from_contract,normalize_flight_contract
 from .quad2d_features import flight_graph,SCHEMA as GRAPH_SCHEMA
 from .quad2d_rollout import flight_branch,NAMES,GOAL,TIMEOUT,COLLISION
 from .multiscale_scenes import scene as geometry
@@ -56,7 +56,7 @@ def load_gain_bank(dataset,config=None,queries=None):
     complete=json.loads((root/'complete.json').read_text())
     if not complete.get('audit_passed') or complete.get('status')!='completed' or complete['manifest_sha256']!=sha256(root/'manifest.json') or complete['index_sha256']!=sha256(root/'index.json'):
         raise ValueError('Exactly audited gain-bank dataset required')
-    if config is not None and m['config']!=asdict(config):raise ValueError('Gain-bank physical contract mismatch')
+    if config is not None and normalize_flight_contract(m['config'])!=asdict(config):raise ValueError('Gain-bank physical contract mismatch')
     entry=json.loads((root/'index.json').read_text())[0]
     if sha256(root/entry['file'])!=entry['sha256']:raise ValueError('Changed gain-bank shard')
     with np.load(root/entry['file']) as f:
@@ -68,9 +68,9 @@ def load_gain_bank(dataset,config=None,queries=None):
         shard_file=entry['file'],shard_sha256=entry['sha256'],candidates=bank.tolist())
 
 
-def prepare(output,groups=1024,seed=6301,workers=28):
+def prepare(output,groups=1024,seed=6301,workers=28,stationary_obstacles=False):
     if groups<64 or groups%8:raise ValueError('At least64 groups balanced over8families')
-    root=Path(output);root.mkdir(parents=True,exist_ok=False);config=FlightConfig();start=time.perf_counter()
+    root=Path(output);root.mkdir(parents=True,exist_ok=False);config=FlightConfig(stationary_obstacles=stationary_obstacles);start=time.perf_counter()
     rng=np.random.default_rng(seed);assignments={}
     for family in DIVERSE_FAMILIES:
         order=rng.permutation(groups//8)
@@ -79,6 +79,7 @@ def prepare(output,groups=1024,seed=6301,workers=28):
         family=DIVERSE_FAMILIES[i%8];index=i//8;local_seed=seed*100000+i;rng=np.random.default_rng(local_seed+103)
         scene=geometry(local_seed,family);x=np.r_[scene.initial_state[:2],rng.uniform(-.1,.1),rng.uniform(-.25,.25,2),rng.uniform(-.15,.15)].astype(np.float32)
         obs=scene.obstacles.astype(np.float32);goal=scene.goal.astype(np.float32)
+        if config.stationary_obstacles:obs[:,3:5]=0.
         route=plan_route(x[:2],goal,obs,scene.obstacle_mask,config.robot,capacity=64,visibility_batch_nodes=32)
         noise_scale=float(rng.choice([0.,.5,1.,2.]));noise=noise_scale*np.array([.015,.01,.015,.015,.02,.02,.008],np.float32)
         return dict(group_id=f'quad2d_multiscale_v1:{family}:{local_seed}',family=family,seed=local_seed,partition=assignments[family,index],
@@ -87,17 +88,31 @@ def prepare(output,groups=1024,seed=6301,workers=28):
     with ThreadPoolExecutor(max_workers=workers) as pool:records=list(pool.map(create,range(groups)))
     write_json(root/'scenes.json',records);manifest=dict(stage='quad2d_initial_flight_pilot',final_test=False,training_use=True,groups=groups,seed=seed,
         config=asdict(config),source_fingerprint=source_fingerprint(),scenes_sha256=sha256(root/'scenes.json'),elapsed_seconds=time.perf_counter()-start,
-        schema=SCHEMA,capacity=64,route_capacity=64,
+        schema=SCHEMA,capacity=64,route_capacity=64,stationary_physical_obstacles=config.stationary_obstacles,
         distribution='Fresh multiscale geometry across8families and<=16/32/48/64counts. Six-state flight initial pitch±.1,world velocities±.25,rate±.15. Gravity is always world vertical, never rotated with geometry. No outcome filtering or known hero coordinates.',
         split='70/15/15 parent split stratified byfamily before branches; all gains/replicas share parent.',
         limitations='Initial-observation pilot, not visited-state coverage, generalization proof, ground-contact model or final dataset. Static route is not a dynamically feasible witness.')
     write_json(root/'manifest.json',manifest);print(json.dumps(manifest),flush=True)
 
 
+def collection_kernels(config,gains,queries,replicas,horizon,guidance):
+    """The actual label, graph and trace kernels, shared by collection/timing."""
+    if np.asarray(gains).shape != (queries*replicas,2):
+        raise ValueError('Expected the complete gain/replica bank')
+    def one(x,g,o,m,points,rmask,noise,seed,ready,cursor):
+        keys=jax.random.split(jax.random.PRNGKey(seed),replicas);keys=jnp.tile(keys,(queries,1))
+        return jax.vmap(lambda alpha,key:flight_branch(x,g,o,m,alpha,points,rmask,cursor,noise,key,ready,config,horizon,guidance)[0])(jnp.asarray(gains),keys)
+    summaries=jax.jit(jax.vmap(one))
+    graph=jax.jit(jax.vmap(lambda x,g,o,m,p,rm,n,cursor,u,gain:flight_graph(x,g,o,m,p,rm,cursor,u,gain,n,config)))
+    trace=jax.jit(lambda *args:flight_branch(*args,config=config,steps=horizon,guidance=guidance))
+    return summaries,graph,trace
+
+
 def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shard_index=0,shards=1,guidance_horizon=0,gain_dataset=None,noise_clearance_weight=0.,gain_augmentation_seed=None,terminal_transition_distance=0.,performance_target='route'):
-    source=Path(source);root=Path(output);root.mkdir(parents=True,exist_ok=False);config=FlightConfig();start=time.perf_counter()
+    source=Path(source);root=Path(output);root.mkdir(parents=True,exist_ok=False);start=time.perf_counter()
     sm=json.loads((source/'manifest.json').read_text());records=json.loads((source/'scenes.json').read_text())
-    if sm['scenes_sha256']!=sha256(source/'scenes.json') or sm['config']!=asdict(config):raise ValueError('Source contract changed')
+    config=flight_config_from_contract(sm['config'])
+    if sm['scenes_sha256']!=sha256(source/'scenes.json'):raise ValueError('Source contract changed')
     from .quad2d_guidance import GuidanceConfig,NoiseClearanceGuidanceConfig,TerminalGuidanceConfig
     from .quad2d_relabel import conditional_labels,TARGETS as CONDITIONAL_TARGETS
     guidance=GuidanceConfig(horizon=guidance_horizon) if guidance_horizon else None
@@ -125,11 +140,7 @@ def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shar
         canonical,bank_provenance=load_gain_bank(gain_dataset,config,queries if gain_augmentation_seed is None else None)
         if gain_augmentation_seed is not None:canonical,augmentation=augment_gain_bank(canonical,queries,gain_augmentation_seed)
     gains=np.repeat(canonical,replicas,axis=0);Q=len(gains)
-    def one(x,g,o,m,points,rmask,noise,seed,ready,cursor):
-        keys=jax.random.split(jax.random.PRNGKey(seed),replicas);keys=jnp.tile(keys,(queries,1))
-        summary=jax.vmap(lambda alpha,key:flight_branch(x,g,o,m,alpha,points,rmask,cursor,noise,key,ready,config,horizon,guidance)[0])(jnp.asarray(gains),keys)
-        return summary
-    summaries=jax.jit(jax.vmap(one));graph=jax.jit(jax.vmap(lambda x,g,o,m,p,rm,n,cursor,u,gain:flight_graph(x,g,o,m,p,rm,cursor,u,gain,n,config)))
+    summaries,graph,trace_fn=collection_kernels(config,gains,queries,replicas,horizon,guidance)
     manifest=dict(schema=SCHEMA,stage='quad2d_initial_flight_pilot',production_eligible=False,final_test=False,
         source=str(source.resolve()),source_manifest_sha256=sha256(source/'manifest.json'),source_fingerprint=source_fingerprint(),
         config=asdict(config),capacity=64,route_capacity=64,graph_schema=GRAPH_SCHEMA,graph_features=40,
@@ -140,6 +151,12 @@ def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shar
         censoring='Adverse solver/domain/physical bound/collision termination receives explicit task cost1. Otherwise risk cost is negative physical clearance capped at-2. Progress is actual recorded prefix, divided by full horizon cruise distance; no unobserved continuation. Collision negative labels masked on earlier censoring. Any-adverse event labels remain valid.',
         limitations='Initial-observation development pilot only; no flight learned policy, calibration or superiority claimed.')
     if bank_provenance is not None:manifest['frozen_gain_bank']=bank_provenance
+    if sm.get('data_role') in ('pilot','training','comparison'):
+        role=sm['data_role']
+        if sm.get('weight_fit_authorized') is not (role=='training'):
+            raise ValueError('Invalid static source training authorization')
+        manifest.update(data_role=role,weight_fit_authorized=sm['weight_fit_authorized'],
+            training_use=sm['training_use'])
     if sm.get('data_role')=='fresh_predictive_calibration':
         if sm.get('weight_fit_authorized') is not False or sm.get('training_use') is not False:
             raise ValueError('Invalid fresh-calibration reservation')
@@ -158,7 +175,6 @@ def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shar
         from .quad2d_task_targets import contract
         manifest['controller']['performance_target']=contract(performance_target);manifest['targets']=list(manifest['targets']);manifest['targets'][1]=contract(performance_target)['target']
     executable=None;graph_executable=None;trace_executable=None;compile_seconds=0.
-    trace_fn=jax.jit(lambda *args:flight_branch(*args,config=config,steps=horizon,guidance=guidance))
     write_json(root/'manifest.json',manifest);index=[]
     for number,offset in enumerate(range(0,len(records),shard_groups)):
         if number%shards!=shard_index:continue
@@ -258,10 +274,12 @@ def merge(parts,output):
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','collect','merge']);p.add_argument('--output',required=True)
     p.add_argument('--source');p.add_argument('--parts',nargs='+');p.add_argument('--groups',type=int,default=1024);p.add_argument('--seed',type=int,default=6301)
+    p.add_argument('--stationary-obstacles',action='store_true',help='Prepare stationary physical obstacles while retaining noisy observations; collection reads the saved source flag')
     p.add_argument('--workers',type=int,default=28);p.add_argument('--queries',type=int,default=16);p.add_argument('--replicas',type=int,default=4);p.add_argument('--horizon',type=int,default=160)
     p.add_argument('--shard-groups',type=int,default=16);p.add_argument('--shard-index',type=int,default=0);p.add_argument('--shards',type=int,default=1);p.add_argument('--guidance-horizon',type=int,default=0);p.add_argument('--gain-dataset')
     p.add_argument('--noise-clearance-weight',type=float,default=0.);p.add_argument('--gain-augmentation-seed',type=int)
     p.add_argument('--terminal-transition-distance',type=float,default=0.);p.add_argument('--performance-target',choices=['route','terminal_task'],default='route');a=p.parse_args()
-    if a.action=='prepare':prepare(a.output,a.groups,a.seed,a.workers)
+    if a.stationary_obstacles and a.action!='prepare':p.error('--stationary-obstacles belongs to prepare; collect uses its saved source contract')
+    if a.action=='prepare':prepare(a.output,a.groups,a.seed,a.workers,a.stationary_obstacles)
     elif a.action=='merge':merge(a.parts,a.output)
     else:collect(a.source,a.output,a.queries,a.replicas,a.horizon,a.shard_groups,a.shard_index,a.shards,a.guidance_horizon,a.gain_dataset,a.noise_clearance_weight,a.gain_augmentation_seed,a.terminal_transition_distance,a.performance_target)

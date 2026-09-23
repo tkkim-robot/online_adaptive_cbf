@@ -72,6 +72,12 @@ def check_live_statistics(live, stages, calibration, policy):
     ep=finite & (cs<=np.float32(calibration['cs_threshold']))
     risk_ok=ep & (risk<=np.float32(policy.risk_threshold))
     admitted=risk_ok & (event[:,0]<=np.float32(policy.collision_probability_limit)) & (event[:,1]<=np.float32(policy.failure_probability_limit))
+    if getattr(policy,'progress_admission',None):
+        from .quad2d_gain_improvement import difference_statistics
+        center, scale = difference_statistics(mean[...,1],variance[...,1],mean.shape[1]-1)
+        improving = center-np.float32(calibration['progress_delta_quantile'])*scale>0
+        improving[-1]=True
+        admitted &= improving
     actual=np.array([x.sum() for x in (finite,ep,risk_ok,admitted)])
     if not np.array_equal(actual,np.asarray(stages)[:4]):
         raise ValueError('Saved live statistics disagree with the actual query stages')
@@ -83,10 +89,10 @@ def score(directory, bundle, calibration, output, batch=128):
     import jax
     import jax.numpy as jnp
     from .models import predict_ensemble
-    from .quad2d_control import FlightConfig
+    from .quad2d_control import flight_config_from_contract
     from .quad2d_features import flight_graph
     from .quad2d_audit import check_observed_graph
-    from .quad2d_policy import FlightPolicy, FlightPolicyConfig
+    from .quad2d_policy import FlightPolicy, flight_policy_from_contract
     from .quad2d_guidance import TerminalGuidanceConfig
     from .uncertainty import cs_disagreement, worst_member_cvar
 
@@ -95,14 +101,20 @@ def score(directory, bundle, calibration, output, batch=128):
     manifest, index = read(root/'manifest.json'), read(root/'index.json')
     live_statistics = manifest.get('query_statistics_schema') == 'quad2d_live_query_statistics_v1'
     audit = read(root/'independent_replay.json')
-    config = FlightConfig()
+    config = flight_config_from_contract(manifest['config'])
+    physical_source = Path(manifest['source'])
+    source_manifest = read(physical_source/'manifest.json')
+    if (sha256(physical_source/'manifest.json') != manifest['source_manifest_sha256']
+            or flight_config_from_contract(source_manifest['config']) != config):
+        raise ValueError('Changed trajectory physical source contract')
     if (not audit['audit_passed'] or audit['manifest_sha256'] != sha256(root/'manifest.json')
             or audit['index_sha256'] != sha256(root/'index.json') or manifest['config'] != asdict(config)
             or manifest['calibration_sha256'] != sha256(calibration) or manifest['steps'] != 1600
             or manifest['predictive_guidance'] != json.loads(json.dumps(asdict(TerminalGuidanceConfig(noise_clearance_weight=1.))))):
         raise ValueError('Matched audited terminal flight experiment required')
-    policy_config = FlightPolicyConfig(**manifest['policy'])
-    policy = FlightPolicy(bundle, calibration, config, policy_config, TerminalGuidanceConfig(noise_clearance_weight=1.))
+    policy_config = flight_policy_from_contract(manifest['policy'])
+    policy = FlightPolicy(bundle, calibration, config, policy_config,
+        TerminalGuidanceConfig(noise_clearance_weight=1.), record_query_statistics=live_statistics)
     if policy.metadata['graph_features'] != 40 or policy.metadata['weights_sha256'] != manifest['model_weights_sha256']:
         raise ValueError('Matched graph40 weights required')
     candidates = np.asarray(manifest['candidates'], np.float32)
@@ -124,6 +136,10 @@ def score(directory, bundle, calibration, output, batch=128):
         ep = finite & (cs <= cal['cs_threshold'])
         risk_ok = ep & (risk <= policy_config.risk_threshold)
         admitted = risk_ok & (event[..., 0] <= policy_config.collision_probability_limit) & (event[..., 1] <= policy_config.failure_probability_limit)
+        if getattr(policy_config,'progress_admission',None):
+            from .quad2d_gain_improvement import admission
+            improving = jax.vmap(lambda m,v:admission(m,v,cal['progress_delta_quantile'])[0],in_axes=(1,1))(mean[...,1],variance[...,1])
+            admitted &= improving
         stages = jnp.stack([a.sum(axis=1) for a in (finite, ep, risk_ok, admitted)], axis=1)
         return dict(features=features, node_mask=mask, mean=mean[..., 0], variance=variance[..., 0], cs=cs, stages=stages,
             all_mean=mean, all_variance=variance, risk=risk, event=event)
@@ -240,16 +256,18 @@ def checked_scores(directory):
     return report
 
 
-def family_thresholds(records, coverage=.95):
+def family_thresholds(records, coverage=.95, minimum_parents=50):
     from .uncertainty import conformal_threshold
     from .scenes import DIVERSE_FAMILIES
     if set(r['family'] for r in records) != set(DIVERSE_FAMILIES) or len({r['group_id'] for r in records}) != len(records):
         raise ValueError('All eight unique-parent family strata required')
+    if type(minimum_parents) is not int or minimum_parents < 1:
+        raise ValueError('Positive prespecified family count required')
     thresholds = {}
     for family in DIVERSE_FAMILIES:
         scores = [r['maximum_cs'] for r in records if r['family'] == family]
-        if len(scores) < 50:
-            raise ValueError('At least50 independent trajectory parents per family required')
+        if len(scores) < minimum_parents:
+            raise ValueError(f'At least{minimum_parents} independent trajectory parents per family required')
         thresholds[family] = conformal_threshold(scores, coverage)
         if thresholds[family]['status'] != 'calibrated':
             raise ValueError('Insufficient finite-sample trajectory calibration')
@@ -297,7 +315,7 @@ def check_fresh_lineage(base, reports):
             raise ValueError('Fresh trajectory candidate bank changed')
 
 
-def fit(scores, base_calibration, output, coverage=.95):
+def fit(scores, base_calibration, output, coverage=.95, minimum_family_parents=50):
     base = read(base_calibration)
     if base['schema'] not in BASE_SCHEMAS:
         raise ValueError('A frozen original predictive calibration is required')
@@ -316,13 +334,14 @@ def fit(scores, base_calibration, output, coverage=.95):
         raise ValueError('Wrong frozen predictive transform')
     check_fresh_lineage(base, reports)
     records = [row for report in reports for row in report['records']]
-    thresholds = family_thresholds(records, coverage)
+    thresholds = family_thresholds(records, coverage, minimum_family_parents)
     result = deepcopy(base)
     result.update(schema=SCHEMA, stage='frozen_policy_trajectory_disagreement_pilot', production_eligible=False,
         predictive_calibration_schema=base['schema'],
         cs_gate=dict(threshold=max(t['threshold'] for t in thresholds.values()), status='calibrated', coverage=coverage,
             n_groups=len(records), aggregation='maximum_of_eight_within_family_split_conformal_thresholds', by_family=thresholds),
         trajectory_gate=dict(base_calibration=str(Path(base_calibration).resolve()), base_calibration_sha256=sha256(base_calibration),
+            minimum_family_parents=minimum_family_parents,
             score_reports=[dict(directory=str(Path(p).resolve()), sha256=sha256(Path(p)/'scores.json')) for p in scores],
             policy=reference['policy'], predictive_guidance=reference['predictive_guidance'], candidates=reference['candidates'], steps=reference['steps'],
             statistic_source=reference.get('statistic_source','exact_stage_replay'),
@@ -348,6 +367,8 @@ def validate_runtime(info, policy, guidance):
     for key in ('weights_sha256', 'dataset_manifest_sha256', 'targets', 'events', 'robot', 'controller', 'variance_scale', 'event_calibration', 'gain_domain', 'horizon_steps'):
         if info[key] != base[key]:
             raise ValueError('Trajectory gate changed the frozen predictive contract')
+    if info.get('gain_improvement') != base.get('gain_improvement'):
+        raise ValueError('Trajectory gate changed the frozen progress admission calibration')
     if base['schema'] == FRESH_SCHEMA:
         if any(info.get(key) != base.get(key) for key in FRESH_BINDINGS):
             raise ValueError('Trajectory gate changed the fresh predictive contract')
@@ -369,7 +390,7 @@ def validate_runtime(info, policy, guidance):
         records.extend(report['records'])
         reports.append(report)
     check_fresh_lineage(base, reports)
-    thresholds = family_thresholds(records, info['cs_gate']['coverage'])
+    thresholds = family_thresholds(records, info['cs_gate']['coverage'], contract.get('minimum_family_parents', 50))
     if ([r['group_id'] for r in records] != contract['group_ids'] or info['cs_gate']['by_family'] != thresholds
             or info['cs_gate']['threshold'] != max(t['threshold'] for t in thresholds.values())):
         raise ValueError('Trajectory threshold or group lineage changed')
@@ -384,5 +405,7 @@ if __name__ == '__main__':
     s.add_argument('--batch', type=int, default=128)
     f = sub.add_parser('fit'); f.add_argument('--scores', nargs='+', required=True)
     f.add_argument('--base-calibration', required=True); f.add_argument('--output', required=True); f.add_argument('--coverage', type=float, default=.95)
+    f.add_argument('--minimum-family-parents', type=int, default=50,
+                   help='Family count reserved before collection; finite-sample rank must still be attainable')
     args = vars(p.parse_args()); command = args.pop('command')
     (score if command == 'score' else fit)(**args)

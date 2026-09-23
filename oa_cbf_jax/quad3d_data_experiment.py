@@ -120,8 +120,22 @@ def prepare(output,version=94):
 def source(src,slot):
     root=Path(src);m=read(root/'manifest.json');assert m['parents_sha256']==sha256(root/'parents.json')
     pp=read(root/'parents.json');assert len({p['id'] for p in pp})==m['parents']
-    assert {n:sha256(Path(__file__).parent/n) for n in RUNTIME}==m['source_files']
+    verify_runtime(m)
     return m,[p for p in pp if (p['index']//12)%4==slot]
+
+
+def verify_runtime(manifest):
+    files=manifest['source_files']
+    if not set(RUNTIME)<=set(files) or any(Path(n).name!=n for n in files):
+        raise ValueError('Incomplete or invalid acquisition runtime binding')
+    if {n:sha256(Path(__file__).parent/n) for n in files}!=files:
+        raise ValueError('Changed acquisition runtime')
+
+
+def storage_floor(manifest):
+    value=float(manifest.get('storage_floor_gib',100. if manifest.get('version')==106 else 125.))
+    if not np.isfinite(value) or value<100.:raise ValueError('Invalid acquisition storage reserve')
+    return value
 
 
 def acquire(src,output,slot):
@@ -129,7 +143,7 @@ def acquire(src,output,slot):
     if len(pp)%12:raise ValueError('Acquisition must preserve the qualified B12 signature')
     fn=exe=None;duration=0.;rows=[]
     for start_index in range(0,len(pp),12):
-        if shutil.disk_usage(out).free/2**30<(100. if m['version']==106 else 125.):raise ValueError('Learning storage reserve reached')
+        if shutil.disk_usage(out).free/2**30<storage_floor(m):raise ValueError('Learning storage reserve reached')
         batch=pp[start_index:start_index+12];host=observation_arrays(batch,m['acquisition_steps'])
         if m.get('adaptive_gain_trace',False):
             host+= (np.zeros(len(batch)),np.zeros((len(batch),12)),np.array([p['gain_schedule'] for p in batch]))
@@ -152,7 +166,7 @@ def acquire(src,output,slot):
 
 def acquisition_benchmark(src,output,slot):
     out=Path(output);out.mkdir(parents=True,exist_ok=False);m,pp=source(src,slot);c=control_config(m['config'])
-    assert m['version'] in (104,106)
+    if m['schema']!=data.WIDE_SCHEMA:raise ValueError('Wide-gain history benchmark required')
     batch=pp[:12];host=observation_arrays(batch,220)+(np.zeros(12),np.zeros((12,12)),np.array([p['gain_schedule'] for p in batch]))
     args=to_device(host);fn,exe,cold=compile_fn(jax.vmap(make_observed_rollout(220,c,True)),args)
     result,timing=measure(exe,args,repeats=3);s,t=jax.device_get(result)
@@ -165,7 +179,7 @@ def acquisition_benchmark(src,output,slot):
 def audit_acquisition(output,workers=12):
     out=Path(output);m=read(out/'manifest.json');sm=read(Path(m['source'])/'manifest.json');pp=read(Path(m['source'])/'parents.json');by={p['id']:p for p in pp};rows=read(out/'index.json')
     assert m['source_sha256']==sha256(Path(m['source'])/'manifest.json') and m['index_sha256']==sha256(out/'index.json')
-    assert m['source_files']==sm['source_files']=={n:sha256(Path(__file__).parent/n) for n in RUNTIME}
+    assert m['source_files']==sm['source_files'];verify_runtime(sm)
     from .quad3d_exploration import audit_exploration
     auditor=audit_exploration if m.get('adaptive_gain_trace',False) else audit_parent
     audited=[]
@@ -220,7 +234,7 @@ def collect(src,acquisition,output,slot):
     out=Path(output);out.mkdir(parents=True,exist_ok=False);m,pp,index=acquisition_inputs(src,acquisition,slot);c=control_config(m['config'])
     queries=[];missing=[];exe=graph_exe=None;total_steps=0;duration=0.;begin=time.perf_counter()
     for p,row in zip(pp,index,strict=True):
-        if shutil.disk_usage(out).free/2**30<(100. if m['version']==106 else 125.):raise ValueError('Learning storage reserve reached')
+        if shutil.disk_usage(out).free/2**30<storage_floor(m):raise ValueError('Learning storage reserve reached')
         assert row['sha256']==sha256(Path(acquisition)/row['file'])
         with np.load(Path(acquisition)/row['file']) as z:acquired=dict(z)
         for tick in m['snapshot_ticks']:
@@ -294,7 +308,7 @@ def audit_query(arguments):
 def audit_labels(output,workers=12):
     out=Path(output);m=read(out/'manifest.json');sm=read(Path(m['source'])/'manifest.json');pp=read(Path(m['source'])/'parents.json');by={p['id']:p for p in pp}
     assert m['source_sha256']==sha256(Path(m['source'])/'manifest.json') and m['queries_sha256']==sha256(out/'queries.json')
-    assert m['source_files']==sm['source_files']=={n:sha256(Path(__file__).parent/n) for n in RUNTIME}
+    assert m['source_files']==sm['source_files'];verify_runtime(sm)
     assert m['acquisition_manifest_sha256']==sha256(Path(m['acquisition'])/'manifest.json')
     if sm['schema']==data.WIDE_SCHEMA:
         am=read(Path(m['acquisition'])/'manifest.json')

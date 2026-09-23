@@ -27,8 +27,13 @@ class UnicycleConfig:
     guidance_wide_turns: bool = False
     guidance_detour: bool = False
     guidance_turn_return: bool = False
+    # False preserves historical experiments; static benchmark manifests must
+    # explicitly set True. Sensor velocity error then never moves the plant.
+    stationary_obstacles: bool = False
 
     def __post_init__(self):
+        if not isinstance(self.stationary_obstacles, bool):
+            raise ValueError('Stationary-obstacle contract must be boolean')
         if not all(math.isfinite(value) for key,value in asdict(self).items() if key!='guidance_kernel'):
             raise ValueError("Configuration must be finite")
         for key in ("dt", "radius", "a_max", "w_max", "v_max", "qp_tolerance", "goal_tolerance"):

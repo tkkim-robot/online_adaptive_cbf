@@ -13,6 +13,7 @@ from scipy.stats import qmc
 
 from .adaptive import DevelopmentPolicy,NonlearnedPolicy,PolicyConfig,SOURCE_NAMES,BACKUP,LEARNED
 from .config import UnicycleConfig
+from .unicycle_inputs import source_robot
 from .closed_loop import make_closed_loop,PLANNER_FAILURE
 from .cli import sanitize
 from .dataset import source_fingerprint,sha256
@@ -72,8 +73,9 @@ def run(source,output,bundle=None,calibration=None,mode='learned',queries=64,sho
         policy=DevelopmentPolicy(bundle,calibration,config,robot=robot,allow_development=True)
     else:
         if robot is None:
-            robot=UnicycleConfig(**json.loads(Path(calibration).read_text())['robot']) if calibration else UnicycleConfig()
+            robot=UnicycleConfig(**json.loads(Path(calibration).read_text())['robot']) if calibration else source_robot(source)
         policy=NonlearnedPolicy(config,robot)
+    source_robot(source,policy.robot)
     gains=candidate_pool(queries,candidate_upper,candidate_design)
     if mode in ('learned','ungated') and (np.any(gains<np.float32(policy.gain_domain['lower'])) or
                                         np.any(gains>np.float32(policy.gain_domain['upper']))):
@@ -101,7 +103,7 @@ def run(source,output,bundle=None,calibration=None,mode='learned',queries=64,sho
         manifest['conditions']+=' Ordered waypoint contract: '+CONTRACT['name']
         manifest['route_progress_scope']='Local current-leg coordinate; do not sum as actual mission travel or proof of earlier visits.'
         write_json(root/'manifest.json',manifest)
-    rows=[];timings=[];begin=time.perf_counter()
+    rows=[];timings=[];begin=time.perf_counter();compiled=None;compile_seconds=0.
     for offset in range(0,len(records),batch):
         chosen=records[offset:offset+batch];valid=len(chosen);chosen+= [chosen[-1]]*(batch-valid)
         arrays=[np.stack([r['scene'][key] for r in chosen]) for key in ('initial_state','goal','obstacles','obstacle_mask')]
@@ -115,9 +117,13 @@ def run(source,output,bundle=None,calibration=None,mode='learned',queries=64,sho
         floats=lambda a:jnp.asarray(a,dtype=bool if a.dtype==bool else jnp.float32)
         inputs=(policy.params,policy.calibration,*(floats(a) for a in arrays),jnp.asarray(gains),floats(points),floats(masks),floats(noise),jnp.asarray(keys),jnp.asarray(ready))
         if ordered_waypoints:inputs+=(jnp.asarray([r['waypoint_count'] for r in chosen],jnp.int32),)
-        tick=time.perf_counter();summary,trace,truth=runner(*inputs);jax.block_until_ready(summary)
+        if compiled is None:
+            tick=time.perf_counter();compiled=runner.lower(*inputs).compile()
+            compile_seconds=time.perf_counter()-tick
+            print(json.dumps(dict(stage='compiled',seconds=compile_seconds)),flush=True)
+        tick=time.perf_counter();summary,trace,truth=compiled(*inputs);jax.block_until_ready((summary,trace,truth))
         elapsed=time.perf_counter()-tick;summary,trace,truth=jax.device_get((summary,trace,truth))
-        timings.append(dict(offset=offset,seconds=elapsed,includes_compile=offset==0))
+        timings.append(dict(offset=offset,seconds=elapsed,includes_compile=False))
         np.savez_compressed(root/f'traces_{offset:05d}.npz',**{k:v[:valid] for k,v in trace.items()},
                             true_initial_state=truth['initial_state'][:valid],true_obstacles=truth['obstacles'][:valid],
                             scene_id=np.array([r['scene']['scene_id'] for r in chosen[:valid]]),noise=noise[:valid],key=keys[:valid])
@@ -145,7 +151,9 @@ def run(source,output,bundle=None,calibration=None,mode='learned',queries=64,sho
     aggregate=dict(groups=len(evaluated),outcomes={s:sum(r['status']==s for r in evaluated) for s in sorted({r['status'] for r in evaluated})},
          applied_sources={name:sum(r['applied_source_counts'][name] for r in evaluated) for name in SOURCE_NAMES.values()},
          selection_attempts=sum(r['selection_attempts'] for r in evaluated),selection_rejections=sum(r['selection_rejections'] for r in evaluated))
-    write_json(root/'summary.json',dict(aggregate=aggregate,timings=timings,elapsed_seconds=time.perf_counter()-begin,jit_signatures=runner._cache_size()))
+    if runner._cache_size()!=0:raise RuntimeError('Unexpected implicit closed-loop compilation')
+    write_json(root/'summary.json',dict(aggregate=aggregate,timings=timings,elapsed_seconds=time.perf_counter()-begin,
+        explicit_compile_count=int(compiled is not None),compile_seconds=compile_seconds,jit_signatures=runner._cache_size()))
     print(json.dumps(dict(stage='completed',aggregate=aggregate,elapsed_seconds=time.perf_counter()-begin)),flush=True)
 
 

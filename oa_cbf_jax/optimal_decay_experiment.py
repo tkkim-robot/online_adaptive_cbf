@@ -18,6 +18,7 @@ import numpy as np
 
 from .cli import sanitize
 from .config import UnicycleConfig
+from .unicycle_inputs import source_robot
 from .controllers import NativeOSQP
 from .native_proxqp import NativeProxQP
 from .native_clarabel import NativeClarabel
@@ -69,11 +70,12 @@ def make_kernels(robot,config,steps):
             jax.jit(jax.vmap(advance,in_axes=(None,)+(0,)*8)))
 
 
-def run(source,output,robot_config,formulation='repo',alpha1=.5,alpha2=.5,penalty=1e4,
+def run(source,output,robot_config=None,formulation='repo',alpha1=.5,alpha2=.5,penalty=1e4,
         noise_scale=1.,batch=32,steps=800,limit=None,backend='osqp'):
     if backend not in ('osqp','proxqp','clarabel'):raise ValueError('Unknown native solver')
     root=Path(output);root.mkdir(parents=True,exist_ok=False)
-    robot=UnicycleConfig(**json.loads(Path(robot_config).read_text()))
+    requested=UnicycleConfig(**json.loads(Path(robot_config).read_text())) if robot_config else None
+    robot=source_robot(source,requested)
     config=OptimalDecayConfig(formulation,alpha1,alpha2,penalty)
     records=json.loads((Path(source)/'scenes.json').read_text())
     if limit is not None:
@@ -173,7 +175,8 @@ def run(source,output,robot_config,formulation='repo',alpha1=.5,alpha2=.5,penalt
 
 if __name__=='__main__':
     p=argparse.ArgumentParser()
-    for name in ('source','output','robot-config'):p.add_argument('--'+name,required=True)
+    for name in ('source','output'):p.add_argument('--'+name,required=True)
+    p.add_argument('--robot-config',help='Optional method config; physical settings must match the frozen source')
     p.add_argument('--formulation',choices=['repo','hocbf'],default='repo')
     p.add_argument('--alpha1',type=float,default=.5);p.add_argument('--alpha2',type=float,default=.5);p.add_argument('--penalty',type=float,default=1e4)
     p.add_argument('--noise-scale',type=float,default=1.);p.add_argument('--batch',type=int,default=32)

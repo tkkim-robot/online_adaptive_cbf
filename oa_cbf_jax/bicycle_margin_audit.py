@@ -25,19 +25,23 @@ def fused_linear_observation(position,velocity,duration):
     return result.astype(float)
 
 
-def predicted_observation(state, control, obstacles, config=BicycleControlConfig()):
+def predicted_observation(state, control, obstacles, config=BicycleControlConfig(), *, linear_fused=True):
     """Independent complex-plane held-input displacement, then sensor rounding."""
     x=np.asarray(state,float);u=np.asarray(control,float);o=np.asarray(obstacles,float);dt=config.robot.dt
     distance=dt*(x[...,3]+.5*dt*u[...,0]);angle=u[...,1]*distance/config.robot.rear_axle_distance
     shift=distance*(1+1j*u[...,1])*np.exp(1j*(x[...,2]+angle/2))*np.sinc(angle/(2*np.pi))
     y=x.copy();y[...,0]+=shift.real;y[...,1]+=shift.imag;y[...,2]+=angle;y[...,3]+=dt*u[...,0]
-    future=o.copy();future[...,:2]=fused_linear_observation(o[...,:2],o[...,3:5],dt)
+    future=o.copy()
+    # CPU fusion and GPU separate multiply/add are both legal FP64 evaluation
+    # paths. Their FP32 sensor conversions can differ at an exact midpoint.
+    future[...,:2]=(fused_linear_observation(o[...,:2],o[...,3:5],dt) if linear_fused
+                    else (o[...,:2]+dt*o[...,3:5]).astype(np.float32).astype(float))
     return y.astype(np.float32).astype(float),future.astype(np.float32).astype(float)
 
 
-def reference_margin(state,control,obstacles,mask,noise,config=BicycleControlConfig()):
+def reference_margin(state,control,obstacles,mask,noise,config=BicycleControlConfig(), *, linear_fused=True):
     x=np.asarray(state,float);u=np.asarray(control,float);o=np.asarray(obstacles,float);n=np.asarray(noise,float)
-    y,future=predicted_observation(x,u,o,config);dt=config.robot.dt;lr=config.robot.rear_axle_distance
+    y,future=predicted_observation(x,u,o,config,linear_fused=linear_fused);dt=config.robot.dt;lr=config.robot.rear_axle_distance
     rounding=8*np.finfo(np.float32).eps*(1+np.maximum.reduce([np.max(abs(x),axis=-1),np.max(abs(y),axis=-1),np.max(abs(o),axis=(-2,-1)),np.max(abs(future),axis=(-2,-1))]))
     ev=.15*n[...,2]+n[...,2]+rounding;et=1.15*n[...,1]+rounding
     turn=abs(u[...,1])*dt/lr
@@ -65,6 +69,16 @@ def audit_margin_trace(d,config=BicycleControlConfig()):
     if not len(indices):return dict(applied=0,checked_next_observations=0,positive_bounds=0)
     r=reference_margin(d['observed_state'][indices],d['control'][indices],d['observed_obstacles'][indices],mask,d['noise'],config)
     saved=d['guidance_next_observation_lower'][indices]
+    alternate_count=0
+    different=~np.isclose(saved,r['lower'],atol=2e-10,rtol=2e-10)
+    if np.any(different):
+        alternate=reference_margin(d['observed_state'][indices[different]],d['control'][indices[different]],
+            d['observed_obstacles'][indices[different]],mask,d['noise'],config,linear_fused=False)
+        # Recompute the entire bound from the separately rounded observation;
+        # never widen its tolerance or choose arbitrary neighboring values.
+        np.testing.assert_allclose(saved[different],alternate['lower'],atol=2e-10,rtol=2e-10)
+        alternate_count=int(np.sum(different))
+        for key in r:r[key][different]=alternate[key]
     np.testing.assert_allclose(saved,r['lower'],atol=2e-10,rtol=2e-10)
     assert np.all(~d['guidance_margin_preferred'][indices] | (saved>=0))
     if np.all(d['noise']==0):assert not np.any(d['guidance_margin_preferred'])
@@ -84,4 +98,5 @@ def audit_margin_trace(d,config=BicycleControlConfig()):
         h=reference_barrier(next_x[valid,None,:],next_o[valid][:,mask],config)
         if not np.all(np.isfinite(h)) or np.any(np.min(h,axis=-1)<saved[present][valid]-1e-10):raise ValueError('Observed barrier below recorded lower bound')
     return dict(applied=len(indices),checked_next_observations=len(k),positive_bounds=int(np.sum(saved>=0)),
-        preferred=int(np.sum(d['guidance_margin_preferred'][indices])),no_positive_profile=int(np.sum(d['guidance_margin_profiles'][indices]==0)))
+        preferred=int(np.sum(d['guidance_margin_preferred'][indices])),no_positive_profile=int(np.sum(d['guidance_margin_profiles'][indices]==0)),
+        separate_linear_rounding_checks=alternate_count)

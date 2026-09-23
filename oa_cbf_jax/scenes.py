@@ -1,6 +1,6 @@
 """Deterministic scene records; known demos and random families stay distinct."""
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 import numpy as np
 
 
@@ -16,6 +16,13 @@ class Scene:
 
     def json_record(self):
         return {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in asdict(self).items()}
+
+
+def stationary_scene(scene):
+    """Keep the generated layout/identity and freeze its physical velocities."""
+    obstacles=scene.obstacles.copy()
+    obstacles[:,3:5]=0.
+    return replace(scene,obstacles=obstacles)
 
 
 def fixture(name, capacity=8):

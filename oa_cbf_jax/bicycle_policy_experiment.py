@@ -61,13 +61,17 @@ def prepare(output,bundle,prediction_fit,groups=768,seed=6701):
 
 def collect(source,bundle,prediction_fit,output,phase,gate=None,shard=0,shards=4,steps=1600,limit_batches=None):
     root=Path(output);root.mkdir(parents=True,exist_ok=False);source=Path(source);sm=read(source/'manifest.json');parents=read(source/'scenes.json')
-    if sm['weight_fit_authorized'] is not False or sha256(source/'scenes.json')!=sm['scenes_sha256'] or sm['prediction_fit_sha256']!=sha256(prediction_fit) or sm['weights_sha256']!=read(Path(bundle)/'manifest.json')['weights_sha256']:
+    acquisition=phase=='training_acquisition'
+    if acquisition:
+        from .bicycle_acquisition_contracts import validate_source
+        validate_source(source)
+    if (sm['weight_fit_authorized'] is not acquisition or sha256(source/'scenes.json')!=sm['scenes_sha256'] or sm['prediction_fit_sha256']!=sha256(prediction_fit) or sm['weights_sha256']!=read(Path(bundle)/'manifest.json')['weights_sha256']):
         raise ValueError('Changed fresh policy source or learned lineage')
-    if phase not in ('gate_calibration','policy_audit') or not 0<=shard<shards:raise ValueError('Invalid policy phase/worker')
+    if phase not in ('gate_calibration','policy_audit','training_acquisition') or not 0<=shard<shards:raise ValueError('Invalid policy phase/worker')
     indices=sm['phase_order'][phase][shard::shards]
     if limit_batches is not None:indices=indices[:8*limit_batches]
     if not indices or len(indices)%8 or steps<1:raise ValueError('Fixed full batch8 required')
-    reference=phase=='gate_calibration';policy=BicycleSelector(bundle,prediction_fit,gate,reference_recording=reference)
+    reference=phase=='gate_calibration';policy=BicycleSelector(bundle,prediction_fit,gate,reference_recording=reference,config=BicyclePolicyConfig(**sm['policy_config']))
     if sm.get('controller',policy.metadata['controller'])!=policy.metadata['controller'] or (policy.guidance.observation_margin and 'controller' not in sm):
         raise ValueError('Fresh source/learned guidance semantics mismatch')
     validate_routing_contract(sm,policy.metadata)
@@ -96,6 +100,10 @@ def collect(source,bundle,prediction_fit,output,phase,gate=None,shard=0,shards=4
                 first_x=np.asarray(p['first_x'],np.float32),first_o=np.asarray(p['first_o'],np.float32),bias_x=np.asarray(p['bias_x'],np.float32),bias_o=np.asarray(p['bias_o'],np.float32),noise=np.asarray(p['noise'],np.float32),key=np.array(jax.random.PRNGKey(p['seed']+4))))
         values={key:np.stack([row[key] for row in rows]) for key in FIELDS};state=values['initial'].copy();cursor=values['cursor'].copy();previous_control=np.zeros((8,2),np.float32);previous_gain=values['alpha'].copy()
         alive=np.ones(8,bool);histories=[[] for _ in range(8)];status=np.full(8,TIMEOUT,int)
+        motion_history=None
+        if policy.motion_history:
+            from .bicycle_motion_runtime import ObservationHistory
+            motion_history=ObservationHistory(8,64,c.robot.dt)
         def observation_arguments(t):
             raw=(state,values['obstacles'],values['mask'],values['bias_x'],values['bias_o'],values['noise'],values['key'],np.int32(t),values['first_x'],values['first_o'])
             return tuple(jnp.asarray(v,dtype=jnp.float64 if i in (0,1) else None) for i,v in enumerate(raw))
@@ -103,7 +111,11 @@ def collect(source,bundle,prediction_fit,output,phase,gate=None,shard=0,shards=4
             t=time.monotonic();observation_exe=observation_fn.lower(*observation_arguments(0)).compile();compile_seconds+=time.monotonic()-t
         for tick in range(steps):
             current,seen_x,seen_o,ix,io=jax.device_get(observation_exe(*observation_arguments(tick)))
-            selection=jax.tree.map(np.asarray,policy.predict(seen_x,values['goal'],seen_o,values['mask'],values['points'],values['route_mask'],cursor,previous_control,previous_gain,values['noise']))
+            history_arguments={}
+            if motion_history is not None:
+                past,elapsed=motion_history.observe(seen_o,tick)
+                history_arguments=dict(past_positions=past,history_elapsed=elapsed)
+            selection=jax.tree.map(np.asarray,policy.predict(seen_x,values['goal'],seen_o,values['mask'],values['points'],values['route_mask'],cursor,previous_control,previous_gain,values['noise'],**history_arguments))
             step_rows=[dict(rows[i],initial=state[i],obstacles=current[i],alpha=selection['controller_gain'][i],cursor=cursor[i],first_x=seen_x[i],first_o=seen_o[i]) for i in range(8)]
             arguments=[episode_args(r) for r in step_rows];arguments=tuple(jnp.stack([a[k] for a in arguments]) for k in range(len(FIELDS)))
             if physical_exe is None:
@@ -128,6 +140,10 @@ def collect(source,bundle,prediction_fit,output,phase,gate=None,shard=0,shards=4
             entry=dict(file=filename,sha256=sha256(root/filename),source_index=source_index,group_id=parents[source_index]['group_id'],family=parents[source_index]['family'],status=NAMES[status[i]],status_code=int(status[i]),steps=count,queries=len(histories[i]),
                 maximum_cs=float(np.max(history['cs_score'])),uncertainty_fallback_queries=int(history['uncertainty_fallback'].sum()),learned_queries=int(np.sum(history['selected_index']>=0)),
                 applied_gain_changes=int(np.sum(history['active']&(history['controller_gain']!=history['previous_gain']))))
+            if 'incumbent_progress_hold' in history:
+                entry.update(incumbent_progress_hold_queries=int(history['incumbent_progress_hold'].sum()),
+                    incumbent_witness_queries=int(history['incumbent_witness_checked'].sum()),
+                    incumbent_recovery_queries=int(np.sum(history['incumbent_witness_checked']&~history['incumbent_witness_feasible'])))
             index.append(entry)
         write_json(root/'index.json',index);print(json.dumps(dict(completed_parents=len(index),total_parents=len(indices),physical_steps=sum(e['steps'] for e in index),elapsed_seconds=time.monotonic()-start)),flush=True)
     caches=dict(observation=observation_fn._cache_size(),physical=physical_fn._cache_size(),policy=policy._function._cache_size())
@@ -144,6 +160,9 @@ def validate_routing_contract(source_manifest,metadata):
 def audit(directory,workers=12):
     from .bicycle_policy_audit import audit_one
     root=Path(directory);m=read(root/'manifest.json');source=Path(m['source']);sm=read(source/'manifest.json');parents=read(source/'scenes.json');index=read(root/'index.json')
+    if m['phase']=='training_acquisition':
+        from .bicycle_acquisition_contracts import validate_source
+        validate_source(source)
     if sha256(source/'manifest.json')!=m['source_manifest_sha256'] or sha256(source/'scenes.json')!=sm['scenes_sha256'] or sha256(m['prediction_fit'])!=m['prediction_fit_sha256']:raise ValueError('Changed policy source/fit')
     if 'bundle_manifest_sha256' in m and (m['bundle_manifest_sha256']!=sha256(Path(m['bundle'])/'manifest.json') or m['bundle_manifest_sha256']!=read(m['prediction_fit'])['bundle_manifest_sha256']):raise ValueError('Changed numerical inference bundle')
     validate_routing_contract(sm,read(Path(m['bundle'])/'manifest.json'))
@@ -154,6 +173,8 @@ def audit(directory,workers=12):
     from .bicycle_guidance import guidance_from_controller
     margin=guidance_from_controller(read(m['prediction_fit'])['controller']).observation_margin
     if margin and any('margin' not in r for r in results):raise ValueError('Missing applied observation-margin audit')
+    if m['policy_config'].get('incumbent_progress',False) and m['phase']!='gate_calibration' and any(not r.get('incumbent',{}).get('incumbent_witness_audit_passed') for r in results):
+        raise ValueError('Missing independent incumbent witness audit')
     result=dict(audit_passed=True,manifest_sha256=sha256(root/'manifest.json'),index_sha256=sha256(root/'index.json'),all_physical_prefixes_replayed=True,all_current_gain_rows_checked=True,all_policy_graphs_checked=True,all_live_gate_decisions_checked=True,all_recorded_margin_bounds_checked=margin,
         parents=len(index),physical_steps=sum(r['steps'] for r in results),rows=results)
     write_json(root/'independent_replay.json',result);print(json.dumps({k:v for k,v in result.items() if k!='rows'}),flush=True)

@@ -89,9 +89,9 @@ def load_data(dataset):
     return manifest,data,mean,std
 
 
-def training_kernels(mean,std,radius,seed=901,*,state_dim=4,prediction_fn=train_prediction):
-    require_x64();model=BarrierNet();optimizer=optax.adam(1e-3)
-    params=model.init(jax.random.PRNGKey(seed),jnp.zeros(25),jnp.zeros(state_dim),jnp.zeros(2),jnp.zeros(2))['params']
+def training_kernels(mean,std,radius,seed=901,*,state_dim=4,goal_dim=2,control_dim=2,model=None,prediction_fn=train_prediction):
+    require_x64();model=BarrierNet() if model is None else model;optimizer=optax.adam(1e-3)
+    params=model.init(jax.random.PRNGKey(seed),jnp.zeros(25),jnp.zeros(state_dim),jnp.zeros(goal_dim),jnp.zeros(control_dim))['params']
     def losses(params,batch):
         z,ctx,ref,label,mask=batch
         pred,p=jax.vmap(lambda z,c,u:prediction_fn(model,params,z,c,u,mean,std,radius))(z,ctx,ref)
@@ -117,13 +117,32 @@ def batches(data,indices):
     return tuple(jnp.asarray(a.reshape((-1,64)+a.shape[1:]),jnp.float64) for a in arrays)
 
 
-def benchmark(dataset,output,samples=128,*,flight=False):
-    require_x64();manifest,data,mean,std=load_data(dataset)
+def method_details(manifest,*,flight=False,variant=None):
+    """Only dimensions/architecture change; all native training settings stay fixed."""
     options={}
-    if flight:
+    name='unicycle';state_dim=4
+    if variant is not None:
+        if flight:raise ValueError('Choose one native robot model')
+        from .barriernet_variants import BarrierNetVariant,train_prediction as variant_prediction
+        if variant not in ('Quad3D','KinematicBicycle2D_DPCBF'):raise ValueError('Unknown native variant')
+        name='quad3d' if variant=='Quad3D' else 'bicycle'
+        options=dict(model=BarrierNetVariant(variant),state_dim=6 if name=='quad3d' else 4,
+            goal_dim=3 if name=='quad3d' else 2,control_dim=4 if name=='quad3d' else 2,prediction_fn=variant_prediction)
+        architecture=('5x[5->512tanh->128tanh->128tanh], per-obstacle2sigmoid*4, mean pooling, 141->128tanh->128tanh->4 residual control'
+            if name=='quad3d' else '5x[5->256ReLU->64ReLU], per-obstacle1sigmoid*4, mean pooling, 72->64ReLU->2 residual control')
+    elif flight:
         from .quad2d_barriernet import train_prediction as flight_prediction
         options=dict(state_dim=6,prediction_fn=flight_prediction)
-        if manifest['schema']!='barriernet_quad2d_training_v1':raise ValueError('Wrong flight training data')
+        name='quad2d';state_dim=6
+    if variant is None:
+        architecture=f'5x[5->256ReLU->64ReLU], per-obstacle2sigmoid*4, mean pooling, [64+{state_dim}+2+2]->64ReLU->2 residual control'
+    if manifest['schema']!=f'barriernet_{name}_training_v1':raise ValueError('Wrong native training data')
+    return options,f'barriernet_{name}_jax_v1',architecture
+
+
+def benchmark(dataset,output,samples=128,*,flight=False,variant=None):
+    require_x64();manifest,data,mean,std=load_data(dataset)
+    options,_,_=method_details(manifest,flight=flight,variant=variant)
     carry,step,_,_=training_kernels(jnp.asarray(mean),jnp.asarray(std),manifest['radius'],**options)
     batch=tuple(x[0] for x in batches(data,np.flatnonzero((data['split']==0)&data['valid'])[:64]))
     begin=time.perf_counter();exe=step.lower(carry,batch).compile();carry,value=exe(carry,batch);jax.block_until_ready((carry,value));cold=time.perf_counter()-begin
@@ -138,16 +157,12 @@ def benchmark(dataset,output,samples=128,*,flight=False):
     write_json(output,report);print(json.dumps(report),flush=True)
 
 
-def train(dataset,output,*,flight=False):
+def train(dataset,output,*,flight=False,variant=None):
     require_x64();root=Path(output);root.mkdir(parents=True,exist_ok=False)
     audit=json.loads((Path(dataset)/'independent_audit.json').read_text())
     if not audit['audit_passed'] or audit['manifest_sha256']!=sha256(Path(dataset)/'manifest.json'):raise ValueError('Independent dataset audit required')
     manifest,data,mean,std=load_data(dataset);radius=manifest['radius'];seed=901
-    options={}
-    if flight:
-        from .quad2d_barriernet import train_prediction as flight_prediction
-        options=dict(state_dim=6,prediction_fn=flight_prediction)
-        if manifest['schema']!='barriernet_quad2d_training_v1':raise ValueError('Wrong flight training data')
+    options,schema,architecture=method_details(manifest,flight=flight,variant=variant)
     carry,_,epoch,validation=training_kernels(jnp.asarray(mean),jnp.asarray(std),radius,seed,**options)
     train_indices=np.flatnonzero((data['split']==0)&data['valid']);valid_indices=np.flatnonzero((data['split']==1)&data['valid'])
     if not np.any(data['valid'][valid_indices]):raise ValueError('No valid validation labels')
@@ -169,10 +184,10 @@ def train(dataset,output,*,flight=False):
         else:stale+=1
         write_json(root/'history.json',history)
         if stale>=10:break
-    write_json(root/'manifest.json',dict(schema='barriernet_quad2d_jax_v1' if flight else 'barriernet_unicycle_jax_v1',final_test=False,production_eligible=False,
+    write_json(root/'manifest.json',dict(schema=schema,final_test=False,production_eligible=False,
         dataset=str(Path(dataset).resolve()),dataset_manifest_sha256=sha256(Path(dataset)/'manifest.json'),
         weights_sha256=sha256(root/'weights.msgpack'),normalization_sha256=sha256(root/'normalization.npz'),
-        source_fingerprint=source_fingerprint(),radius=radius,seed=seed,architecture=f'5x[5->256ReLU->64ReLU], per-obstacle2sigmoid*4, mean pooling, [64+{6 if flight else 4}+2+2]->64ReLU->2 residual control',
+        source_fingerprint=source_fingerprint(),radius=radius,seed=seed,architecture=architecture,
         task_contract=manifest.get('task_contract'),
         settings=dict(epochs=50,batch_size=64,adam_lr=.001,patience=10,p_regularizer=.01,train_slack_rho=1e4,eps_q=1e-6),
         completed_epochs=len(history),best_validation_mse=best,elapsed_seconds=time.perf_counter()-begin,device=str(jax.devices()[0]),
@@ -183,7 +198,10 @@ def train(dataset,output,*,flight=False):
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('action',choices=['prepare','benchmark','train'])
     parser.add_argument('--source');parser.add_argument('--dataset');parser.add_argument('--output',required=True)
+    parser.add_argument('--variant',choices=['Quad3D','KinematicBicycle2D_DPCBF'])
     parser.add_argument('--rows',type=int,default=200000);args=parser.parse_args()
-    if args.action=='prepare':prepare(args.source,args.output,args.rows)
-    elif args.action=='benchmark':benchmark(args.dataset,args.output)
-    else:train(args.dataset,args.output)
+    if args.action=='prepare':
+        if args.variant is not None:parser.error('Variant demonstrations require their physical source adapter')
+        prepare(args.source,args.output,args.rows)
+    elif args.action=='benchmark':benchmark(args.dataset,args.output,variant=args.variant)
+    else:train(args.dataset,args.output,variant=args.variant)

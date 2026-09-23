@@ -53,7 +53,7 @@ def export_pilot(members,output):
               controller=controller,
               weights_sha256=sha256(path),members=provenance,production_eligible=False,calibration=None,
               limitation='Uncalibrated development ensemble. No closed-loop superiority or deployment safety calibration established.')
-    for field in ('training_obstacle_capacity','training_scene_distribution','training_obstacle_count_histogram','bicycle_contract','quad3d_contract','normalization_sampling','progress_contrast_weight'):
+    for field in ('training_obstacle_capacity','training_scene_distribution','training_obstacle_count_histogram','bicycle_contract','quad3d_contract','normalization_sampling','progress_contrast_weight','progress_contrast_normalization','progress_contrast_scale_floor','bicycle_constraint_features_contract','bicycle_candidate_encoding_contract','bicycle_motion_history_contract','bicycle_motion_history_source','bicycle_motion_history_source_sha256','bicycle_motion_adapter_contract','bicycle_motion_adapter_source','bicycle_motion_adapter_source_sha256'):
         if field in settings[0]:
             if any(s.get(field)!=settings[0][field] for s in settings):raise ValueError('Ensemble count/distribution provenance mismatch')
             info[field]=settings[0][field]

@@ -58,7 +58,7 @@ def audit_hold(x,u,next_state,obstacles,mask,config=Quad3DControlConfig()):
     return dict(replay_error=error,minimum_clearance=clearance,envelope_violation=violation,input_violation=input_violation)
 
 
-def independent_obstacle_values(x,u,obstacles,mask,gains,config=Quad3DControlConfig()):
+def polynomial_obstacle_values(x,u,obstacles,mask,gains,config=Quad3DControlConfig()):
     """Derivatives from actual independent polynomial coefficients at t=0."""
     p=coefficients(x,u,config); residual=[]; cascade=[]
     for o in obstacles[mask]:
@@ -73,7 +73,7 @@ def independent_obstacle_values(x,u,obstacles,mask,gains,config=Quad3DControlCon
     return min(cascade,default=float('inf')),min(residual,default=float('inf'))
 
 
-def independent_envelope_values(x,u,config=Quad3DControlConfig()):
+def polynomial_envelope_values(x,u,config=Quad3DControlConfig()):
     c=config;p=coefficients(x,u,c);cascade=[];residual=[];barriers=[]
     for i,limit,order in ((3,c.tilt_limit,2),(4,c.tilt_limit,2),(5,c.yaw_limit,2),
         (6,c.velocity_limit,3),(7,c.velocity_limit,3),(8,c.velocity_limit,1),
@@ -86,6 +86,47 @@ def independent_envelope_values(x,u,config=Quad3DControlConfig()):
             cascade.append(vals[0]);vals=[vals[j+1]+c.envelope_gain*vals[j] for j in range(len(vals)-1)]
         residual.append(vals[0])
     return min(cascade),min(residual)
+
+
+def independent_obstacle_values(x,u,obstacles,mask,gains,config=Quad3DControlConfig()):
+    """Vectorized t=0 derivatives of the independent held-motion polynomial.
+
+    Keep polynomial_obstacle_values as the separate object-based reference.
+    Only these t=0 derivatives are batched; continuous extrema/root checks in
+    audit_hold and independent_held_cascade_minimum are unchanged.
+    """
+    p=coefficients(x,u,config);obs=np.asarray(obstacles)[mask]
+    if len(obs)==0:return float('inf'),float('inf')
+    d0=p[0,:2]-obs[:,:2];d1=p[1,:2]-obs[:,3:5]
+    d2,d3,d4=p[2,:2],p[3,:2],p[4,:2]
+    dot=lambda a,b:np.sum(a*b,axis=-1)
+    radius=config.robot.radius+config.clearance_buffer+obs[:,2]
+    values=np.stack((dot(d0,d0)-radius**2,2*dot(d0,d1),
+        2*(dot(d1,d1)+2*dot(d0,d2)),12*(dot(d0,d3)+dot(d1,d2)),
+        24*(dot(d2,d2)+2*dot(d1,d3)+2*dot(d0,d4))),axis=-1)
+    cascade=float(np.min(values[:,0]))
+    for stage,gain in enumerate(gains):
+        values=values[:,1:]+gain*values[:,:-1]
+        if stage<3:cascade=min(cascade,float(np.min(values[:,0])))
+    return cascade,float(np.min(values[:,0]))
+
+
+def independent_envelope_values(x,u,config=Quad3DControlConfig()):
+    """Batch the independent linear barrier derivatives by relative degree."""
+    c=config;p=coefficients(x,u,c)
+    indices=np.repeat(np.array([3,4,5,6,7,8,9,10,11,2]),2)
+    signs=np.tile(np.array([1.,-1.]),10)
+    limits=np.r_[np.repeat([c.tilt_limit,c.tilt_limit,c.yaw_limit,
+        c.velocity_limit,c.velocity_limit,c.velocity_limit,c.rate_limit,c.rate_limit,c.rate_limit],2),
+        c.altitude_max,-c.altitude_min]
+    orders=np.repeat(np.array([2,2,2,3,3,1,1,1,1,2]),2)
+    values=-signs[:,None]*p[:4,indices].T*np.array([1.,1.,2.,6.])
+    values[:,0]+=limits;cascade=residual=float('inf')
+    for stage in range(3):
+        cascade=min(cascade,float(np.min(values[orders>stage,0])))
+        values=values[:,1:]+c.envelope_gain*values[:,:-1]
+        residual=min(residual,float(np.min(values[orders==stage+1,0])))
+    return cascade,residual
 
 
 def independent_held_cascade_minimum(x,u,obstacles,mask,gains,config=Quad3DControlConfig()):

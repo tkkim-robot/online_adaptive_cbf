@@ -1,5 +1,6 @@
 """Actual six-state flight branches with explicit observation-conditioned noise."""
 from functools import partial
+import math
 import jax
 import jax.numpy as jnp
 from .quad2d import integrate_quad2d
@@ -12,7 +13,7 @@ INADMISSIBLE=5;PLANNER_FAILURE=7;STATE_BOUND=8
 NAMES={**STATUS_NAMES,INADMISSIBLE:'hocbf_inadmissible',6:'policy_rejected',PLANNER_FAILURE:'planner_failure',STATE_BOUND:'state_bound_violation'}
 
 
-def flight_sensor_model(observed,obstacles,mask,noise,key,steps):
+def flight_sensor_model(observed,obstacles,mask,noise,key,steps,stationary_obstacles=False):
     """Known ranges[xy,pitch,vxy,pitch_rate,obs_xy,obs_velocity,radius].
 
     Independent uniform latent offsets and15% subsequent innovations; first
@@ -26,29 +27,38 @@ def flight_sensor_model(observed,obstacles,mask,noise,key,steps):
     xb=jax.random.uniform(xkey,(6,),dtype=observed.dtype,minval=-1.,maxval=1.)*xs
     ob=jax.random.uniform(okey,obstacles.shape,dtype=obstacles.dtype,minval=-1.,maxval=1.)*os
     ob=jnp.where(mask[:,None],ob,0.);truth=obstacles+ob
-    truth=truth.at[:,2].set(jnp.maximum(truth[:,2],1e-4));ob=truth-obstacles
+    truth=truth.at[:,2].set(jnp.maximum(truth[:,2],1e-4))
+    if stationary_obstacles:truth=truth.at[:,3:5].set(0.)
+    ob=truth-obstacles
     innovations=jax.random.uniform(nkey,(steps,6+obstacles.size),dtype=observed.dtype,minval=-1.,maxval=1.).at[0].set(0.)
     return observed+xb,truth,xb,ob,xs,os,innovations
 
 
-@partial(jax.jit,static_argnames=('config','steps','guidance'))
-def flight_branch(observed,goal,obstacles,mask,gains,points,route_mask,cursor,noise,key,ready=True,config=FlightConfig(),steps=160,guidance=None):
+@partial(jax.jit,static_argnames=('config','steps','guidance','candidate_hold_steps','continuation_gain'))
+def flight_branch(observed,goal,obstacles,mask,gains,points,route_mask,cursor,noise,key,ready=True,config=FlightConfig(),steps=160,guidance=None,candidate_hold_steps=0,continuation_gain=(4.,4.)):
+    # Optional offline counterfactual: apply the candidate briefly, then return
+    # to one fixed reference gain. Default branches retain constant gains.
+    # There is no gain search or new behavior in deployed policies.
+    if (type(candidate_hold_steps) is not int or not 0<=candidate_hold_steps<=steps
+            or len(continuation_gain)!=2 or not all(math.isfinite(g) and g>0 for g in continuation_gain)):
+        raise ValueError('Invalid offline candidate/continuation schedule')
     c=config.robot
-    initial,truth_obs,xb,ob,xs,os,innovations=flight_sensor_model(observed,obstacles,mask,noise,key,steps)
+    initial,truth_obs,xb,ob,xs,os,innovations=flight_sensor_model(observed,obstacles,mask,noise,key,steps,config.stationary_obstacles)
     minimum=jnp.min(signed_clearance(initial[:2],truth_obs,mask,c.radius))
     status=jnp.where(flight_arrived(initial,goal,config),GOAL,RUNNING)
     status=jnp.where(physical_envelope_violation(initial,config)>c.qp_tolerance,STATE_BOUND,status)
     status=jnp.where(minimum<=0,COLLISION,status);status=jnp.where(ready,status,PLANNER_FAILURE)
     def tick(carry,inputs):
         x,status,count,minimum,cursor,max_residual=carry;k,innovation=inputs;active=status==RUNNING
+        local_gain=jnp.where(k<candidate_hold_steps,gains,jnp.asarray(continuation_gain,gains.dtype)) if candidate_hold_steps else gains
         sensed=x-xb+.15*xs*innovation[:6]
         seen=truth_obs.at[:,:2].set(truth_obs[:,:2]+k*c.dt*truth_obs[:,3:5])-ob+.15*os*innovation[6:].reshape(obstacles.shape)
         guidance_info={};approved=jnp.asarray(True)
         if guidance is None:
-            qp,h,psi,domain,proposed,remaining,target=flight_control(sensed,goal,seen,mask,gains,points,route_mask,cursor,config)
+            qp,h,psi,domain,proposed,remaining,target=flight_control(sensed,goal,seen,mask,local_gain,points,route_mask,cursor,config)
         else:
             from .quad2d_guidance import predictive_flight_control
-            (qp,h,psi,domain,proposed,remaining,target),info=predictive_flight_control(sensed,goal,seen,mask,gains,points,route_mask,cursor,config,guidance,noise)
+            (qp,h,psi,domain,proposed,remaining,target),info=predictive_flight_control(sensed,goal,seen,mask,local_gain,points,route_mask,cursor,config,guidance,noise)
             approved=info['approved'];guidance_info={'guidance_'+key:value for key,value in info.items()}
         admissible=(h>=-c.qp_tolerance)&(psi>=-c.qp_tolerance)&(domain>=-c.qp_tolerance)
         accepted=active&approved&qp.feasible&admissible
@@ -70,6 +80,7 @@ def flight_branch(observed,goal,obstacles,mask,gains,points,route_mask,cursor,no
             clearance=jnp.where(accepted,clear,jnp.nan),state_bound_violation=jnp.where(accepted,bound,jnp.nan),
             qp_violation=jnp.where(accepted,qp.max_violation,jnp.nan),h=h,psi1=psi,envelope_domain=domain,
             route_progress=cursor,route_target=target,route_remaining=remaining,**guidance_info)
+        if candidate_hold_steps:trace['branch_gain']=local_gain
         return (x,status,count,minimum,cursor,max_residual),trace
     carry=(initial,status,jnp.int32(0),minimum,jnp.asarray(cursor,observed.dtype),jnp.asarray(-jnp.inf,observed.dtype))
     if guidance is None:

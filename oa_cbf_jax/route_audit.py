@@ -1,4 +1,4 @@
-"""Independent route audit, including rounding ambiguity in nearest segments.
+"""Independent route audit, including FP32 arithmetic and nearest-segment ties.
 
 An argmin is discontinuous: different FP32 operation fusion can pick different
 near-equal segments. On a failed ordinary check we admit only a segment whose
@@ -69,6 +69,15 @@ def check_transition(x, points, mask, cursor, recorded_target, recorded_cursor, 
     def matches(t, p):
         return np.max(np.abs(recorded_target-t))<=tolerance and abs(recorded_cursor-(p if active else cursor))<=tolerance
     if matches(target, proposed): return False
+    # A long segment can accumulate more than1e-5 of absolute interpolation
+    # error even when its nearest-segment choice is unambiguous. The runtime
+    # route kernel uses FP32, so also replay consistent FP32 arithmetic for
+    # exactly representable stored inputs. Require BOTH target and committed
+    # cursor from that same replay; keep the original comparison tolerance.
+    x32, points32, cursor32 = np.asarray(x, np.float32), np.asarray(points, np.float32), np.float32(cursor)
+    if (np.array_equal(x, x32) and np.array_equal(points, points32) and cursor == cursor32):
+        target32, proposed32 = numpy_target(x32, points32, mask, cursor32)
+        if matches(target32, proposed32): return True
     vectors = points[1:]-points[:-1]; valid = mask[:-1]&mask[1:]
     lengths = np.where(valid, np.linalg.norm(vectors, axis=1), 0.); cumulative = np.r_[0., np.cumsum(lengths)]
     fractions = np.clip(np.sum((x[:2]-points[:-1])*vectors, axis=1)/np.maximum(lengths**2, 1e-12), 0., 1.)

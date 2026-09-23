@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 from .cli import sanitize
 from .config import UnicycleConfig
+from .unicycle_inputs import source_robot
 from .dataset import source_fingerprint,sha256
 from .discrete_mpc import DiscreteMPC,DEFAULTS,numpy_barrier
 from .dynamics import integrate_unicycle,signed_clearance,swept_disk_clearance
@@ -131,7 +132,7 @@ def run(source,output,method='fixed_low',noise_scale=0.,steps=800,limit=None,ord
         if shape!=((3,route_capacity,2) if ordered_waypoints else (route_capacity,2)):raise ValueError('Mixed route capacities')
         if ordered_waypoints and (not 1<=r['waypoint_count']<=3 or not np.array_equal(r['waypoint_goals'][r['waypoint_count']-1],r['scene']['goal'])):
             raise ValueError('Invalid ordered goal count/final goal')
-    root=Path(output);root.mkdir(parents=True,exist_ok=False);robot=UnicycleConfig()
+    root=Path(output);root.mkdir(parents=True,exist_ok=False);robot=source_robot(source)
     solver=DiscreteMPC(capacity,method,robot);kernels=PhysicalKernels(capacity,route_capacity,steps,robot)
     manifest=dict(stage='development_default_discrete_mpc',final_test=False,source_fingerprint=source_fingerprint(),
         policy=dict(mode='discrete_mpc_'+method,motion_observer_window=0,sensor_margin_scale=0.,gains=solver.gains.tolist()),robot=asdict(robot),

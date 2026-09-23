@@ -23,7 +23,7 @@ from .io import write_json
 from .models import route_graph
 from .route_control import rollout_route, INADMISSIBLE
 from .routing import plan_routes
-from .scenes import DIVERSE_FAMILIES, diverse_scene
+from .scenes import DIVERSE_FAMILIES, diverse_scene, stationary_scene
 from .simulation import STATUS_NAMES, COLLISION, INFEASIBLE, GOAL, TIMEOUT
 from .stochastic import stochastic_branch, STATE_BOUND_VIOLATION
 from .sensor_margin import controller_contract
@@ -70,7 +70,7 @@ def manifest_for(groups,capacity,queries,replicas,horizon,seed,shard_groups,robo
                    acquisition='50% initial observations; 50% uniform available visited steps under random fixed gains; no rejection sampling on outcomes',
                    lineage='one observation per scene; all query/replica descendants remain in the same group and partition',
                    route='shared visibility graph from initial static observations, no future motion oracle',
-                   gain_hold='entire branch horizon',obstacle_prediction='observed constant velocity',physical_motion='latent constant velocity',
+                   gain_hold='entire branch horizon',obstacle_prediction='observed constant velocity',physical_motion='stationary with noisy velocity observations' if robot.stationary_obstacles else 'latent constant velocity',
                    risk='observed minimum until collision or goal/horizon; censored by earlier controller/planner failure',
                    progress='physical route arclength gain near committed route branch, can decrease; masked on earlier collision/controller/planner failure',
                    event_semantics='mutually exclusive first terminal events; no claim about events after termination',
@@ -140,6 +140,8 @@ def audit(directory):
         q,r=manifest['queries'],manifest['replicas']
         truth=data['true_initial_state'].reshape(len(ids),q,r,4)
         checks.append(bool(np.all(truth==truth[:,:1])))
+        if manifest['config'].get('stationary_obstacles',False):
+            checks.append(bool(np.all(np.where(data['obstacle_mask'][:,None,:,None],data['true_obstacles'][...,3:5],0.)==0.)))
         std=[float(np.std(data['target'][...,i][valid[...,i]])) for i in range(2)]
         checks.append(min(std)>1e-6)
         parts[partition]=dict(groups=len(ids),branches=int(status.size),observed_steps=int(data['steps'].sum()),
@@ -152,28 +154,32 @@ def audit(directory):
                 production_eligible=False,group_bootstrap_contract='one observation per independent parent group')
 
 
-def collect(output,groups=1024,capacity=16,queries=16,replicas=4,horizon_steps=80,seed=4139,shard_groups=32,
-            guidance_horizon=0.,guidance_min_speed=0.,worker_id=0,workers=1,
-            guidance_kernel='scan',guidance_goal_braking=False,gain_upper=4.,visitation_bundle=None,visitation_calibration=None,sensor_margin_scale=0.,margin_guidance=False,shared_clearance_budget=False,physical_continuation=False,motion_observer_window=0,visitation_experiment=None,filter_obstacle_position=False,scene_profile='legacy',visibility_batch_nodes=None,route_capacity=32,reuse_dataset=None,guidance_wide_turns=False,visitation_steps=400,route_workers=1,guidance_detour=False,guidance_turn_return=False):
-    if not 0<=worker_id<workers:raise ValueError('Invalid collection worker assignment')
-    if isinstance(route_workers,bool) or not isinstance(route_workers,int) or route_workers<1:raise ValueError('Invalid route worker count')
-    root=Path(output);root.mkdir(parents=True,exist_ok=True)
-    robot=UnicycleConfig(guidance_horizon=guidance_horizon,guidance_min_speed=guidance_min_speed,
-                         guidance_kernel=guidance_kernel,guidance_goal_braking=guidance_goal_braking,
-                         guidance_wide_turns=guidance_wide_turns,guidance_detour=guidance_detour,guidance_turn_return=guidance_turn_return)
-    from .onpolicy_visitation import visitation_contract,select_visited_contexts
-    visitation=visitation_contract(visitation_bundle,visitation_calibration,experiment=visitation_experiment,visitation_steps=visitation_steps)
-    manifest=manifest_for(groups,capacity,queries,replicas,horizon_steps,seed,shard_groups,robot,gain_upper,visitation,sensor_margin_scale,margin_guidance,shared_clearance_budget,physical_continuation,motion_observer_window,filter_obstacle_position,scene_profile,visibility_batch_nodes,route_capacity,reuse_dataset)
-    path=root/'manifest.json'
-    if path.exists() and json.loads(path.read_text())!=manifest:raise ValueError('Dataset contract changed; use a fresh output directory')
-    if not path.exists():write_json(path,manifest)
+def collection_kernels(manifest):
+    """Shared collection kernels for execution and complete-stage timing.
+
+    The benchmark uses these same callables, shapes and host-visible outputs;
+    neither a short surrogate rollout nor a different acquisition controller.
+    """
+    robot=UnicycleConfig(**manifest['config'])
+    visitation=manifest.get('visitation')
+    controller=manifest['controller']
+    sensor_margin_scale=controller['sensor_margin_scale']
+    margin_guidance=controller['margin_guidance']
+    shared_clearance_budget=controller['shared_clearance_budget']
+    motion_observer_window=controller.get('motion_observer_window',0)
+    filter_obstacle_position=controller.get('filter_obstacle_position',False)
+    physical_continuation=manifest['schema'] in ('oa_cbf_route_continuation_v5','oa_cbf_route_continuation_v6')
+    horizon_steps=manifest['horizon_steps']
     behavior_horizon=visitation['behavior_horizon'] if visitation is not None else 400
+    teacher=pool=extract=None
     visit=jax.jit(jax.vmap(lambda x,g,o,m,a,p,r:rollout_route(x,g,o,m,a,p,r,config=robot,steps=behavior_horizon)))
     if visitation is not None:
-        from .adaptive import DevelopmentPolicy,PolicyConfig
+        from .adaptive import DevelopmentPolicy,NonlearnedPolicy,PolicyConfig
         from .adaptive_experiment import candidate_pool
         from .closed_loop import make_closed_loop
-        teacher=DevelopmentPolicy(visitation_bundle,visitation_calibration,PolicyConfig(**visitation['policy']),robot=robot,allow_development=True)
+        teacher=(NonlearnedPolicy(PolicyConfig(**visitation['policy']),robot)
+                 if visitation['mode']=='fixed_behavior' else
+                 DevelopmentPolicy(visitation['bundle'],visitation['calibration'],PolicyConfig(**visitation['policy']),robot=robot,allow_development=True))
         pool=jnp.asarray(visitation['pool'] if 'pool' in visitation else candidate_pool(visitation['queries'],visitation['gain_domain']['upper']),jnp.float32)
         visit=jax.jit(jax.vmap(make_closed_loop(teacher,behavior_horizon,batch_axis='scenes'),
                     in_axes=(None,None,0,0,0,0,None,0,0,0,0,0),axis_name='scenes'))
@@ -182,7 +188,7 @@ def collect(output,groups=1024,capacity=16,queries=16,replicas=4,horizon_steps=8
         return jax.vmap(lambda a,key:stochastic_branch(x,g,o,m,a,p,r,c,noise,key,config=robot,steps=horizon_steps,
             sensor_margin_scale=sensor_margin_scale,margin_guidance=margin_guidance,shared_clearance_budget=shared_clearance_budget))(alpha,keys)
     if physical_continuation:
-        from .continuation import rollout as continuation_rollout,snapshot_payload
+        from .continuation import rollout as continuation_rollout
         from .continuation_acquisition import make_extractor
         extract=make_extractor(robot,motion_observer_window,filter_obstacle_position)
         def branches(snapshot,g,m,alpha,p,r,c,noise,keys):
@@ -193,6 +199,32 @@ def collect(output,groups=1024,capacity=16,queries=16,replicas=4,horizon_steps=8
     def simulate(audit_parent,audit_branch,*args):
         result,trace,truth=jax.vmap(branches)(*args)
         return result,truth,jax.tree.map(lambda a:a[audit_parent,audit_branch],trace)
+    return visit,encode,simulate,extract,teacher,pool
+
+
+def collect(output,groups=1024,capacity=16,queries=16,replicas=4,horizon_steps=80,seed=4139,shard_groups=32,
+            guidance_horizon=0.,guidance_min_speed=0.,worker_id=0,workers=1,
+            guidance_kernel='scan',guidance_goal_braking=False,gain_upper=4.,visitation_bundle=None,visitation_calibration=None,sensor_margin_scale=0.,margin_guidance=False,shared_clearance_budget=False,physical_continuation=False,motion_observer_window=0,visitation_experiment=None,filter_obstacle_position=False,scene_profile='legacy',visibility_batch_nodes=None,route_capacity=32,reuse_dataset=None,guidance_wide_turns=False,visitation_steps=400,route_workers=1,guidance_detour=False,guidance_turn_return=False,stationary_obstacles=False,visitation_fixed_gain=None):
+    if not 0<=worker_id<workers:raise ValueError('Invalid collection worker assignment')
+    if isinstance(route_workers,bool) or not isinstance(route_workers,int) or route_workers<1:raise ValueError('Invalid route worker count')
+    root=Path(output);root.mkdir(parents=True,exist_ok=True)
+    robot=UnicycleConfig(guidance_horizon=guidance_horizon,guidance_min_speed=guidance_min_speed,
+                         guidance_kernel=guidance_kernel,guidance_goal_braking=guidance_goal_braking,
+                         guidance_wide_turns=guidance_wide_turns,guidance_detour=guidance_detour,guidance_turn_return=guidance_turn_return,
+                         stationary_obstacles=stationary_obstacles)
+    from .onpolicy_visitation import acquisition_contract,select_visited_contexts
+    if visitation_fixed_gain is not None and not physical_continuation:
+        raise ValueError('Fixed acquisition requires actual physical continuation')
+    visitation=acquisition_contract(visitation_bundle,visitation_calibration,experiment=visitation_experiment,
+        visitation_steps=visitation_steps,fixed_gain=visitation_fixed_gain,robot=robot,gain_upper=gain_upper,
+        controller=controller_contract(sensor_margin_scale,margin_guidance,shared_clearance_budget,motion_observer_window,filter_obstacle_position))
+    manifest=manifest_for(groups,capacity,queries,replicas,horizon_steps,seed,shard_groups,robot,gain_upper,visitation,sensor_margin_scale,margin_guidance,shared_clearance_budget,physical_continuation,motion_observer_window,filter_obstacle_position,scene_profile,visibility_batch_nodes,route_capacity,reuse_dataset)
+    path=root/'manifest.json'
+    if path.exists() and json.loads(path.read_text())!=manifest:raise ValueError('Dataset contract changed; use a fresh output directory')
+    if not path.exists():write_json(path,manifest)
+    visit,encode,simulate,extract,teacher,pool=collection_kernels(manifest)
+    if physical_continuation:
+        from .continuation import snapshot_payload
     index=[];start=time.perf_counter()
     for number,offset in enumerate(range(0,groups,shard_groups)):
         if number%workers!=worker_id:continue
@@ -210,6 +242,7 @@ def collect(output,groups=1024,capacity=16,queries=16,replicas=4,horizon_steps=8
         if scene_profile=='multiscale_v1':
             from .multiscale_scenes import scene as scene_function
         scenes=[scene_function(e['seed'],e['family'],capacity) for e in entries]
+        if robot.stationary_obstacles:scenes=list(map(stationary_scene,scenes))
         planning_start=time.perf_counter()
         routes,route_times=plan_routes(scenes,robot,workers=route_workers,capacity=route_capacity,visibility_batch_nodes=visibility_batch_nodes)
         planning_wall_seconds=time.perf_counter()-planning_start
@@ -351,6 +384,7 @@ if __name__=='__main__':
     parser.add_argument('--guidance-wide-turns',action='store_true')
     parser.add_argument('--guidance-detour',action='store_true')
     parser.add_argument('--guidance-turn-return',action='store_true')
+    parser.add_argument('--stationary-obstacles',action='store_true',help='Stationary physical obstacles at every noise level, including acquisition and queried branches')
     parser.add_argument('--visitation-steps',type=int,default=400)
     parser.add_argument('--route-workers',type=int,default=1)
     parser.add_argument('--gain-upper',type=float,default=4.)
@@ -361,6 +395,7 @@ if __name__=='__main__':
     parser.add_argument('--motion-observer-window',type=int,default=0)
     parser.add_argument('--filter-obstacle-position',action='store_true')
     parser.add_argument('--visitation-bundle');parser.add_argument('--visitation-calibration')
+    parser.add_argument('--visitation-fixed-gain',type=float,nargs=2,help='Explicit fixed collection behavior with actual noisy physical continuation; no learned acquisition assets')
     parser.add_argument('--visitation-experiment',help='Capture exact decision settings and candidate values from a saved learned experiment')
     parser.add_argument('--scene-profile',choices=['legacy','multiscale_v1'],default='legacy')
     parser.add_argument('--visibility-batch-nodes',type=int)

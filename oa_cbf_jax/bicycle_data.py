@@ -209,7 +209,7 @@ def audit_one(payload):
 
 
 def audit(directory,workers=12):
-    from .bicycle_observed_audit import check_graph,reference_route_coordinate
+    from .bicycle_observed_audit import check_graph,check_route_progress
     root=Path(directory);m=read(root/'manifest.json');source=Path(m['source']);sm=read(source/'manifest.json');c=control_config(m['config'])
     if sha256(source/'manifest.json')!=m['source_manifest_sha256'] or sha256(source/'scenes.json')!=sm['scenes_sha256']:raise ValueError('Changed physical/acquisition source')
     parents={r['group_id']:r for r in read(source/'scenes.json')};entries=read(root/'index.json');traces=read(root/'trace_index.json');visits=read(root/'visitation.json')
@@ -225,10 +225,15 @@ def audit(directory,workers=12):
         if visit['available_snapshot_ticks']!=wanted:raise ValueError('Acquired query censored or fabricated')
     from .bicycle_guidance import guidance_from_controller
     margin=guidance_from_controller(m['controller']).observation_margin
-    with ProcessPoolExecutor(workers,mp_context=get_context('spawn')) as pool:results=list(pool.map(audit_one,[(root,e,m['config'],margin) for e in traces],chunksize=1))
+    results=[]
+    with ProcessPoolExecutor(workers,mp_context=get_context('spawn')) as pool:
+        for result in pool.map(audit_one,[(root,e,m['config'],margin) for e in traces],chunksize=1):
+            results.append(result)
+            if len(results)%512==0 or len(results)==len(traces):
+                print(json.dumps(dict(stage='independent_physical_replay',checked=len(results),total=len(traces))),flush=True)
     by_file={r['file']:r for r in results}
-    query_keys=set()
-    for entry in entries:
+    query_keys=set();progress_rounding_checks=0
+    for entry_number,entry in enumerate(entries):
         if sha256(root/entry['file'])!=entry['sha256']:raise ValueError('Changed training shard')
         with np.load(root/entry['file']) as f:d={k:f[k] for k in f}
         parent=parents[entry['group_id']];tick=entry['query_tick'];query_keys.add((entry['group_id'],tick))
@@ -259,8 +264,9 @@ def audit(directory,workers=12):
                 np.testing.assert_array_equal(d['final_state'][0,candidate],b['state'][-1]);np.testing.assert_array_equal(d['final_cursor'][0,candidate],b['route_progress'][-1])
                 independent=by_file[tr['file']]
                 np.testing.assert_allclose(d['min_clearance'][0,candidate],independent['min_clearance'],atol=1e-4,rtol=0)
-                progress=reference_route_coordinate(b['state'][-1].astype(np.float32)[:2],b['points'],b['route_mask'],float(b['route_progress'][-1]))-reference_route_coordinate(b['initial'].astype(np.float32)[:2],b['points'],b['route_mask'],float(b['cursor']))
-                np.testing.assert_allclose(d['route_progress'][0,candidate],progress,atol=3e-5,rtol=2e-6)
+                progress_rounding_checks+=check_route_progress(d['route_progress'][0,candidate],
+                    b['initial'].astype(np.float32)[:2],b['state'][-1].astype(np.float32)[:2],b['points'],b['route_mask'],
+                    float(b['cursor']),float(b['route_progress'][-1]))
                 key=tuple(b['key']);replica=candidate%m['replicas']
                 if replica in seen_keys:assert key==seen_keys[replica]
                 seen_keys[replica]=key
@@ -270,17 +276,24 @@ def audit(directory,workers=12):
                     for left,right in zip(old,innovation):np.testing.assert_array_equal(left[:n],right[:n])
                 if replica not in common_innovations or len(innovation[0])>len(common_innovations[replica][0]):common_innovations[replica]=tuple(v.copy() for v in innovation)
         assert len(set(seen_keys.values()))==m['replicas']
+        if (entry_number+1)%128==0 or entry_number+1==len(entries):
+            print(json.dumps(dict(stage='independent_label_lineage',checked=entry_number+1,total=len(entries))),flush=True)
     expected_queries={(r['group_id'],t) for r in visits for t in r['available_snapshot_ticks']}
     if query_keys!=expected_queries or len(query_keys)!=len(entries):raise ValueError('Missing or duplicate acquired query')
     result=dict(audit_passed=True,manifest_sha256=sha256(root/'manifest.json'),index_sha256=sha256(root/'index.json'),trace_index_sha256=sha256(root/'trace_index.json'),
         source_manifest_sha256=m['source_manifest_sha256'],all_physical_prefixes_replayed=True,all_original_observed_rows_checked=True,all_graphs_independently_checked=True,all_acquired_history_bindings_checked=True,
         parents=len(visits),queries=len(entries),branches=branches*len(entries),physical_steps=sum(r['steps'] for r in results),feasible_qp_rejections=sum(r['feasible_qp_rejected'] for r in results),all_recorded_margin_bounds_checked=margin,rows=results)
+    result['route_progress_rounding_checks']=int(progress_rounding_checks)
     if storage_proof is not None:result['trace_storage_verification']=storage_proof
     write_json(root/'independent_replay.json',result);print(json.dumps({k:v for k,v in result.items() if k!='rows'}),flush=True)
 
 
 def validate_training_dataset(directory):
-    root=Path(directory);m=read(root/'manifest.json');a=read(root/'independent_replay.json');done=read(root/'complete.json')
+    root=Path(directory);m=read(root/'manifest.json')
+    if 'shared_observation_union' in m:
+        from .bicycle_shared_data import validate_union
+        return validate_union(root)
+    a=read(root/'independent_replay.json');done=read(root/'complete.json')
     if (m['schema']!=SCHEMA or m.get('weight_fit_authorized') is not True or m.get('gain_dimension')!=1
             or done.get('status')!='completed' or not done.get('audit_passed') or done['audit_sha256']!=sha256(root/'independent_replay.json')
             or a['manifest_sha256']!=sha256(root/'manifest.json') or a['index_sha256']!=sha256(root/'index.json')):raise ValueError('Unaudited bicycle dataset')

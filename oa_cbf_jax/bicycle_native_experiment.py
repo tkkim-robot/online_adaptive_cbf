@@ -40,9 +40,13 @@ class PhysicalKernels:
             return y,clearance,violation
         self.sense_function=jax.jit(sense);self.advance_function=jax.jit(advance)
         x=jnp.asarray(np.zeros(4),dtype=jnp.float64);o=jnp.asarray(np.zeros((64,5)),dtype=jnp.float64);mask=jnp.zeros(64,bool)
-        args=(x,o,mask,jnp.zeros(4),jnp.zeros((64,5)),jnp.zeros(6),jax.random.PRNGKey(1),jnp.int32(0),jnp.zeros(4),jnp.zeros((64,5)))
+        # Sensor and actuator precision is explicit even when a native neural
+        # controller enables global FP64 defaults for its own network.
+        args=(x,o,mask,jnp.zeros(4,jnp.float32),jnp.zeros((64,5),jnp.float32),
+            jnp.zeros(6,jnp.float32),jax.random.PRNGKey(1),jnp.int32(0),
+            jnp.zeros(4,jnp.float32),jnp.zeros((64,5),jnp.float32))
         start=time.perf_counter();self.sense=self.sense_function.lower(*args).compile()
-        self.advance=self.advance_function.lower(x,jnp.zeros(2),o,mask,jnp.int32(0)).compile()
+        self.advance=self.advance_function.lower(x,jnp.zeros(2,jnp.float32),o,mask,jnp.int32(0)).compile()
         self.rows=BarrierRows(c);self.compile_seconds=time.perf_counter()-start
 
     def cache_sizes(self):

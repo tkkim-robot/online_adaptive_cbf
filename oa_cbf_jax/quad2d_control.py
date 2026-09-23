@@ -14,6 +14,19 @@ from .controllers import solve_qp2,QPResult
 from .routing import route_target_from_position
 
 
+def normalize_flight_contract(value):
+    """Interpret the historical missing motion flag without altering its file.
+
+    Only this newly introduced field has a compatibility default. Every other
+    configuration value remains subject to the existing strict comparisons.
+    """
+    result=dict(value)
+    result.setdefault('stationary_obstacles',False)
+    if not isinstance(result['stationary_obstacles'],bool):
+        raise ValueError('Stationary-obstacle contract must be boolean')
+    return result
+
+
 @dataclass(frozen=True)
 class FlightConfig:
     robot:Quad2DConfig=field(default_factory=lambda:Quad2DConfig(inertia=.05,force_min=2.5,force_max=5.5))
@@ -30,12 +43,32 @@ class FlightConfig:
     terminal_speed:float=.2
     terminal_pitch:float=.1
     terminal_pitch_rate:float=.2
+    stationary_obstacles:bool=False
 
     def __post_init__(self):
-        values={k:v for k,v in asdict(self).items() if k!='robot'}
+        if not isinstance(self.stationary_obstacles,bool):raise ValueError('Stationary-obstacle contract must be boolean')
+        values={k:v for k,v in asdict(self).items() if k not in ('robot','stationary_obstacles')}
         if not all(math.isfinite(v) and v>0 for v in values.values()):raise ValueError('Invalid flight envelope/nominal')
         if self.pitch_limit>=math.pi/2 or self.cruise_speed>self.velocity_limit:raise ValueError('Invalid hover-capable envelope')
         if not 2*self.robot.force_min<=self.robot.mass*self.robot.gravity<=2*self.robot.force_max:raise ValueError('Hover thrust outside actuator limits')
+
+
+def flight_config_from_contract(value):
+    """Load the complete saved plant/sensor contract without resetting defaults.
+
+    Old manifests omitted only the newly added stationary-obstacle flag. They
+    retain their historical moving-truth sensor model. Missing physical fields
+    and unknown keys are errors, including inside the nested robot contract.
+    """
+    normalized=normalize_flight_contract(value)
+    if set(normalized)!=set(asdict(FlightConfig())):
+        raise ValueError('Incomplete or unknown flight configuration fields')
+    robot=normalized['robot']
+    if not isinstance(robot,dict) or set(robot)!=set(asdict(Quad2DConfig())):
+        raise ValueError('Incomplete or unknown flight robot fields')
+    config=FlightConfig(**dict(normalized,robot=Quad2DConfig(**robot)))
+    if asdict(config)!=normalized:raise ValueError('Flight contract does not round trip')
+    return config
 
 
 def nominal_flight(x,goal,target,config=FlightConfig()):

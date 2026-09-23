@@ -8,6 +8,36 @@ from .adaptive import PolicyConfig
 from .dataset import sha256
 
 
+def acquisition_contract(bundle, calibration, *, experiment=None, visitation_steps=400,
+                         fixed_gain=None, robot=None, gain_upper=4., controller=None):
+    """Resolve learned acquisition or an explicitly declared fixed behavior.
+
+    A fixed controller provides causal noisy histories for a fresh dataset without
+    pretending old moving-obstacle weights were calibrated for the static plant.
+    It is collection behavior only, never a learned policy or gain-search oracle.
+    """
+    if fixed_gain is None:
+        return visitation_contract(bundle, calibration, experiment=experiment,
+                                   visitation_steps=visitation_steps)
+    if bundle is not None or calibration is not None or experiment is not None:
+        raise ValueError('Fixed acquisition cannot also use learned acquisition assets')
+    if robot is None or not isinstance(visitation_steps, int) or isinstance(visitation_steps, bool) or visitation_steps < 2:
+        raise ValueError('Fixed acquisition requires robot and at least two observations')
+    gain = np.asarray(fixed_gain, dtype=float)
+    if gain.shape != (2,) or not np.isfinite(gain).all() or np.any(gain < .3) or np.any(gain > gain_upper):
+        raise ValueError('Fixed acquisition gain must lie inside the queried gain domain')
+    config = PolicyConfig(mode='fixed', fixed_gain=tuple(gain), backup_gains=(),
+                          **(controller or {}))
+    return dict(mode='fixed_behavior', policy=json.loads(json.dumps(asdict(config))),
+                robot=asdict(robot), pool=[gain.tolist()], queries=1,
+                gain_domain=dict(lower=.3, upper=float(gain_upper)),
+                behavior_horizon=visitation_steps, noise_seed_offset=12819,
+                visitation_seed_offset=25903,
+                acquisition='50% initial; 50% uniformly selected available pre-action observations under a declared fixed gain; one observation per independent parent; no outcome rejection sampling',
+                noise='Actual latent acquisition state, bounded raw readings and causal observer memory are copied; replicas vary future sensor innovations only.',
+                interpretation='Fixed collection behavior, no neural weights or calibration, no online gain search; all candidate labels use actual simulator continuations.')
+
+
 def visitation_contract(bundle,calibration,queries=16,experiment=None,visitation_steps=400):
     if isinstance(visitation_steps,bool) or not isinstance(visitation_steps,int) or visitation_steps<1:
         raise ValueError('Visitation steps must be a positive integer')

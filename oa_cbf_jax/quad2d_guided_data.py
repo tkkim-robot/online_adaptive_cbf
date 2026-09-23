@@ -1,13 +1,13 @@
 """Observed contexts and actual-workload timing for predictive flight labels.
 
 Exactly one query per parent keeps parent bootstrap/calibration semantics intact.
-Visit times are assigned before any outcome. Early terminations stay in the
-source; their last decision observation is retained, with its full prefix.
+Sampling rules are assigned before outcomes. Fixed ticks clamp at termination;
+episode fractions sample the recorded prefix, using duration only offline.
 Requeried labels sample a fresh declared observation-conditioned prior. They are
 not a posterior continuation of the acquisition episode's latent physical state.
 """
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 import time
@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from scipy.stats import qmc
-from .quad2d_control import FlightConfig
+from .quad2d_control import FlightConfig,flight_config_from_contract
 from .quad2d_guidance import GuidanceConfig,NoiseClearanceGuidanceConfig,TerminalGuidanceConfig
 from .quad2d_policy import FlightPolicy,FlightPolicyConfig
 from .quad2d_rollout import flight_branch,NAMES
@@ -41,10 +41,24 @@ def behavior_for_batch(number,mode):
     The staggered schedule gives each of four GPU workers both behaviors. It
     depends only on the original batch number, never the worker or result.
     """
-    if mode not in ('fixed','learned','mixed','backup','backup_mixed'):raise ValueError('Unknown acquisition behavior')
+    if mode not in ('fixed','learned','mixed','backup','backup_mixed','matched_learned','matched_held'):raise ValueError('Unknown acquisition behavior')
+    if mode=='matched_held':
+        return ('learned','matched_fc','backup','backup')[(number+number//4)%4]
+    if mode=='matched_learned':
+        return 'learned' if (number+number//4)%2==0 else 'matched_fc'
     if mode in ('mixed','backup_mixed'):
         return 'fixed' if (number+number//4)%4==0 else ('learned' if mode=='mixed' else 'backup')
     return mode
+
+
+def behavior_policy(mode, horizon, fallback_mode):
+    if fallback_mode not in ('fixed_set','hold_previous'):raise ValueError('Unknown behavior fallback')
+    config = FlightPolicyConfig(mode='learned' if mode=='matched_fc' else mode,
+        validation_horizon=horizon) if mode!='fixed' else FlightPolicyConfig(mode='fixed')
+    if fallback_mode=='hold_previous':
+        if mode=='fixed':raise ValueError('Use held backup for the constant-gain context')
+        config=replace(config,backup_gains=())
+    return config
 
 
 def observation_tick(seed,ticks):
@@ -53,8 +67,39 @@ def observation_tick(seed,ticks):
     return int(np.random.default_rng(seed+113).choice(ticks))
 
 
-def excluded_parents(directory=Path('artifacts/experiments'),calibration_source=None):
+def acquisition_horizon(ticks, calibration=None):
+    """Observation sampling cannot shorten a trajectory-calibrated mission."""
+    observation_tick(0,ticks)
+    minimum=max(ticks)+1
+    if calibration is None or 'trajectory_gate' not in calibration:
+        return minimum
+    horizon=calibration['trajectory_gate']['steps']
+    if isinstance(horizon,bool) or not isinstance(horizon,int) or not minimum<=horizon<=1600:
+        raise ValueError('Observation ticks exceed the calibrated mission horizon')
+    return horizon
+
+
+def select_observation(seed,ticks,length,selection='fixed_tick'):
+    """One retained parent, with deterministic sampling independent of its score.
+
+    Fractional sampling uses a saved episode's length offline. It never supplies
+    future duration to a deployed policy or discards failures/short episodes.
+    """
+    requested=observation_tick(seed,ticks)
+    if isinstance(length,bool) or not isinstance(length,(int,np.integer)) or length<1:
+        raise ValueError('A nonempty recorded prefix is required')
+    if selection=='fixed_tick':return requested,min(requested,length-1),None
+    if selection!='episode_fraction':raise ValueError('Unknown observation selection')
+    numerator=int(np.random.default_rng(seed+271).integers(0,9))
+    return requested,(numerator*(length-1))//8,numerator/8.
+
+
+def excluded_parents(directory=Path('artifacts/experiments'),calibration_source=None,pilot_source=None):
     """Keep every explicitly held development/test input out of acquisition."""
+    if pilot_source is not None:
+        from .quad2d_static_inputs import verify
+        if verify(pilot_source)['role']!='pilot':
+            raise ValueError('Only independently reserved pilot inputs may use the pilot acquisition exception')
     excluded=set();legacy={'quad2d_v30_policy_pilot_inputs','quad2d_v31_fresh_inputs','quad2d_v35_fresh_inputs','quad2d_v36_new_inputs'}
     for path in sorted(Path(directory).glob('*/manifest.json')):
         scene_file=path.parent/'scenes.json'
@@ -64,7 +109,11 @@ def excluded_parents(directory=Path('artifacts/experiments'),calibration_source=
             and m.get('weight_fit_authorized') is False and
             (path.parent.resolve()==Path(calibration_source).resolve() or
              (m.get('source') and Path(m['source']).resolve()==Path(calibration_source).resolve())))
-        if own_calibration:continue
+        own_pilot=(pilot_source is not None and m.get('data_role')=='pilot'
+            and m.get('weight_fit_authorized') is False and m.get('training_use') is True
+            and (path.parent.resolve()==Path(pilot_source).resolve() or
+                 (m.get('source') and Path(m['source']).resolve()==Path(pilot_source).resolve())))
+        if own_calibration or own_pilot:continue
         if path.parent.name in legacy or m.get('training_use') is False or m.get('weight_fit_authorized') is False or m.get('final_test') is True:
             for r in json.loads(scene_file.read_text()):
                 parent=r.get('group_id',r.get('scene',{}).get('scene_id'))
@@ -73,40 +122,56 @@ def excluded_parents(directory=Path('artifacts/experiments'),calibration_source=
     return sorted(excluded)
 
 
-def prepare(source,output,batch=8,shard_index=0,shards=1,mode='fixed',bundle=None,calibration=None,gain_dataset=None,ticks=(0,40,120,240),noise_clearance_weight=0.,terminal_transition_distance=0.):
+def prepare(source,output,batch=8,shard_index=0,shards=1,mode='fixed',bundle=None,calibration=None,gain_dataset=None,ticks=(0,40,120,240),noise_clearance_weight=0.,terminal_transition_distance=0.,observation_selection='fixed_tick',fc_bundle=None,fc_calibration=None,fallback_mode='fixed_set'):
+    if mode=='matched_held' and fallback_mode!='hold_previous':raise ValueError('Matched held acquisition requires the held-gain contract')
     source=Path(source);root=Path(output);root.mkdir(parents=True,exist_ok=False)
-    sm=json.loads((source/'manifest.json').read_text());rows=json.loads((source/'scenes.json').read_text());c=FlightConfig()
+    sm=json.loads((source/'manifest.json').read_text());rows=json.loads((source/'scenes.json').read_text());c=flight_config_from_contract(sm['config'])
     g=NoiseClearanceGuidanceConfig(noise_clearance_weight=noise_clearance_weight) if noise_clearance_weight else GuidanceConfig()
     if not np.isfinite(terminal_transition_distance) or terminal_transition_distance<0:raise ValueError('Invalid terminal transition')
     if terminal_transition_distance:
         if not noise_clearance_weight:raise ValueError('Terminal guidance requires the noise-aware parent contract')
         g=TerminalGuidanceConfig(noise_clearance_weight=noise_clearance_weight,terminal_transition_distance=terminal_transition_distance)
     reserved=sm.get('data_role')=='fresh_predictive_calibration' and sm.get('weight_fit_authorized') is False and sm.get('training_use') is False
-    if sha256(source/'scenes.json')!=sm['scenes_sha256'] or sm['config']!=asdict(c) or len(rows)%batch or not (sm.get('training_use') is True or reserved) or sm.get('final_test'):raise ValueError('Invalid acquisition source')
+    if sha256(source/'scenes.json')!=sm['scenes_sha256'] or len(rows)%batch or not (sm.get('training_use') is True or reserved) or sm.get('final_test'):raise ValueError('Invalid acquisition source')
     if not 0<=shard_index<shards or shards>len(rows)//batch:raise ValueError('Invalid acquisition sharding')
     # Reject all inspected flight evaluation parents, irrespective of generated
     # partition tags: those IDs cannot silently return to training.
-    excluded=excluded_parents(calibration_source=source if reserved else None)
+    excluded=excluded_parents(calibration_source=source if reserved else None,
+        pilot_source=source if sm.get('data_role')=='pilot' else None)
     if {r['group_id'] for r in rows}&set(excluded):raise ValueError('Development evaluation parent in training acquisition')
-    observation_tick(rows[0]['seed'],ticks);horizon=max(ticks)+1
+    select_observation(rows[0]['seed'],ticks,1,observation_selection);horizon=acquisition_horizon(ticks)
     behaviors=sorted({behavior_for_batch(i,mode) for i in range(len(rows)//batch) if i%shards==shard_index})
-    candidates=np.array([[1,1],[2,2],[4,4],[8,8]],np.float32);teacher=None;policies={};contracts={}
-    if mode in ('learned','mixed'):
+    candidates=np.array([[1,1],[2,2],[4,4],[8,8]],np.float32);teacher=None;fc_teacher=None;policies={};contracts={}
+    if mode in ('learned','mixed','matched_learned','matched_held'):
         if not all((bundle,calibration,gain_dataset)):raise ValueError('Trained behavior needs bundle, calibration and audited candidate data')
         candidates,bank=load_gain_bank(gain_dataset,c)
         dm=json.loads((Path(gain_dataset)/'manifest.json').read_text())
         if {r['group_id'] for r in rows}&{r['group_id'] for r in dm['groups']}:raise ValueError('Acquisition parents overlap behavior training/calibration')
-        learned=FlightPolicy(bundle,calibration,c,FlightPolicyConfig(validation_horizon=g.horizon),g)
+        learned=FlightPolicy(bundle,calibration,c,behavior_policy('learned',g.horizon,fallback_mode),g)
         if learned.metadata['dataset_manifest_sha256']!=bank['manifest_sha256']:raise ValueError('Behavior model candidate source mismatch')
         policies['learned']=learned
         teacher=dict(bundle=str(Path(bundle).resolve()),calibration=str(Path(calibration).resolve()),
             bundle_manifest_sha256=sha256(Path(bundle)/'manifest.json'),weights_sha256=learned.metadata['weights_sha256'],calibration_sha256=sha256(calibration),gain_bank=bank)
         contracts['learned']=asdict(learned.policy)
+        horizon=acquisition_horizon(ticks,json.loads(Path(calibration).read_text()))
     elif any((bundle,calibration,gain_dataset)):raise ValueError('Nonlearned acquisition cannot silently ignore a teacher')
-    if mode in ('backup','backup_mixed'):
-        policies['backup']=FlightPolicy(policy=FlightPolicyConfig(mode='backup',validation_horizon=g.horizon),guidance=g);contracts['backup']=asdict(policies['backup'].policy)
+    if mode in ('matched_learned','matched_held'):
+        if not all((fc_bundle,fc_calibration)):raise ValueError('Matched behavior requires both frozen encoders')
+        fc=FlightPolicy(fc_bundle,fc_calibration,c,behavior_policy('matched_fc',g.horizon,fallback_mode),g)
+        if (fc.metadata['dataset_manifest_sha256']!=bank['manifest_sha256']
+                or learned.metadata['architecture']['encoder']!='gat'
+                or fc.metadata['architecture']['encoder']!='matched_fc'
+                or acquisition_horizon(ticks,json.loads(Path(fc_calibration).read_text()))!=horizon):
+            raise ValueError('Matched behavior requires shared data, mission and correct encoders')
+        policies['matched_fc']=fc;contracts['matched_fc']=asdict(fc.policy)
+        fc_teacher=dict(bundle=str(Path(fc_bundle).resolve()),calibration=str(Path(fc_calibration).resolve()),
+            bundle_manifest_sha256=sha256(Path(fc_bundle)/'manifest.json'),weights_sha256=fc.metadata['weights_sha256'],
+            calibration_sha256=sha256(fc_calibration),gain_bank=bank)
+    elif any((fc_bundle,fc_calibration)):raise ValueError('Unexpected FC behavior arguments')
+    if mode in ('backup','backup_mixed','matched_held'):
+        policies['backup']=FlightPolicy(config=c,policy=behavior_policy('backup',g.horizon,fallback_mode),guidance=g);contracts['backup']=asdict(policies['backup'].policy)
     if mode in ('fixed','mixed','backup_mixed'):
-        policies['fixed']=FlightPolicy(policy=FlightPolicyConfig(mode='fixed'),guidance=g);contracts['fixed']=asdict(policies['fixed'].policy)
+        policies['fixed']=FlightPolicy(config=c,policy=behavior_policy('fixed',g.horizon,fallback_mode),guidance=g);contracts['fixed']=asdict(policies['fixed'].policy)
     compile_seconds=0.
     for behavior in behaviors:
         seconds=policies[behavior].warm(candidates,batch,64,64,horizon);compile_seconds+=seconds
@@ -122,7 +187,7 @@ def prepare(source,output,batch=8,shard_index=0,shards=1,mode='fixed',bundle=Non
             summary={k:v[i] for k,v in summaries.items()};count=int(summary['steps']);status=int(summary['status'])
             length=max(1,min(horizon,count+int(status not in (1,2,8))))
             trace={k:v[i,:length] for k,v in traces.items()}
-            requested=observation_tick(r['seed'],ticks);selected=min(requested,length-1)
+            requested,selected,fraction=select_observation(r['seed'],ticks,length,observation_selection)
             previous_control=trace['control'][selected-1] if selected else np.full(2,c.robot.mass*c.robot.gravity/2,np.float32)
             previous_gain=trace['gain'][selected-1] if selected else np.array([4.,4.],np.float32)
             cursor=float(trace['route_progress'][selected-1]) if selected else 0.
@@ -130,6 +195,7 @@ def prepare(source,output,batch=8,shard_index=0,shards=1,mode='fixed',bundle=Non
                 cursor=cursor,previous_control=previous_control.tolist(),previous_gain=previous_gain.tolist(),
                 observation_origin=dict(requested_tick=requested,selected_tick=selected,behavior_mode=behavior,behavior_initial_gain=[4.,4.],terminal_status=NAMES[status],
                     source_group_id=r['group_id'],source_record=offset+i,source_key=keys[i].tolist(),trace_file=f'behavior_{offset+i:05d}.npz'))
+            if fraction is not None:record['observation_origin']['selected_fraction']=fraction
             data=dict(trace,true_initial_state=truth['initial_state'][i],true_obstacles=truth['obstacles'][i],
                 initial_observation=x[i],observed_obstacles_initial=obs[i],obstacle_mask=mask[i],noise=noise[i],goal=goal[i],
                 group_id=r['group_id'],key=keys[i],expected_steps=count,final_status=status,min_clearance=summary['min_clearance'])
@@ -144,8 +210,9 @@ def prepare(source,output,batch=8,shard_index=0,shards=1,mode='fixed',bundle=Non
         acquisition_sharding=dict(shard_index=shard_index,shards=shards,batch=batch,total_parents=len(rows)),
         source_fingerprint=source_fingerprint(),scenes_sha256=sha256(root/'scenes.json'),index_sha256=sha256(root/'index.json'),
         visited_observations=True,predictive_guidance=asdict(g),initial_previous_gain=[4.,4.],
-        acquisition_mode=mode,acquisition_batch=batch,observation_ticks=list(ticks),acquisition_horizon=horizon,behavior_teacher=teacher,behavior_policies=contracts,candidates=candidates.tolist(),
-        observation_sampling='One query per original parent at a uniformly prespecified observation_tick. Behavior determined by original batch number before outcomes; mixed means75%learned25%fixed4; backup_mixed means75%backup25%fixed4, staggered every16batches. On earlier termination retain last recorded decision; discard no parent. Full physical behavior prefixes retained.',
+        acquisition_mode=mode,acquisition_batch=batch,observation_ticks=list(ticks),acquisition_horizon=horizon,behavior_teacher=teacher,behavior_policies=contracts,candidates=candidates.tolist(),fallback_mode=fallback_mode,
+        observation_selection=observation_selection,behavior_fc_teacher=fc_teacher,
+        observation_sampling='One query per original parent. Fixed ticks clamp at the last recorded decision; episode_fraction samples uniformly from0,1/8,...,1 of the recorded prefix using a prespecified seed. Episode length is used offline only. No parent/failure is discarded. Original-batch schedule selects behavior before outcomes; matched_learned uses equal frozen GAT/FC behavior, staggered across all workers. Full physical prefixes retained.',
         requery_prior='Fresh synthetic latent prior around saved observed state/obstacles using the original declared ranges, with independent keys. Not the acquisition trajectory posterior or an unobserved physical continuation.',
         excluded_development_evaluation_parents=excluded,compile_seconds=compile_seconds,execution_seconds=execution_seconds,
         limitations='One initial or visited observed context per independent development parent; fresh synthetic requery prior, not posterior continuation or final evaluation.')
@@ -155,9 +222,10 @@ def prepare(source,output,batch=8,shard_index=0,shards=1,mode='fixed',bundle=Non
 
 
 def audit(source):
-    root=Path(source);m=json.loads((root/'manifest.json').read_text());c=FlightConfig()
+    root=Path(source);m=json.loads((root/'manifest.json').read_text());c=flight_config_from_contract(m['config'])
     if m['scenes_sha256']!=sha256(root/'scenes.json') or m['index_sha256']!=sha256(root/'index.json'):raise ValueError('Acquisition binding changed')
     original=Path(m['source']);sm=json.loads((original/'manifest.json').read_text())
+    if flight_config_from_contract(sm['config'])!=c:raise ValueError('Acquisition physical contract changed')
     if sha256(original/'manifest.json')!=m['source_manifest_sha256'] or sha256(original/'scenes.json')!=sm['scenes_sha256']:raise ValueError('Raw acquisition parents changed')
     raw=json.loads((original/'scenes.json').read_text());rows=json.loads((root/'scenes.json').read_text());index=json.loads((root/'index.json').read_text())
     positions={r['group_id']:i for i,r in enumerate(raw)}
@@ -166,9 +234,11 @@ def audit(source):
         reserved=sm.get('data_role')=='fresh_predictive_calibration' and sm.get('weight_fit_authorized') is False and sm.get('training_use') is False
         if not (sm.get('training_use') is True or reserved) or sm.get('final_test'):raise ValueError('Acquisition of held evaluation inputs')
         ticks=m['observation_ticks'];observation_tick(raw[0]['seed'],ticks)
-        if m['acquisition_horizon']!=max(ticks)+1:raise ValueError('Changed acquisition horizon')
         teacher=m['behavior_teacher']
-        if teacher is not None:
+        expected_horizon=acquisition_horizon(ticks,json.loads(Path(teacher['calibration']).read_text()) if teacher else None)
+        if m['acquisition_horizon']!=expected_horizon:raise ValueError('Changed acquisition horizon')
+        fc_teacher=m.get('behavior_fc_teacher')
+        for teacher in (t for t in (m['behavior_teacher'],fc_teacher) if t is not None):
             candidates,bank=load_gain_bank(teacher['gain_bank']['dataset'],c)
             if bank!=teacher['gain_bank'] or candidates.tolist()!=m['candidates'] or sha256(teacher['calibration'])!=teacher['calibration_sha256']:raise ValueError('Acquisition teacher binding changed')
             cal=json.loads(Path(teacher['calibration']).read_text())
@@ -177,13 +247,23 @@ def audit(source):
                 raise ValueError('Acquisition behavior weights changed')
             dm=json.loads((Path(bank['dataset'])/'manifest.json').read_text())
             if set(positions)&{r['group_id'] for r in dm['groups']}:raise ValueError('Teacher training/calibration parent reused')
+            if acquisition_horizon(ticks,cal)!=expected_horizon:raise ValueError('Behavior mission mismatch')
+        teacher=m['behavior_teacher']
         behavior_for_batch(0,m['acquisition_mode'])
-        if (teacher is not None)!=(m['acquisition_mode'] in ('learned','mixed')):raise ValueError('Missing/unexpected acquisition teacher')
-        expected_modes={'fixed','learned'} if m['acquisition_mode']=='mixed' else {'fixed','backup'} if m['acquisition_mode']=='backup_mixed' else {m['acquisition_mode']}
+        if (teacher is not None)!=(m['acquisition_mode'] in ('learned','mixed','matched_learned','matched_held')):raise ValueError('Missing/unexpected acquisition teacher')
+        if (fc_teacher is not None)!=(m['acquisition_mode'] in ('matched_learned','matched_held')):raise ValueError('Missing/unexpected FC behavior teacher')
+        if fc_teacher:
+            for t,encoder in ((teacher,'gat'),(fc_teacher,'matched_fc')):
+                if json.loads((Path(t['bundle'])/'manifest.json').read_text())['architecture']['encoder']!=encoder:
+                    raise ValueError('Incorrect behavior encoder')
+        expected_modes={'learned','matched_fc'} if m['acquisition_mode']=='matched_learned' else {'fixed','learned'} if m['acquisition_mode']=='mixed' else {'fixed','backup'} if m['acquisition_mode']=='backup_mixed' else {m['acquisition_mode']}
+        if m['acquisition_mode']=='matched_held':
+            expected_modes={'learned','matched_fc','backup'}
+            if m.get('fallback_mode')!='hold_previous':raise ValueError('Changed matched held behavior')
         if set(m['behavior_policies'])!=expected_modes:raise ValueError('Missing/unexpected acquisition policy')
         if teacher is None and m['candidates']!=[[1.,1.],[2.,2.],[4.,4.],[8.,8.]]:raise ValueError('Changed nonlearned acquisition candidates')
         for mode,contract in m['behavior_policies'].items():
-            expected=FlightPolicyConfig(mode=mode,validation_horizon=40) if mode in ('learned','backup') else FlightPolicyConfig(mode='fixed')
+            expected=behavior_policy(mode,40,m.get('fallback_mode','fixed_set'))
             if contract!=json.loads(json.dumps(asdict(expected))):raise ValueError('Changed behavior selector contract')
     else:ticks=[0,40,120,240]
     if 'acquisition_sharding' in m:
@@ -198,9 +278,10 @@ def audit(source):
         summary=dict(steps=entry['steps'],status=entry['status'],min_clearance=entry['min_clearance'])
         result=check_trace(d,summary,np.asarray(before['initial_state']),np.asarray(before['obstacles']),np.asarray(before['obstacle_mask']),np.asarray(before['noise']),d['gain'],c)
         check_guidance_trace(d,m['predictive_guidance'],goal=before['goal'])
-        requested=observation_tick(before['seed'],ticks);k=min(requested,len(d['active'])-1)
+        requested,k,fraction=select_observation(before['seed'],ticks,len(d['active']),m.get('observation_selection','fixed_tick'))
         origin=r['observation_origin']
         if origin['requested_tick']!=requested or origin['selected_tick']!=k or origin['trace_file']!=entry['file']:raise ValueError('Changed observation selection')
+        if origin.get('selected_fraction')!=fraction:raise ValueError('Changed fractional observation selection')
         expected_key=np.asarray(jax.random.PRNGKey(before['seed']+7331))
         if origin['source_record']!=positions[r['group_id']] or origin['source_group_id']!=r['group_id'] or origin['terminal_status']!=NAMES[entry['status']]:raise ValueError('Changed acquisition ancestry')
         np.testing.assert_array_equal(d['key'],expected_key);np.testing.assert_array_equal(origin['source_key'],expected_key)
@@ -235,6 +316,8 @@ def merge(parts,output):
     fields=['source','source_manifest_sha256','source_fingerprint','config','predictive_guidance','seed','excluded_development_evaluation_parents','observation_sampling','requery_prior']
     if m.get('data_role')=='fresh_predictive_calibration':fields+=['data_role','training_use','weight_fit_authorized','calibration_reservation']
     if m.get('schema')=='oa_cbf_quad2d_guided_observation_source_v2':fields+=['schema','acquisition_mode','acquisition_batch','observation_ticks','acquisition_horizon','behavior_teacher','behavior_policies','candidates']
+    for field in ('observation_selection','behavior_fc_teacher','fallback_mode'):
+        if any(field in v for v in manifests):fields.append(field)
     if any(any(v[k]!=m[k] for k in fields) for v in manifests):raise ValueError('Mismatched acquisition contracts')
     sharding=[v['acquisition_sharding'] for v in manifests]
     if any(s['shards']!=len(parts) or s['batch']!=sharding[0]['batch'] for s in sharding) or sorted(s['shard_index'] for s in sharding)!=list(range(len(parts))):
@@ -271,7 +354,7 @@ def merge(parts,output):
 def benchmark(source,output,parents=4,queries=16,replicas=4,horizon=160,noise_clearance_weight=0.,terminal_transition_distance=0.):
     root=Path(source);sm=json.loads((root/'manifest.json').read_text());rows=json.loads((root/'scenes.json').read_text())[:parents]
     if len(rows)!=parents or sha256(root/'scenes.json')!=sm['scenes_sha256']:raise ValueError('Invalid timing parents')
-    c=FlightConfig();g=NoiseClearanceGuidanceConfig(noise_clearance_weight=noise_clearance_weight) if noise_clearance_weight else GuidanceConfig()
+    c=flight_config_from_contract(sm['config']);g=NoiseClearanceGuidanceConfig(noise_clearance_weight=noise_clearance_weight) if noise_clearance_weight else GuidanceConfig()
     if not np.isfinite(terminal_transition_distance) or terminal_transition_distance<0:raise ValueError('Invalid terminal transition')
     if terminal_transition_distance:
         if not noise_clearance_weight:raise ValueError('Terminal guidance requires the noise-aware parent contract')
@@ -301,10 +384,12 @@ def benchmark(source,output,parents=4,queries=16,replicas=4,horizon=160,noise_cl
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','audit','benchmark','merge']);p.add_argument('--source');p.add_argument('--output');p.add_argument('--parts',nargs='+')
     p.add_argument('--shard-index',type=int,default=0);p.add_argument('--shards',type=int,default=1)
-    p.add_argument('--mode',choices=['fixed','learned','mixed','backup','backup_mixed'],default='fixed');p.add_argument('--bundle');p.add_argument('--calibration');p.add_argument('--gain-dataset');p.add_argument('--ticks',type=int,nargs='+',default=[0,40,120,240])
+    p.add_argument('--mode',choices=['fixed','learned','mixed','backup','backup_mixed','matched_learned','matched_held'],default='fixed');p.add_argument('--bundle');p.add_argument('--calibration');p.add_argument('--gain-dataset');p.add_argument('--ticks',type=int,nargs='+',default=[0,40,120,240])
+    p.add_argument('--fallback-mode',choices=['fixed_set','hold_previous'],default='fixed_set')
+    p.add_argument('--observation-selection',choices=['fixed_tick','episode_fraction'],default='fixed_tick');p.add_argument('--fc-bundle');p.add_argument('--fc-calibration')
     p.add_argument('--noise-clearance-weight',type=float,default=0.);p.add_argument('--terminal-transition-distance',type=float,default=0.)
     p.add_argument('--batch',type=int,default=8);p.add_argument('--parents',type=int,default=4);p.add_argument('--queries',type=int,default=16);p.add_argument('--replicas',type=int,default=4);p.add_argument('--horizon',type=int,default=160);a=p.parse_args()
-    if a.action=='prepare':prepare(a.source,a.output,a.batch,a.shard_index,a.shards,a.mode,a.bundle,a.calibration,a.gain_dataset,a.ticks,a.noise_clearance_weight,a.terminal_transition_distance)
+    if a.action=='prepare':prepare(a.source,a.output,a.batch,a.shard_index,a.shards,a.mode,a.bundle,a.calibration,a.gain_dataset,a.ticks,a.noise_clearance_weight,a.terminal_transition_distance,a.observation_selection,a.fc_bundle,a.fc_calibration,a.fallback_mode)
     elif a.action=='merge':merge(a.parts,a.output)
     elif a.action=='audit':audit(a.source)
     else:benchmark(a.source,a.output,a.parents,a.queries,a.replicas,a.horizon,a.noise_clearance_weight,a.terminal_transition_distance)

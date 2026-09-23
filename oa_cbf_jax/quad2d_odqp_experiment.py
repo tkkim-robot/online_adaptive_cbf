@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 import jax
 import numpy as np
-from .quad2d_control import FlightConfig
+from .quad2d_control import FlightConfig,flight_config_from_contract
 from .quad2d_mpc_experiment import FlightPhysicalKernels
 from .quad2d_odqp import Quad2DODQP,contract,problem,nominal,nearest
 from .quad2d_audit import check_trace,physical_flow
@@ -142,10 +142,11 @@ def audit_episode(parent,data,row,config=FlightConfig()):
 
 
 def run(source,output,steps=1600,shard_index=0,shards=1):
-    source=Path(source);root=Path(output);root.mkdir(parents=True,exist_ok=False);c=FlightConfig()
+    source=Path(source);root=Path(output);root.mkdir(parents=True,exist_ok=False)
     sm=json.loads((source/'manifest.json').read_text());parents=json.loads((source/'scenes.json').read_text());ordered=any('waypoint_count' in p for p in parents)
+    c=flight_config_from_contract(sm['config'])
     legacy_held={'quad2d_v30_policy_pilot_inputs','quad2d_v31_fresh_inputs'}
-    if sm['scenes_sha256']!=sha256(source/'scenes.json') or sm['config']!=asdict(c) or (sm.get('training_use') is not False and source.name not in legacy_held):raise ValueError('Audited-format held evaluation source required')
+    if sm['scenes_sha256']!=sha256(source/'scenes.json') or (sm.get('training_use') is not False and source.name not in legacy_held):raise ValueError('Audited-format held evaluation source required')
     if ordered:
         if sm['waypoint_contract']!=CONTRACT:raise ValueError('Unknown ordered task')
         for p in parents:validate_parent(p)
@@ -162,8 +163,8 @@ def run(source,output,steps=1600,shard_index=0,shards=1):
 
 
 def audit(directory):
-    root=Path(directory);m=json.loads((root/'manifest.json').read_text());source=Path(m['source']);sm=json.loads((source/'manifest.json').read_text());c=FlightConfig()
-    if m['schema']!='quad2d_default_odqp_evaluation_v1' or m['config']!=asdict(c) or m['controller']!=contract(c):raise ValueError('Changed OD-QP/default-solver contract')
+    root=Path(directory);m=json.loads((root/'manifest.json').read_text());source=Path(m['source']);sm=json.loads((source/'manifest.json').read_text());c=flight_config_from_contract(m['config'])
+    if m['schema']!='quad2d_default_odqp_evaluation_v1' or flight_config_from_contract(sm['config'])!=c or m['controller']!=contract(c):raise ValueError('Changed OD-QP/default-solver contract')
     if sha256(source/'manifest.json')!=m['source_manifest_sha256'] or sha256(source/'scenes.json')!=sm['scenes_sha256']:raise ValueError('Changed task source')
     parents=json.loads((source/'scenes.json').read_text())[m['shard_index']::m['shards']];rows=json.loads((root/'index.json').read_text());audits=[]
     if [r['group_id'] for r in rows]!=[p['group_id'] for p in parents]:raise ValueError('Lost/extra/reordered task')

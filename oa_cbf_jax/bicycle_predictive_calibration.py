@@ -34,13 +34,34 @@ def reserved_role_groups(ids,roles,reserved):
     return selections,groups
 
 
-def validate_model(metadata,manifest):
-    if metadata.get('dataset_schema')!=DATA_SCHEMA or metadata.get('gain_dimension')!=1 or metadata.get('graph_features')!=35 or metadata['architecture']['encoder'] not in ('gat','full_fc'):
+def validate_model(metadata,manifest,qualified_motion=False,qualified_candidate=False):
+    candidate=metadata.get('architecture',{}).get('bicycle_candidate_encoding',False)
+    if candidate and not qualified_candidate:
+        raise ValueError('Candidate-encoding pilot requires separate runtime qualification before calibration')
+    if candidate:
+        from .bicycle_candidate_features import validate_metadata
+        validate_metadata(metadata)
+    motion=metadata.get('architecture',{}).get('bicycle_motion_history',False)
+    if motion and not qualified_motion:
+        raise ValueError('Observed motion-history pilot requires separate runtime qualification before calibration')
+    if motion:
+        from .bicycle_motion_runtime import validate_metadata
+        validate_metadata(metadata)
+    if metadata.get('architecture',{}).get('bicycle_affine_gain'):
+        raise ValueError('Affine-gain pilot requires separate runtime qualification before calibration')
+    if metadata.get('architecture',{}).get('bicycle_constraint_features'):
+        from .bicycle_constraint_features import contract
+        if metadata.get('bicycle_constraint_features_contract') != contract():
+            raise ValueError('Missing or changed observed constraint feature contract')
+    if metadata.get('offline_reserve_auxiliary_pilot') or metadata.get('architecture',{}).get('bicycle_reserve_auxiliary'):
+        raise ValueError('Reserve auxiliary pilot requires explicit reviewed runtime qualification before calibration')
+    if metadata.get('dataset_schema')!=DATA_SCHEMA or metadata.get('gain_dimension')!=1 or metadata.get('graph_features')!=(39 if motion else 35) or metadata['architecture']['encoder'] not in ('gat','full_fc','matched_fc'):
         raise ValueError('Observed scalar-gain bicycle GAT or complete-input FC required')
-    if metadata.get('bicycle_contract',{}).get('sensor_schema')!=SENSOR_SCHEMA or metadata['bicycle_contract'].get('graph_schema')!=GRAPH_SCHEMA:
+    if metadata.get('bicycle_contract',{}).get('sensor_schema')!=SENSOR_SCHEMA or metadata['bicycle_contract'].get('source_graph_schema' if motion else 'graph_schema')!=GRAPH_SCHEMA:
         raise ValueError('Wrong bicycle sensing/feature contract')
     for field in ('config','sensor_schema','graph_schema','horizon_steps','capacity','replicas','snapshot_ticks','acquisition_mode'):
-        if metadata['bicycle_contract'].get(field)!=manifest.get(field):raise ValueError('Bicycle contract mismatch: '+field)
+        actual=metadata['bicycle_contract'].get('source_graph_schema' if motion and field=='graph_schema' else field)
+        if actual!=manifest.get(field):raise ValueError('Bicycle contract mismatch: '+field)
     for field in ('targets','events','controller','gain_domain'):
         if metadata[field]!=manifest[field]:raise ValueError('Changed bicycle prediction semantics: '+field)
 
@@ -85,30 +106,86 @@ def diagnostics(prediction,data,fit):
         limitation='Parent-weighted observed-label diagnostics. Censored futures stay missing. Not unconditional tail/physical CVaR, OOD, trajectory or rare-collision confidence.')
 
 
-def calibrate(bundle,dataset,output,batch=64):
-    root=Path(output);root.mkdir(parents=True,exist_ok=False);dataset=Path(dataset);m=validate_training_dataset(dataset)
-    model=ResearchPredictor(bundle,allow_uncalibrated=True);validate_model(model.metadata,m)
+def calibrated_parameters(prediction,data,variance_method='moment'):
+    if variance_method not in ('moment','mixture_likelihood'):
+        raise ValueError('Unknown reserved-parent variance procedure')
+    result=fit_parameters(prediction,data)
+    if variance_method=='mixture_likelihood':
+        from .bicycle_variance_calibration import fit_scales
+        result.update(fit_scales(prediction,data))
+    return result
+
+
+def calibrate(bundle,dataset,output,batch=64,variance_method='moment',runtime_qualification=None,phase='full'):
+    if phase not in ('full','fit','audit'):raise ValueError('Unknown calibration phase')
+    root=Path(output)
+    if phase=='audit':
+        if not (root/'prediction_fit.json').is_file() or (root/'prediction_audit.json').exists():
+            raise ValueError('Audit requires a frozen fit and a fresh audit artifact')
+    else:root.mkdir(parents=True,exist_ok=False)
+    print(json.dumps(dict(stage='validate_original_training_sources',phase=phase)),flush=True)
+    dataset=Path(dataset);m=validate_training_dataset(dataset)
+    model=ResearchPredictor(bundle,allow_uncalibrated=True)
+    motion=model.model.config.bicycle_motion_history
+    candidate=model.model.config.bicycle_candidate_encoding
+    if candidate:
+        from .bicycle_candidate_calibration import validate_qualification
+        validate_qualification(runtime_qualification,bundle,dataset)
+    if motion:
+        from .bicycle_motion_calibration import validate_qualification
+        validate_qualification(runtime_qualification,bundle,dataset)
+    validate_model(model.metadata,m,qualified_motion=motion,qualified_candidate=candidate)
+    if model.model.config.bicycle_constraint_features and not (motion or candidate):
+        from .bicycle_constraint_runtime import validate_qualification
+        validate_qualification(runtime_qualification,bundle,dataset)
     if sha256(dataset/'manifest.json')!=model.metadata['dataset_manifest_sha256']:raise ValueError('Wrong weight-training lineage')
+    print(json.dumps(dict(stage='load_reserved_queries',phase=phase)),flush=True)
     data=load_dataset(dataset,'development_calibration');ids=data['group_id'];roles=data['calibration_role']
+    motion_proof=None
+    if motion:
+        from .bicycle_motion_calibration import observed_history
+        print(json.dumps(dict(stage='reconstruct_causal_reserved_history',phase=phase,queries=len(ids))),flush=True)
+        past,elapsed,motion_proof=observed_history(data,dataset)
+        data.update(motion_past_positions=past,motion_elapsed=elapsed)
+        history_path=root/'motion_history_sources.json'
+        if history_path.exists():
+            if read(history_path)!=motion_proof:raise ValueError('Reserved motion-history source changed')
+        else:write_json(history_path,motion_proof)
     graph_proof=dict(mode='original_stored_fp32',compiled_graph_signatures=0)
-    if model.model.config.compute_dtype=='float64':
+    if model.model.config.compute_dtype=='float64' or motion:
         # Reconstruct from actual saved observations/history, never the adjacent
         # latent physical state or obstacle arrays. Same numeric path as runtime.
         from .bicycle_features import bicycle_inference_graph
         from .bicycle_experiment import control_config
         c=control_config(m['config'])
         fields=('observed_state','goal','observed_obstacles','obstacle_mask','points','route_mask','cursor','previous_control','previous_gain','noise')
-        def graph(*a):return jax.vmap(lambda *v:bicycle_inference_graph(*v,config=c,compute_dtype='float64'))(*a)
+        if motion:
+            from .bicycle_motion_runtime import graph as history_graph
+            fields+=('motion_past_positions','motion_elapsed')
+        def graph(*a):
+            if motion:return jax.vmap(lambda *v:history_graph(*v,config=c,compute_dtype=model.model.config.compute_dtype))(*a)
+            return jax.vmap(lambda *v:bicycle_inference_graph(*v,config=c,compute_dtype='float64'))(*a)
         graph_fn=jax.jit(graph)
         def graph_args(start):
-            return tuple(jnp.asarray(np.pad(data[k][start:start+batch],((0,max(0,batch-len(ids[start:start+batch]))),)+((0,0),)*(data[k].ndim-1)),dtype=bool if k in ('obstacle_mask','route_mask') else jnp.float32) for k in fields)
+            return tuple(jnp.asarray(np.pad(data[k][start:start+batch],((0,max(0,batch-len(ids[start:start+batch]))),)+((0,0),)*(data[k].ndim-1)),dtype=bool if k in ('obstacle_mask','route_mask') else jnp.float64 if k=='motion_elapsed' else jnp.float32) for k in fields)
         start=time.monotonic();graph_exe=graph_fn.lower(*graph_args(0)).compile();cold_graph=time.monotonic()-start
         features=[];masks=[]
         for i in range(0,len(ids),batch):
             f,mask=jax.device_get(graph_exe(*graph_args(i)));n=min(batch,len(ids)-i);features.append(f[:n]);masks.append(mask[:n])
         regenerated=np.concatenate(features);np.testing.assert_array_equal(np.concatenate(masks),data['node_mask'])
         graph_proof=dict(mode='observed_context_fp64_reconstruction',input_fields=list(fields),compiled_graph_signatures=1,compile_seconds=cold_graph,
-            implicit_jit_cache_entries=graph_fn._cache_size(),maximum_change_from_stored_fp32=float(np.max(np.abs(regenerated-data['features']))))
+            implicit_jit_cache_entries=graph_fn._cache_size(),maximum_change_from_stored_fp32=float(np.max(np.abs(regenerated[...,:35]-data['features']))))
+        if motion:
+            from .bicycle_motion_features import numpy_features
+            history_error=0.
+            for i,feature in enumerate(regenerated):
+                expected=numpy_features(feature[:,:35],data['node_mask'][i],data['observed_state'][i],
+                    data['observed_obstacles'][i],past[i],data['noise'][i],elapsed[i])
+                np.testing.assert_allclose(feature,expected,atol=3e-6,rtol=2e-6)
+                history_error=max(history_error,float(np.max(np.abs(feature-expected))))
+            graph_proof.update(mode='observed_context_and_causal_motion_history',history_sources_sha256=sha256(root/'motion_history_sources.json'),
+                graph_features=39,physical_truth_loaded=False,every_history_feature_independently_verified=True,
+                independent_history_max_error=history_error)
         if graph_fn._cache_size():raise ValueError('Unexpected graph JIT during calibration')
         data['features']=regenerated
     source=read(Path(m['source'])/'scenes.json');reserved={r['group_id']:r for r in source if r['partition']=='development_calibration'}
@@ -120,8 +197,8 @@ def calibrate(bundle,dataset,output,batch=64):
         out=predict_ensemble(model.model,params,features,mask,gains)
         return dict(mean=out['mean']*scale+mean,variance=jnp.exp(out['log_variance'])*scale**2,event_logits=out['event_logits'])
     feature_dtype=jnp.float64 if model.model.config.compute_dtype=='float64' else jnp.float32
-    arguments=(jnp.zeros((batch,66,35),feature_dtype),jnp.ones((batch,66),bool),jnp.ones((batch,8,1),jnp.float32))
-    start=time.monotonic();execute=jax.jit(raw).lower(model.params,*arguments).compile();jax.block_until_ready(execute(model.params,*arguments));cold=time.monotonic()-start
+    arguments=(jnp.zeros((batch,66,model.metadata['graph_features']),feature_dtype),jnp.ones((batch,66),bool),jnp.ones((batch,8,1),jnp.float32))
+    start=time.monotonic();raw_fn=jax.jit(raw);execute=raw_fn.lower(model.params,*arguments).compile();jax.block_until_ready(execute(model.params,*arguments));cold=time.monotonic()-start
     def predict(indices):
         result=[]
         for start in range(0,len(indices),batch):
@@ -131,7 +208,8 @@ def calibrate(bundle,dataset,output,batch=64):
             result.append({k:np.repeat(v[:,:n],replica,axis=2) for k,v in p.items()})
         return {k:np.concatenate([v[k] for v in result],axis=1) for k in result[0]}
     subset=lambda idx:{k:v[idx] for k,v in data.items()}
-    fit_prediction=predict(selections['prediction_fit']);parameters=fit_parameters(fit_prediction,subset(selections['prediction_fit']))
+    print(json.dumps(dict(stage='fit_reserved_prediction_parameters',phase=phase,queries=len(selections['prediction_fit']))),flush=True)
+    fit_prediction=predict(selections['prediction_fit']);parameters=calibrated_parameters(fit_prediction,subset(selections['prediction_fit']),variance_method)
     fit=dict(schema=SCHEMA,stage='prediction_fit_only',bundle=str(Path(bundle).resolve()),weights_sha256=model.metadata['weights_sha256'],bundle_manifest_sha256=sha256(Path(bundle)/'manifest.json'),
         dataset=str(dataset.resolve()),dataset_manifest_sha256=sha256(dataset/'manifest.json'),dataset_index_sha256=sha256(dataset/'index.json'),dataset_audit_sha256=sha256(dataset/'independent_replay.json'),source_manifest_sha256=m['source_manifest_sha256'],
         bicycle_contract=model.metadata['bicycle_contract'],controller=m['controller'],targets=m['targets'],events=m['events'],gain_domain=m['gain_domain'],candidates=bank.tolist(),group_ids=groups,
@@ -139,11 +217,32 @@ def calibrate(bundle,dataset,output,batch=64):
         event_budget_statistic='Maximum-member calibrated any_adverse_termination only. Includes collision/physical bounds/CBF/QP/planner rejection; censored collision_first head is not unconditional collision probability.',
         inference_graph=graph_proof,trajectory_gate_ready=False,production_eligible=False,whole_goal_complete=False,
         limitation='Development variance/event fit under actual fixed-gain acquired histories. Empirical conditional prediction adjustment; no posterior, physical CVaR, adaptive-trajectory, OOD or rare-collision guarantee. Fresh trajectory gate and final-policy physical audit required.')
+    if runtime_qualification is not None:
+        fit.update(runtime_qualification=str(Path(runtime_qualification).resolve()),runtime_qualification_sha256=sha256(runtime_qualification))
     # Freeze the fitted artifact before predicting or evaluating the held role.
-    write_json(root/'prediction_fit.json',fit);fit_sha=sha256(root/'prediction_fit.json')
+    if phase=='audit':
+        frozen=read(root/'prediction_fit.json')
+        for key in ('weights_sha256','bundle_manifest_sha256','dataset_manifest_sha256','dataset_index_sha256','dataset_audit_sha256','group_ids','candidates','prediction_batch',*parameters):
+            if frozen[key]!=fit[key]:raise ValueError('Frozen prediction fit does not reproduce: '+key)
+        if runtime_qualification is not None and frozen['runtime_qualification_sha256']!=sha256(runtime_qualification):
+            raise ValueError('Changed runtime qualification')
+        with np.load(root/'prediction_fit_predictions.npz') as cache:
+            for key,value in fit_prediction.items():np.testing.assert_array_equal(value,cache[key])
+        fit=frozen
+    else:
+        write_json(root/'prediction_fit.json',fit)
+        idx=selections['prediction_fit']
+        np.savez_compressed(root/'prediction_fit_predictions.npz',group_id=ids[idx],query_tick=data['query_tick'][idx],**fit_prediction)
+    fit_sha=sha256(root/'prediction_fit.json')
+    if phase=='fit':
+        if raw_fn._cache_size():raise ValueError('Unexpected prediction JIT during fitting')
+        print(json.dumps(dict(stage='prediction_fit_frozen',prediction_fit_sha256=fit_sha)),flush=True)
+        return
     audit_prediction=predict(selections['prediction_audit'])
+    if raw_fn._cache_size():raise ValueError('Unexpected prediction JIT during calibration')
     report=dict(prediction_fit_sha256=fit_sha,fit=diagnostics(fit_prediction,subset(selections['prediction_fit']),fit),audit=diagnostics(audit_prediction,subset(selections['prediction_audit']),fit),model_promoted=False,whole_goal_complete=False)
     for role,prediction in [('prediction_fit',fit_prediction),('prediction_audit',audit_prediction)]:
+        if role=='prediction_fit':continue
         idx=selections[role];np.savez_compressed(root/(role+'_predictions.npz'),group_id=ids[idx],query_tick=data['query_tick'][idx],**prediction)
     write_json(root/'prediction_audit.json',report);write_json(root/'complete.json',dict(status='completed',prediction_fit_sha256=fit_sha,prediction_audit_sha256=sha256(root/'prediction_audit.json'),whole_goal_complete=False))
     print(json.dumps(dict(stage='predictive_fit_audit_completed',variance_scale=fit['variance_scale'],event_calibration=fit['event_calibration'],diagnostics=report)),flush=True)
@@ -152,4 +251,7 @@ def calibrate(bundle,dataset,output,batch=64):
 if __name__=='__main__':
     p=argparse.ArgumentParser()
     for field in ('bundle','dataset','output'):p.add_argument('--'+field,required=True)
-    p.add_argument('--batch',type=int,default=64);calibrate(**vars(p.parse_args()))
+    p.add_argument('--batch',type=int,default=64)
+    p.add_argument('--variance-method',choices=['moment','mixture_likelihood'],default='moment')
+    p.add_argument('--phase',choices=['full','fit','audit'],default='full')
+    p.add_argument('--runtime-qualification');calibrate(**vars(p.parse_args()))

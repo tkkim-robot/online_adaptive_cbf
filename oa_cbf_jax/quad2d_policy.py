@@ -47,6 +47,45 @@ class FlightPolicyConfig:
         if not all(np.isfinite(g).all() and np.min(g)>0 for g in (self.fixed_gain,*self.backup_gains)): raise ValueError('Invalid gain')
 
 
+@dataclass(frozen=True)
+class ProgressAdmissionPolicyConfig(FlightPolicyConfig):
+    progress_admission: str = 'quad2d_paired_progress_admission_v1'
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.progress_admission != 'quad2d_paired_progress_admission_v1' or self.backup_gains:
+            raise ValueError('Paired progress admission requires previous-gain-only fallback')
+
+
+@dataclass(frozen=True)
+class IncumbentProgressPolicyConfig(FlightPolicyConfig):
+    incumbent_progress: str = 'feasible_previous_score_v1'
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.incumbent_progress!='feasible_previous_score_v1' or self.backup_gains or self.mode=='fixed':
+            raise ValueError('Incumbent comparison requires guided previous-gain-only control')
+
+
+@dataclass(frozen=True)
+class FeasibilityTriggeredPolicyConfig(FlightPolicyConfig):
+    query_trigger: str = 'previous_gain_infeasible_v1'
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.query_trigger != 'previous_gain_infeasible_v1' or self.backup_gains or self.mode=='fixed':
+            raise ValueError('Feasibility trigger requires guided previous-gain-only adaptation')
+
+
+def flight_policy_from_contract(contract):
+    if 'incumbent_progress' in contract:
+        return IncumbentProgressPolicyConfig(**contract)
+    if 'query_trigger' in contract:
+        return FeasibilityTriggeredPolicyConfig(**contract)
+    cls = ProgressAdmissionPolicyConfig if 'progress_admission' in contract else FlightPolicyConfig
+    return cls(**contract)
+
+
 def make_selector(model, norm, config, policy):
     if policy.mode == 'learned':
         scale=jnp.asarray(norm['target_scale'],jnp.float32);mean=jnp.asarray(norm['target_mean'],jnp.float32)
@@ -79,7 +118,7 @@ def make_selector(model, norm, config, policy):
             return valid,score
         valid,_=validate(primary);valid &= admitted[indices]
         index=jnp.argmax(jnp.where(valid,ranking[indices],-jnp.inf));primary_ok=jnp.any(valid)
-        backup_pool=jnp.concatenate((previous_gain[None],jnp.asarray(policy.backup_gains,x.dtype)))
+        backup_pool=jnp.concatenate((previous_gain[None],jnp.asarray(policy.backup_gains,x.dtype).reshape(-1,2)))
         def backup(_):
             ok,score=validate(backup_pool);index=jnp.argmax(jnp.where(ok,score,-jnp.inf))
             return backup_pool[index],jnp.any(ok),jnp.sum(ok).astype(jnp.int32)
@@ -117,8 +156,17 @@ def make_guided_selector(model,norm,config,policy,guidance,record_query_statisti
             qp,h,psi,domain,_,_,_=results
             ok=infos['approved']&qp.feasible&(h>=-config.robot.qp_tolerance)&(psi>=-config.robot.qp_tolerance)&(domain>=-config.robot.qp_tolerance)
             return results,infos,ok
+        compare_previous=isinstance(policy,IncumbentProgressPolicyConfig) and policy.mode=='learned'
+        if compare_previous:
+            previous_result,previous_info,previous_ok=validate(previous_gain[None])
         def backup(_):
-            gains=jnp.concatenate((previous_gain[None],jnp.asarray(policy.backup_gains,x.dtype)))
+            if compare_previous:
+                return (previous_gain,previous_ok[0],jnp.int32(BACKUP),previous_ok[0].astype(jnp.int32),
+                    jax.tree.map(lambda a:a[0],previous_result),jax.tree.map(lambda a:a[0],previous_info))
+            # An explicitly empty alternative bank retains only the last
+            # accepted gain. It still needs the same current-observation witness;
+            # an invalid held gain stops the episode, never bypasses safety.
+            gains=jnp.concatenate((previous_gain[None],jnp.asarray(policy.backup_gains,x.dtype).reshape(-1,2)))
             result,info,ok=validate(gains)
             score=info['score']-.01*jnp.sum(jnp.log(gains/previous_gain)**2,axis=-1)
             index=jnp.argmax(jnp.where(ok,score,-jnp.inf))
@@ -143,15 +191,27 @@ def make_guided_selector(model,norm,config,policy,guidance,record_query_statisti
         finite=jnp.all(jnp.isfinite(mu)&jnp.isfinite(variance),axis=(0,2))&jnp.all(jnp.isfinite(event),axis=-1)&jnp.isfinite(cs)&jnp.isfinite(risk)
         epistemic=finite&(cs<=calibration['cs_threshold']);risk_ok=epistemic&(risk<=policy.risk_threshold)
         admitted=risk_ok&(event[:,0]<=policy.collision_probability_limit)&(event[:,1]<=policy.failure_probability_limit)
+        if isinstance(policy, ProgressAdmissionPolicyConfig):
+            from .quad2d_gain_improvement import admission
+            admitted &= admission(mu[...,1],variance[...,1],calibration['progress_delta_quantile'])[0]
         ranking=jnp.mean(mu[:,:,1],axis=0)-.01*jnp.sum(jnp.log(pool/previous_gain)**2,axis=-1)
         _,indices=jax.lax.top_k(jnp.where(admitted,ranking,-jnp.inf),policy.shortlist)
         primary=pool[indices]
         results,infos,valid=validate(primary);valid &= admitted[indices]
+        if compare_previous:
+            # Original neural safety gates remain necessary. A physically valid
+            # incumbent also stays in the utility comparison when those gates
+            # exclude it. Failed incumbents still allow lower-scoring recovery.
+            valid &= (~previous_ok[0]) | (ranking[indices]>ranking[-1])
         index=jnp.argmax(jnp.where(valid,ranking[indices],-jnp.inf));primary_ok=jnp.any(valid)
         primary_result=jax.tree.map(lambda a:a[index],results);primary_info=jax.tree.map(lambda a:a[index],infos)
         gain,accepted,source,bcount,result,info=jax.lax.cond(primary_ok,
             lambda _:(primary[index],jnp.asarray(True),jnp.int32(LEARNED),jnp.int32(0),primary_result,primary_info),backup,None)
         source=jnp.where(accepted,source,REJECTED).astype(jnp.int32)
+        if compare_previous:
+            info=dict(info,incumbent_previous_feasible=previous_ok[0],
+                incumbent_previous_score=ranking[-1],
+                incumbent_selected_score=jnp.where(primary_ok,ranking[indices[index]],ranking[-1]))
         stages=jnp.stack((jnp.sum(finite),jnp.sum(epistemic),jnp.sum(risk_ok),jnp.sum(admitted),bcount)).astype(jnp.int32)
         if record_query_statistics:
             info=dict(info,query_mean=mu,query_variance=variance,query_cs=cs,query_risk=risk,query_event=event)
@@ -195,13 +255,22 @@ def observed_waypoint_arrival(x,goal,noise,config=FlightConfig()):
 
 
 def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=False,record_query_statistics=False):
+    if isinstance(policy,IncumbentProgressPolicyConfig):
+        from .quad2d_guidance import TerminalGuidanceConfig
+        if type(guidance) is not TerminalGuidanceConfig or ordered_waypoints:
+            raise ValueError('Incumbent comparison requires raw single-goal terminal guidance')
+    triggered=isinstance(policy,FeasibilityTriggeredPolicyConfig)
+    if triggered:
+        from .quad2d_guidance import TerminalGuidanceConfig
+        if type(guidance) is not TerminalGuidanceConfig or ordered_waypoints:
+            raise ValueError('Feasibility trigger requires single-goal raw terminal guidance')
     select=make_selector(model,norm,config,policy);c=config.robot
     from .quad2d_guidance import ForecastMotionGuidanceConfig
     from . import motion_observer,quad2d_motion
     tracked=isinstance(guidance,ForecastMotionGuidanceConfig)
     guided_select=make_guided_selector(model,norm,config,policy,guidance,record_query_statistics) if guidance is not None and policy.mode in ('learned','backup') else None
     def episode(params,calibration,candidates,observed,goal,obstacles,mask,points,route_mask,noise,key,ready,waypoint_count=None):
-        initial,truth_obs,xb,ob,xs,os,innovations=flight_sensor_model(observed,obstacles,mask,noise,key,steps)
+        initial,truth_obs,xb,ob,xs,os,innovations=flight_sensor_model(observed,obstacles,mask,noise,key,steps,config.stationary_obstacles)
         minimum=jnp.min(signed_clearance(initial[:2],truth_obs,mask,c.radius))
         initial_goal=goal[0] if ordered_waypoints else goal
         initial_arrival=flight_arrived(initial,initial_goal,config)
@@ -231,12 +300,21 @@ def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=
                     return (*guided_select(params,calibration,sensed,task_goal,seen,mask,task_points,task_mask,cursor,previous_u,gain,noise,candidates,forecast,carry[-1] if tracked else None),jnp.asarray(True))
                 def hold(_):
                     result,info=predictive_flight_control(sensed,task_goal,seen,mask,gain,task_points,task_mask,cursor,config,guidance,noise,forecast)
+                    if isinstance(policy,IncumbentProgressPolicyConfig) and policy.mode=='learned':
+                        info=dict(info,incumbent_previous_feasible=jnp.asarray(False),
+                            incumbent_previous_score=jnp.float32(0),incumbent_selected_score=jnp.float32(0))
                     if record_query_statistics:
                         info=dict(info,**empty_query_statistics(params,candidates))
                     qp,h,psi,domain,_,_,_=result
                     ok=info['approved']&qp.feasible&(h>=-c.qp_tolerance)&(psi>=-c.qp_tolerance)&(domain>=-c.qp_tolerance)
-                    return jax.lax.cond(ok,lambda _:(gain,jnp.asarray(True),jnp.int32(HELD),jnp.zeros(5,jnp.int32),result,info,jnp.asarray(False)),query,None)
-                selected,selection_ok,source,stages,result,info,due=jax.lax.cond((k%policy.interval==0)|handoff,query,hold,None)
+                    chosen=jax.lax.cond(ok,lambda _:(gain,jnp.asarray(True),jnp.int32(HELD),jnp.zeros(5,jnp.int32),result,info,jnp.asarray(False)),query,None)
+                    if triggered:
+                        chosen=(*chosen[:5],dict(chosen[5],trigger_previous_feasible=ok),chosen[6])
+                    return chosen
+                if triggered:
+                    selected,selection_ok,source,stages,result,info,due=hold(None)
+                else:
+                    selected,selection_ok,source,stages,result,info,due=jax.lax.cond((k%policy.interval==0)|handoff,query,hold,None)
                 due &= active
                 qp,h,psi,domain,proposed,remaining,target=result
                 guidance_info={'guidance_'+key:value for key,value in info.items()}
@@ -321,6 +399,10 @@ class FlightPolicy:
         self.config=config;self.policy=policy;self.metadata={};self.params={};self.calibration={};self.model=None;self.norm=None;self.compiled={}
         self.guidance=guidance;self.fresh_calibration_candidates=None
         self.record_query_statistics=record_query_statistics
+        if isinstance(policy,IncumbentProgressPolicyConfig) and policy.mode=='learned' and not record_query_statistics:
+            raise ValueError('Incumbent comparison requires recorded live query statistics')
+        if isinstance(policy, ProgressAdmissionPolicyConfig) and guidance is None:
+            raise ValueError('Paired progress admission requires matched guided control')
         if record_query_statistics and (guidance is None or policy.mode!='learned'):
             raise ValueError('Query statistics require a learned guided policy')
         from .quad2d_guidance import ForecastMotionGuidanceConfig,ObservedMotionGuidanceConfig
@@ -335,7 +417,8 @@ class FlightPolicy:
             features=50 if isinstance(guidance,ObservedMotionGuidanceConfig) else 40
             if info.get('dynamics')!='Quad2D' or metadata.get('graph_features')!=features or info['weights_sha256']!=metadata['weights_sha256']:
                 raise ValueError('Matched flight calibration/bundle required')
-            if info['robot']!=asdict(config) or metadata['controller']['config']!=asdict(config) or info['controller']!=metadata['controller']:
+            from .quad2d_control import normalize_flight_contract
+            if normalize_flight_contract(info['robot'])!=asdict(config) or normalize_flight_contract(metadata['controller']['config'])!=asdict(config) or info['controller']!=metadata['controller']:
                 raise ValueError('Flight controller changed since labels/calibration')
             if info['dataset_manifest_sha256']!=metadata['dataset_manifest_sha256'] or info['targets']!=metadata['targets']:
                 raise ValueError('Flight target/data mismatch')
@@ -354,6 +437,12 @@ class FlightPolicy:
             self.model=predictor.model;self.params=predictor.params;self.norm=metadata['normalization'];self.metadata=metadata
             self.calibration={k:jnp.asarray(v,jnp.float32) for k,v in dict(variance_scale=info['variance_scale'],
                 temperature=[e['temperature'] for e in info['event_calibration']],bias=[e['bias'] for e in info['event_calibration']],cs_threshold=info['cs_gate']['threshold']).items()}
+            if bool(info.get('gain_improvement')) != isinstance(policy, ProgressAdmissionPolicyConfig):
+                raise ValueError('Progress calibration and admission policy must match')
+            if isinstance(policy, ProgressAdmissionPolicyConfig):
+                from .quad2d_gain_improvement import validate
+                switch = validate(info)
+                self.calibration['progress_delta_quantile'] = jnp.asarray(switch['threshold'],jnp.float32)
             self.calibration_sha256=sha256(calibration)
     def warm(self,candidates,batch=16,capacity=64,route_capacity=64,steps=1600,waypoint_capacity=None):
         candidates=np.asarray(candidates,np.float32)

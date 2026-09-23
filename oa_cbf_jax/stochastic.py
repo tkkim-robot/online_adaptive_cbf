@@ -33,6 +33,10 @@ def conditioned_sensor_model(observed_x,observed_obstacles,mask,noise,key,config
     obs_bias=jnp.where(mask[:,None],obs_bias,0.)
     physical_obs=observed_obstacles+obs_bias
     physical_obs=physical_obs.at[:,2].set(jnp.maximum(physical_obs[:,2],1e-4))
+    if config.stationary_obstacles:
+        # Initial measured velocities may be noisy. They remain observations;
+        # stationary physical obstacles have exactly zero velocity throughout.
+        physical_obs=physical_obs.at[:,3:5].set(0.)
     obs_bias=physical_obs-observed_obstacles
     innovations=jax.random.uniform(innovation_key,(steps,4+observed_obstacles.size),minval=-1.,maxval=1.).at[0].set(0.)
     return physical_x,physical_obs,x_bias,obs_bias,x_scale,obs_scale,innovations

@@ -8,7 +8,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from . import quad2d_history as history
-from .quad2d_control import FlightConfig
+from .quad2d_control import flight_config_from_contract
 from .quad2d_guidance import ObservedMotionGuidanceConfig
 from .quad2d_guided_data import observation_tick
 from .quad2d_data import load_gain_bank
@@ -19,18 +19,18 @@ from .io import write_json
 from .cli import sanitize
 
 
-def collect(source,output,replicas=4,horizon=160,shard_groups=4):
+def collect(source,output,replicas=4,horizon=160,shard_groups=4,gain_dataset='artifacts/datasets/quad2d_terminal_task_v42'):
     root=Path(output);root.mkdir(parents=True,exist_ok=False);source=Path(source);start=time.perf_counter()
     sm=json.loads((source/'manifest.json').read_text());audit=json.loads((source/'independent_replay.json').read_text());index=json.loads((source/'index.json').read_text())
-    c=FlightConfig();g=ObservedMotionGuidanceConfig(noise_clearance_weight=1.)
+    c=flight_config_from_contract(sm['config']);g=ObservedMotionGuidanceConfig(noise_clearance_weight=1.)
     raw_source=Path(sm['source']);raw_manifest=json.loads((raw_source/'manifest.json').read_text());parents=json.loads((raw_source/'scenes.json').read_text())
     if not audit['audit_passed'] or audit['manifest_sha256']!=sha256(source/'manifest.json') or audit['index_sha256']!=sha256(source/'index.json'):
         raise ValueError('Unaudited acquisition')
     if sm['source_manifest_sha256']!=sha256(raw_source/'manifest.json') or raw_manifest['scenes_sha256']!=sha256(raw_source/'scenes.json') or raw_manifest.get('training_use') is not True:
         raise ValueError('Changed/nontraining acquisition parents')
-    if sm['config']!=asdict(c) or sm['predictive_guidance']!=json.loads(json.dumps(asdict(g))) or [r['group_id'] for r in parents]!=[r['group_id'] for r in index]:raise ValueError('Changed acquisition contract')
+    if flight_config_from_contract(raw_manifest['config'])!=c or sm['predictive_guidance']!=json.loads(json.dumps(asdict(g))) or [r['group_id'] for r in parents]!=[r['group_id'] for r in index]:raise ValueError('Changed acquisition contract')
     if len(parents)%shard_groups or replicas<1 or horizon<1:raise ValueError('Invalid fixed label shape')
-    bank,provenance=load_gain_bank('artifacts/datasets/quad2d_terminal_task_v42',c,32)
+    bank,provenance=load_gain_bank(gain_dataset,c,32)
     gains=np.repeat(bank,replicas,axis=0);queries=len(bank);Q=len(gains);ticks=[0,40,120,240,400,640]
     manifest=dict(schema=history.SCHEMA,stage='history_conditioned_label_pilot',production_eligible=False,final_test=False,
         source=str(source.resolve()),source_manifest_sha256=sha256(source/'manifest.json'),source_index_sha256=sha256(source/'index.json'),source_audit_sha256=sha256(source/'independent_replay.json'),
@@ -56,6 +56,9 @@ def collect(source,output,replicas=4,horizon=160,shard_groups=4):
             row=index[offset+i];path=source/row['file']
             if sha256(path)!=row['sha256']:raise ValueError('Changed acquisition trace')
             with np.load(path) as f:data=dict(f)
+            if c.stationary_obstacles:
+                from .comparison_contracts import physical_obstacle_scope
+                physical_obstacle_scope('quad2d',data['true_obstacles'],data['obstacle_mask'])
             q=min(observation_tick(parent['seed'],ticks),len(data['active'])-1)
             contexts.append(history.snapshot(data,q,g.motion_window));selected.append(q);traces.append(data)
         contexts=jax.tree.map(lambda *a:np.stack(a),*contexts)
@@ -96,4 +99,6 @@ def collect(source,output,replicas=4,horizon=160,shard_groups=4):
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--source',required=True);p.add_argument('--output',required=True);p.add_argument('--replicas',type=int,default=4);p.add_argument('--horizon',type=int,default=160);p.add_argument('--shard-groups',type=int,default=4);collect(**vars(p.parse_args()))
+    p=argparse.ArgumentParser();p.add_argument('--source',required=True);p.add_argument('--output',required=True);p.add_argument('--replicas',type=int,default=4);p.add_argument('--horizon',type=int,default=160);p.add_argument('--shard-groups',type=int,default=4)
+    p.add_argument('--gain-dataset',default='artifacts/datasets/quad2d_terminal_task_v42',help='Audited bank with exactly the source physical contract; static data requires a new matching bank')
+    collect(**vars(p.parse_args()))

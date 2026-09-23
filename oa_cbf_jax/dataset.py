@@ -131,7 +131,10 @@ def load_dataset(directory,partition,verify=True):
         if verify and sha256(shard)!=entry['sha256']:raise ValueError(f'Corrupt {shard}')
         with np.load(shard,allow_pickle=False) as data:
             keep=data['partition']==partition
-            parts.append({k:data[k][keep] for k in data.files})
+            selected={k:data[k][keep] for k in data.files}
+            if 'query_origin' in entry:
+                selected['query_origin']=np.full(int(keep.sum()),entry['query_origin'])
+            parts.append(selected)
     return {k:np.concatenate([p[k] for p in parts]) for k in parts[0]}
 
 

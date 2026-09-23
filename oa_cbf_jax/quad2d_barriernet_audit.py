@@ -7,7 +7,8 @@ from scipy.optimize import linprog
 from scipy.special import expit
 from .barriernet_audit import check_optimality
 from .quad2d_odqp import nominal as numpy_nominal
-from .quad2d_control import FlightConfig
+from .quad2d_control import FlightConfig,flight_config_from_contract
+from dataclasses import asdict
 from .dataset import sha256
 from .io import write_json
 
@@ -77,9 +78,11 @@ def check_deployment(result,ctx,p,u_nom,config=FlightConfig(),*,classify=False):
 
 
 def audit(dataset,samples=512):
-    root=Path(dataset);m=json.loads((root/'manifest.json').read_text());source=Path(m['source']);c=FlightConfig()
+    root=Path(dataset);m=json.loads((root/'manifest.json').read_text());source=Path(m['source'])
     if m['schema']!='barriernet_quad2d_training_v1' or sha256(root/'data.npz')!=m['data_sha256']:raise ValueError('Changed flight teacher data')
     if sha256(source/'manifest.json')!=m['source_manifest_sha256'] or sha256(source/'index.json')!=m['source_index_sha256']:raise ValueError('Changed training lineage')
+    sm=json.loads((source/'manifest.json').read_text());c=flight_config_from_contract(sm['config'])
+    if 'source_config' in m and m['source_config']!=asdict(c):raise ValueError('Changed flight physical contract')
     with np.load(root/'data.npz') as f:d=dict(f)
     groups=d['group_id'];split=d['split'];valid=d['valid'];sets=[set(groups[split==i]) for i in range(3)]
     if any(sets[i]&sets[j] for i in range(3) for j in range(i)):raise ValueError('Parent leakage')

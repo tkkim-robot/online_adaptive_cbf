@@ -32,7 +32,9 @@ from .io import write_json
 from .cli import sanitize
 
 RUNTIME=tuple(dict.fromkeys((*DATA_RUNTIME,'quad3d_policy.py','quad3d_policy_rollout.py','quad3d_policy_audit.py','quad3d_policy_experiment.py',
-    'quad3d_learning_contract.py','quad3d_predictive_calibration.py','models.py','inference.py','uncertainty.py','quad2d_trajectory_gate.py')))
+    'quad3d_learning_contract.py','quad3d_predictive_calibration.py','models.py','inference.py','uncertainty.py','quad2d_trajectory_gate.py',
+    'comparison_contracts.py','metrics.py','io.py')))
+MATCHED_SCHEMA='quad3d_matched_static_policy'
 
 
 def model_paths(encoder,version=96):
@@ -139,6 +141,14 @@ def inputs(source,encoder,phase,slot,gate):
     selector=Quad3DSelector(mp['bundle'],mp['prediction_fit'],gate=gate,reference=phase=='gate_calibration',config=Quad3DPolicyConfig(**policy_configuration(m,encoder)))
     expected=m['configs'][encoder] if 'configs' in m else m['config']
     assert asdict(selector.robot)==expected
+    if m['schema']==MATCHED_SCHEMA:
+        from .comparison_contracts import matched_controller_settings,physical_obstacle_scope
+        matched_controller_settings(m['comparison_contracts']['gat'],m['comparison_contracts']['matched_fc'])
+        assert encoder in ('gat','matched_fc') and selector.metadata['architecture']['encoder']==encoder
+        assert 'configs' not in m and 'policy_configs' not in m
+        for parent in read(root/'parents.json'):
+            physical_obstacle_scope('quad3d',parent['obstacles'],parent['mask'])
+            assert parent['gains']==[m['policy_config']['initial_gain']]*4
     if m['schema'] in ('quad3d_fresh_learned_policy_v100','quad3d_fresh_learned_policy_v108') and encoder=='full_fc':
         assert phase=='policy_audit' and gate is not None
         assert Path(gate).resolve()==Path(m['frozen_fc_gate']) and sha256(gate)==m['frozen_fc_gate_sha256']
@@ -239,19 +249,19 @@ def gate(source,encoder,directories,output):
         assert m['phase']=='gate_calibration' and m['encoder']==encoder and m['source_sha256']==sha256(Path(source)/'manifest.json')
         assert a['audit_passed'] and a['manifest_sha256']==sha256(directory/'manifest.json') and a['index_sha256']==sha256(directory/'index.json')
         rows.extend(a['rows']);proof.append(dict(directory=str(directory),audit_sha256=sha256(directory/'independent_audit.json')))
-    expected={p['id'] for p in pp if p['partition']=='gate_calibration'};assert len(rows)==288 and {r['id'] for r in rows}==expected
-    families={f:conformal_threshold([r['maximum_cs'] for r in rows if r['family']==f],.95) for f in FAMILIES}
+    expected={p['id'] for p in pp if p['partition']=='gate_calibration'};assert len(rows)==sm['reference_parents'] and {r['id'] for r in rows}==expected
+    families={f:conformal_threshold([r['maximum_cs'] for r in rows if r['family']==f],.95) for f in sm.get('families',FAMILIES)}
     assert all(v['n_groups']==24 and v['status']=='calibrated' for v in families.values())
     write_json(output,dict(schema=GATE_SCHEMA,encoder=encoder,weights_sha256=sm['models'][encoder]['weights_sha256'],prediction_fit_sha256=sm['models'][encoder]['prediction_fit_sha256'],
         policy_config=policy_configuration(sm,encoder),source_manifest_sha256=sha256(Path(source)/'manifest.json'),threshold=max(v['threshold'] for v in families.values()),family_thresholds=families,
-        reference_parents=288,group_ids=sorted(expected),proof=proof,production_eligible=False,whole_goal_complete=False,
+        reference_parents=len(expected),group_ids=sorted(expected),proof=proof,production_eligible=False,whole_goal_complete=False,
         limitation='Family trajectory-max CS rank on frozen fixed-gain reference; changed adaptive trajectories need independent empirical audit. This is not a physical-safety or automatic adaptive-coverage theorem.'))
     print(json.dumps(dict(stage='gate_frozen',encoder=encoder,threshold=read(output)['threshold'])),flush=True)
 
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','benchmark','collect','audit','gate']);p.add_argument('--source');p.add_argument('--output',required=True)
-    p.add_argument('--encoder',choices=['gat','full_fc']);p.add_argument('--phase',choices=['gate_calibration','policy_audit']);p.add_argument('--slot',type=int,default=0)
+    p.add_argument('--encoder',choices=['gat','full_fc','matched_fc']);p.add_argument('--phase',choices=['gate_calibration','policy_audit']);p.add_argument('--slot',type=int,default=0)
     p.add_argument('--gate');p.add_argument('--workers',type=int,default=12);p.add_argument('--directories',nargs='+');p.add_argument('--version',type=int,choices=[96,100,108],default=96);a=p.parse_args()
     if a.action=='prepare':prepare(a.output,a.version)
     elif a.action=='audit':audit(a.output,a.workers)

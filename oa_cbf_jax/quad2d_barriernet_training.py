@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from .quad2d_barriernet import features,nominal,constraints,bounded_qp,contract,require_x64
-from .quad2d_control import FlightConfig
+from .quad2d_control import flight_config_from_contract
 from .barriernet_training import benchmark,train
 from .dataset import sha256,source_fingerprint
 from .io import write_json
@@ -21,9 +21,9 @@ from .io import write_json
 
 def prepare(source,output,rows=200000,seed=901):
     require_x64();source=Path(source);root=Path(output);root.mkdir(parents=True,exist_ok=False)
-    c=FlightConfig();sm=json.loads((source/'manifest.json').read_text())
+    sm=json.loads((source/'manifest.json').read_text());c=flight_config_from_contract(sm['config'])
     audit=json.loads((source/'independent_replay.json').read_text())
-    if sm['training_use'] is not True or sm['final_test'] is not False or sm['config']!=asdict(c):raise ValueError('Training-only flight source required')
+    if sm['training_use'] is not True or sm['final_test'] is not False:raise ValueError('Training-only flight source required')
     if not audit['audit_passed'] or audit['manifest_sha256']!=sha256(source/'manifest.json') or audit['index_sha256']!=sha256(source/'index.json') or sm['scenes_sha256']!=sha256(source/'scenes.json'):raise ValueError('Changed/unaudited acquisition')
     entries=json.loads((source/'index.json').read_text());parents=json.loads((source/'scenes.json').read_text())
     if [e['group_id'] for e in entries]!=[p['group_id'] for p in parents]:raise ValueError('Lost/reordered training parents')
@@ -80,7 +80,7 @@ def prepare(source,output,rows=200000,seed=901):
     np.savez_compressed(root/'data.npz',z=z,ctx=ctx,u_ref=label,label=label,valid=valid,expert_violation=violation,original_nominal=reference,expert_candidate=candidate,
         solver_raw_control=raw,solver_feasible=solver_valid,solver_violation=solver_violation,group_id=groups,tick=pairs[:,1],split=split)
     manifest=dict(schema='barriernet_quad2d_training_v1',final_test=False,source=str(source.resolve()),source_manifest_sha256=sha256(source/'manifest.json'),source_index_sha256=sha256(source/'index.json'),
-        data_sha256=sha256(root/'data.npz'),source_fingerprint=source_fingerprint(),task_contract=contract(c),radius=c.robot.radius,seed=seed,rows=len(z),groups=len(unique),provenance=provenance,held_exclusions=exclusions,
+        data_sha256=sha256(root/'data.npz'),source_fingerprint=source_fingerprint(),source_config=asdict(c),task_contract=contract(c),radius=c.robot.radius,seed=seed,rows=len(z),groups=len(unique),provenance=provenance,held_exclusions=exclusions,
         partitions={name:dict(groups=len(set(groups[split==i])),rows=int(np.sum(split==i)),valid_labels=int(np.sum(valid&(split==i))),invalid_labels=int(np.sum(~valid&(split==i)))) for i,name in enumerate(['train','validation','development_audit'])},
         sampling='Up to256 genuine pre-action ticks per acquired training parent, including initial observation for zero-step parents; frozen200000row sample before teacher solves; grouped80/10/10.',
         expert='Native static-center five-obstacle CBFQP alpha1=alpha2=1.5, original nominal; actual shared actuator bounds, default exact-JAX tolerance. Rejected labels retained/masked.',
