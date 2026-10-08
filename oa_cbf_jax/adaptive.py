@@ -170,6 +170,9 @@ class DevelopmentPolicy:
         if not allow_development:raise ValueError('Observation calibration is development-only; explicit opt-in required')
         predictor=ResearchPredictor(bundle,allow_uncalibrated=True,device=device)
         info=json.loads(Path(calibration).read_text())
+        if predictor.model.config.encoder=='nearest_fc':
+            from .nearest_fc_qualification import validate_fit
+            validate_fit(info,bundle)
         require_matching_controller(predictor.metadata,info,config.sensor_margin_scale,config.margin_guidance,config.shared_clearance_budget,config.motion_observer_window,config.filter_obstacle_position)
         if info['schema']!='oa_cbf_development_calibration_v1' or info['weights_sha256']!=predictor.metadata['weights_sha256']:
             raise ValueError('Calibration/weights mismatch')

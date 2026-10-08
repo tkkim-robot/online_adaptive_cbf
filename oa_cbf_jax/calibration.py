@@ -43,9 +43,12 @@ def fit_event_calibration(logits,events,valid):
     return settings
 
 
-def calibrate(bundle,dataset,output,coverage=.95,seed=71891):
+def calibrate(bundle,dataset,output,coverage=.95,seed=71891,runtime_qualification=None):
     root=Path(output);root.mkdir(parents=True,exist_ok=False)
     model=ResearchPredictor(bundle,allow_uncalibrated=True)
+    if model.model.config.encoder=='nearest_fc':
+        from .nearest_fc_qualification import validate_qualification
+        validate_qualification(runtime_qualification,bundle,dataset)
     manifest=json.loads((Path(dataset)/'manifest.json').read_text())
     if model.metadata.get('controller',dict(sensor_margin_scale=0.))!=manifest.get('controller',dict(sensor_margin_scale=0.)):
         raise ValueError('Calibration controller/target contract mismatch')
@@ -115,6 +118,10 @@ def calibrate(bundle,dataset,output,coverage=.95,seed=71891):
         result.update(obstacle_capacity=manifest['capacity'],scene_distribution=manifest['scene_distribution'])
     if manifest['schema'] in flight_schemas:
         result.update(dynamics='Quad2D',graph_features=50 if manifest['schema']==history_schema else 40,dataset_schema=manifest['schema'])
+    if model.model.config.encoder=='nearest_fc':
+        result.update(nearest_fc_contract=model.metadata['nearest_fc_contract'],
+            bundle_manifest_sha256=sha256(Path(bundle)/'manifest.json'),
+            runtime_qualification=str(Path(runtime_qualification).resolve()),runtime_qualification_sha256=sha256(runtime_qualification))
     write_json(root/'calibration.json',result)
     np.savez_compressed(root/'diagnostics.npz',group_id=data['group_id'],cs=scores,group_maximum=maximum,
                         calibrated_mean=mixture_mean,calibrated_variance=calibrated_total,calibrated_event_probability=calibrated_probability)
@@ -124,4 +131,5 @@ def calibrate(bundle,dataset,output,coverage=.95,seed=71891):
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--bundle',required=True);parser.add_argument('--dataset',required=True);parser.add_argument('--output',required=True)
     parser.add_argument('--coverage',type=float,default=.95);parser.add_argument('--seed',type=int,default=71891)
+    parser.add_argument('--runtime-qualification')
     calibrate(**vars(parser.parse_args()))

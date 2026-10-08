@@ -39,8 +39,44 @@ class GATConfig:
     bicycle_affine_gain: bool = False
     bicycle_motion_history: bool = False
     bicycle_candidate_encoding: bool = False
+    nearest_dynamics: str = ''
+    nearest_yaw_scale: float = 1.
+    flight_local_residual: bool = False
+    unicycle_ego_frame: bool = False
+    unicycle_constraint_features: bool = False
+    flight_constraint_features: bool = False
+    flight_gain_attention: bool = False
 
     def __post_init__(self):
+        if type(self.flight_gain_attention) is not bool or (self.flight_gain_attention and
+                (self.encoder!='gat' or not self.flight_history_invariant or not self.flight_obstacle_pooling
+                 or self.flight_constraint_features or self.flight_local_residual or self.bicycle_history_invariant
+                 or self.quad3d_history_invariant or self.unicycle_ego_frame or self.flight_gain_basis)):
+            raise ValueError('Gain attention requires the original pooled history-invariant flight GAT')
+        if type(self.flight_constraint_features) is not bool or (self.flight_constraint_features and
+                (self.encoder != 'gat' or not self.flight_history_invariant
+                 or not self.flight_obstacle_pooling
+                 or self.flight_local_residual or self.bicycle_history_invariant
+                 or self.quad3d_history_invariant or self.unicycle_ego_frame)):
+            raise ValueError('Observed flight coefficients require the pooled history-invariant flight GAT')
+        if type(self.unicycle_constraint_features) is not bool or (self.unicycle_constraint_features and
+                (self.encoder not in ('gat','nearest_fc') or self.compute_dtype!='float32'
+                 or (self.encoder=='gat' and not self.unicycle_ego_frame)
+                 or (self.encoder=='nearest_fc' and self.nearest_dynamics!='unicycle'))):
+            raise ValueError('Observed unicycle coefficients require heading-frame GAT or nearest-unicycle FC')
+        if type(self.unicycle_ego_frame) is not bool or (self.unicycle_ego_frame and
+                (self.encoder!='gat' or self.compute_dtype!='float32')):
+            raise ValueError('Robot-heading unicycle graph is an explicit FP32 GAT variant')
+        if type(self.flight_local_residual) is not bool or (self.flight_local_residual and
+                (self.encoder!='gat' or not self.flight_history_invariant or
+                 self.compute_dtype!='float32' or self.bicycle_candidate_encoding or
+                 self.bicycle_history_invariant or self.quad3d_history_invariant)):
+            raise ValueError('Local residual flight model requires FP32 graph40 GAT and flight history invariance')
+        if self.encoder == 'nearest_fc':
+            from .nearest_fc import contract
+            contract(self.nearest_dynamics, self.nearest_yaw_scale)
+        elif self.nearest_dynamics or self.nearest_yaw_scale != 1.:
+            raise ValueError('Nearest-FC feature settings require its explicit encoder')
         if (not isinstance(self.bicycle_candidate_encoding,bool) or self.bicycle_candidate_encoding and
                 (not self.bicycle_constraint_features or self.bicycle_affine_gain or self.bicycle_motion_history)):
             raise ValueError('Candidate encoding requires the matched bicycle current-constraint graph35 treatment')
@@ -79,9 +115,9 @@ class GATConfig:
             raise ValueError('Planar flight pooling requires a matched encoder and its own feature contract')
         if self.width <= 0 or self.heads <= 0 or self.width % self.heads or self.layers < 1:
             raise ValueError("Invalid attention configuration")
-        if self.encoder not in ('gat','legacy_fc','full_fc','matched_fc'):
+        if self.encoder not in ('gat','legacy_fc','full_fc','matched_fc','nearest_fc'):
             raise ValueError('Unknown model encoder')
-        if self.encoder in ('legacy_fc','full_fc') and self.layers!=4:
+        if self.encoder in ('legacy_fc','full_fc','nearest_fc') and self.layers!=4:
             raise ValueError('FC baselines use the repository four-hidden-layer architecture')
         if not isinstance(self.flight_history_invariant,bool) or (self.flight_history_invariant and self.encoder not in ('gat','matched_fc')):
             raise ValueError('Flight history invariance is an explicit OA GAT variant')
@@ -90,7 +126,7 @@ class GATConfig:
             raise ValueError('Risk variance floor is an explicit bounded OA GAT setting')
         if not isinstance(self.scalar_gain_quadratic,bool) or (self.scalar_gain_quadratic and self.encoder not in ('gat','matched_fc')):
             raise ValueError('Scalar gain basis is an explicit OA GAT variant')
-        if self.compute_dtype not in ('float32','float64') or (self.compute_dtype!='float32' and self.encoder not in ('gat','matched_fc')):
+        if self.compute_dtype not in ('float32','float64') or (self.compute_dtype!='float32' and self.encoder not in ('gat','matched_fc','nearest_fc')):
             raise ValueError('Higher precision is an explicit OA GAT variant')
         if any(not isinstance(v,bool) for v in (self.quad3d_history_invariant,self.paired_gain_quadratic,self.quad3d_obstacle_pooling)):
             raise ValueError('Quad3D feature variants must be explicit booleans')
@@ -179,8 +215,23 @@ def flight_gain_coordinates(gains):
         (gains.sum(-1)/8.-1.)[...,None],(gains.prod(-1)/16.-1.)[...,None]),axis=-1)
 
 
+def clipped_mixture_heads(output):
+    """Two latent risk components; all ten head outputs have a learned role."""
+    means=jnp.stack((output[...,0],output[...,6]),axis=-1)
+    log_variances=jnp.clip(jnp.stack((output[...,2],output[...,7]),axis=-1),-10.,3.)
+    logits=output[...,8:10]
+    weights=jax.nn.softmax(logits,axis=-1)
+    mean=jnp.sum(weights*means,axis=-1)
+    variance=jnp.sum(weights*(jnp.exp(log_variances)+(means-mean[...,None])**2),axis=-1)
+    return dict(mean=jnp.stack((mean,output[...,1]),axis=-1),
+        log_variance=jnp.stack((jnp.log(variance),jnp.clip(output[...,3],-10.,3.)),axis=-1),
+        event_logits=output[...,4:6],risk_component_mean=means,
+        risk_component_log_variance=log_variances,risk_component_logits=logits)
+
+
 class CandidateGAT(nn.Module):
     config:GATConfig=GATConfig()
+    risk_components:int=1
 
     def setup(self):
         self.project=Dense(self.config.width)
@@ -188,11 +239,19 @@ class CandidateGAT(nn.Module):
         self.norm=nn.LayerNorm()
         self.head1=Dense(self.config.width)
         self.head2=Dense(self.config.width)
-        self.output=Dense(2*self.config.continuous_outputs+self.config.event_outputs)
+        output_options=dict(kernel_init=nn.initializers.zeros_init()) if self.config.flight_local_residual else {}
+        self.output=Dense(2*self.config.continuous_outputs+self.config.event_outputs+(4 if self.risk_components==2 else 0),**output_options)
+        if self.config.flight_gain_attention:
+            self.gain_query=Dense(self.config.width)
+            self.obstacle_key=Dense(self.config.width)
+            self.gain_context_residual=Dense(self.config.width,kernel_init=nn.initializers.zeros_init())
         if self.config.bicycle_reserve_auxiliary:
             self.prefix_reserve=Dense(1)
 
     def prepare_features(self,features,mask):
+        if self.config.unicycle_ego_frame:
+            from .unicycle_features import ego_frame
+            features=ego_frame(features,mask)
         if self.config.flight_gain_basis and features.shape[-1]!=40:
             raise ValueError('Planar gain basis requires the declared flight graph40')
         if self.config.compute_dtype=='float64':
@@ -222,6 +281,12 @@ class CandidateGAT(nn.Module):
             # but enforce the exact target invariance before neural encoding.
             features=features.at[...,29:33].set(0.)
         clean=jnp.where(mask[:,:,None],features,0.)
+        if self.config.flight_constraint_features:
+            from .quad2d_constraint_features import coefficients
+            clean=jnp.concatenate((clean,coefficients(clean,mask)),axis=-1)
+        if self.config.unicycle_constraint_features:
+            from .unicycle_constraint_features import coefficients
+            clean=jnp.concatenate((clean,coefficients(clean,mask)),axis=-1)
         if self.config.bicycle_constraint_features:
             from .bicycle_constraint_features import append_constraints
             derived=append_constraints(clean[...,:35],mask)[...,35:]
@@ -259,12 +324,32 @@ class CandidateGAT(nn.Module):
         weights=jnp.where(om,jnp.exp(-jnp.maximum(clearance-nearest,0.)),0.)
         weights=weights/jnp.maximum(weights.sum(-1,keepdims=True),1e-12)
         geometry=jnp.sum(weights[...,None]*clean[:,2:,3:9],axis=1)
-        return jnp.concatenate((z[:,0,:],average,maximum,clean[:,0,:features.shape[-1]],geometry,nearest),axis=-1)
+        context=jnp.concatenate((z[:,0,:],average,maximum,clean[:,0,:features.shape[-1]],geometry,nearest),axis=-1)
+        if self.config.flight_gain_attention:
+            return dict(scene=context,obstacles=ob,mask=om)
+        return context
 
     def score(self,context,gains):
         """context [B,W], gains [B,K,D]; one scalar or a declared gain pair."""
-        broadcast=jnp.broadcast_to(context[:,None,:],(*gains.shape[:2],context.shape[-1]))
+        encoded=context['scene'] if self.config.flight_gain_attention else context
+        broadcast=jnp.broadcast_to(encoded[:,None,:],(*gains.shape[:2],encoded.shape[-1]))
+        if self.config.flight_gain_attention:
+            width,heads=self.config.width,self.config.heads
+            query=self.gain_query(flight_gain_coordinates(gains)).reshape(*gains.shape[:2],heads,width//heads)
+            nodes=context['obstacles'];mask=context['mask']
+            keys=self.obstacle_key(nodes).reshape(*nodes.shape[:2],heads,width//heads)
+            logits=jnp.einsum('bkhd,bnhd->bkhn',query,keys)/math.sqrt(width//heads)
+            weights=jax.nn.softmax(jnp.where(mask[:,None,None,:],logits,-1e30),axis=-1)
+            weights=jnp.where(mask[:,None,None,:],weights,0.)
+            values=nodes.reshape(*nodes.shape[:2],heads,width//heads)
+            attended=jnp.einsum('bkhn,bnhd->bkhd',weights,values).reshape(*gains.shape[:2],width)
+            delta=self.gain_context_residual(attended)
+            delta=jnp.where(mask.any(-1)[:,None,None],delta,0.)
+            broadcast=broadcast.at[...,:width].add(delta)
         log_gain=jnp.log(jnp.maximum(gains,1e-6))
+        if self.config.unicycle_constraint_features:
+            from .unicycle_constraint_features import gain_coordinates
+            log_gain=gain_coordinates(gains)
         if self.config.flight_gain_basis:
             log_gain=flight_gain_coordinates(gains)
         if self.config.paired_gain_quadratic:
@@ -286,6 +371,7 @@ class CandidateGAT(nn.Module):
         z=jnp.concatenate((broadcast,log_gain),axis=-1)
         z=nn.gelu(self.head1(z));z=z+nn.gelu(self.head2(z))
         out=self.output(z);d=self.config.continuous_outputs
+        if self.risk_components==2:return clipped_mixture_heads(out)
         variance=jnp.clip(out[...,d:2*d],self.config.continuous_log_variance_min,3.)
         if self.config.risk_log_variance_min!=-10.:
             # Normalized risk head only. The default path and all FC outputs
@@ -320,12 +406,22 @@ Both predict the current branch targets and use the same ensemble/calibration/
 selection framework. Neither is BarrierNet or a direct-gain imitation policy.
 """
     config:GATConfig
+    risk_components:int=1
 
     def setup(self):
         self.hidden=[Dense(self.config.width*factor) for factor in (1,2,3,1)]
-        self.output=Dense(2*self.config.continuous_outputs+self.config.event_outputs)
+        self.output=Dense(2*self.config.continuous_outputs+self.config.event_outputs+(4 if self.risk_components==2 else 0))
 
     def encode(self,features,mask):
+        if self.config.encoder == 'nearest_fc':
+            from .nearest_fc import encode
+            if self.config.compute_dtype == 'float64':
+                features = features.astype(jnp.float64)
+            context=encode(features, mask, self.config.nearest_dynamics, self.config.nearest_yaw_scale)
+            if self.config.unicycle_constraint_features:
+                from .unicycle_constraint_features import nearest_coefficients
+                context=jnp.concatenate((context,nearest_coefficients(features,mask)),axis=-1)
+            return context
         clean=jnp.where(mask[...,None],features,0.)
         obstacles=clean[:,2:];obstacle_mask=mask[:,2:]
         if self.config.encoder=='legacy_fc':
@@ -348,9 +444,16 @@ selection framework. Neither is BarrierNet or a direct-gain imitation policy.
 
     def score(self,context,gains):
         context=jnp.broadcast_to(context[:,None,:],(*gains.shape[:2],context.shape[-1]))
-        values=jnp.concatenate((context,jnp.log(jnp.maximum(gains,1e-6))),axis=-1)
+        gain_features=jnp.log(jnp.maximum(gains,1e-6))
+        if self.config.unicycle_constraint_features:
+            from .unicycle_constraint_features import gain_coordinates
+            gain_features=gain_coordinates(gains)
+        values=jnp.concatenate((context,gain_features),axis=-1)
         for layer in self.hidden:values=nn.relu(layer(values))
         output=self.output(values);d=self.config.continuous_outputs
+        if self.risk_components==2:return clipped_mixture_heads(output)
+        if self.config.encoder == 'nearest_fc' and self.config.compute_dtype == 'float64':
+            output = output.astype(jnp.float32)
         return dict(mean=output[...,:d],log_variance=jnp.clip(output[...,d:2*d],-10.,3.),event_logits=output[...,2*d:])
 
     def __call__(self,features,mask,gains):
@@ -401,7 +504,39 @@ class CandidateMatchedFC(CandidateGAT):
         return jnp.concatenate((context,clean[:,0,:features.shape[-1]],geometry,nearest),axis=-1)
 
 
-def make_model(config):
+class CandidateFlightLocalResidualGAT(CandidateGAT):
+    """Frozen nearest-obstacle predictor plus a trainable scene GAT correction.
+
+    The correction starts at zero. Both branches are neural predictors of the
+    existing targets; neither executes a controller or searches gain rollouts.
+    """
+    def setup(self):
+        super().setup()
+        self.local_model=CandidateFC(GATConfig(width=40,layers=4,encoder='nearest_fc',nearest_dynamics='quad2d'))
+
+    def encode(self,features,mask,candidate=None):
+        if features.shape[-1]!=40:raise ValueError('Local residual flight model requires graph40')
+        context=super().encode(features,mask,candidate)
+        local=self.local_model.encode(features,mask)
+        return jnp.concatenate((context,local),axis=-1)
+
+    def score(self,context,gains):
+        # Quad2D local contract: clearance, vx, vz, bearing sine and cosine.
+        base=self.local_model.score(context[...,-5:],gains)
+        correction=super().score(context[...,:-5],gains)
+        return dict(mean=base['mean']+correction['mean'],
+            log_variance=jnp.clip(base['log_variance']+correction['log_variance'],-10.,3.),
+            event_logits=base['event_logits']+correction['event_logits'])
+
+
+def make_model(config,risk_components=1):
+    if risk_components != 1:
+        if (risk_components!=2 or config.encoder not in ('gat','nearest_fc')
+                or config.compute_dtype!='float32' or config.continuous_outputs!=2 or config.event_outputs!=2
+                or config.flight_local_residual or config.bicycle_reserve_auxiliary or config.flight_gain_attention):
+            raise ValueError('Clipped mixture requires the two-head FP32 GAT or nearest FC')
+        return CandidateGAT(config,risk_components) if config.encoder=='gat' else CandidateFC(config,risk_components)
+    if config.flight_local_residual:return CandidateFlightLocalResidualGAT(config)
     if config.encoder=='matched_fc':return CandidateMatchedFC(config)
     return CandidateGAT(config) if config.encoder=='gat' else CandidateFC(config)
 

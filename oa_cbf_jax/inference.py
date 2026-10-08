@@ -29,8 +29,16 @@ def export_pilot(members,output):
         state=serialization.msgpack_restore(path.read_bytes())
         states.append(state['params']);settings.append(cfg)
         provenance.append(dict(directory=str(member.resolve()),best_epoch=best['epoch'],seed=cfg['seed'],weights_sha256=best['state_sha256']))
+    for key in ('flight_warmstart_source','flight_warmstart_source_manifest_sha256','flight_constraint_features_contract','flight_gain_attention_contract','flight_frozen_predictor_contract'):
+        if any(s.get(key)!=settings[0].get(key) for s in settings):raise ValueError('Different flight warm-start treatment')
     for key in ['architecture','normalization','dataset_manifest_sha256','targets']:
         if any(s[key]!=settings[0][key] for s in settings):raise ValueError(f'Incompatible member {key}')
+    for key in ('local_unicycle_reflection','local_unicycle_expansion','local_unicycle_supervision','local_unicycle_stop_contrast','local_unicycle_prediction_selection','variance_weighted_objective','offline_variance_objective_pilot','variance_refit_contract','variance_refit_source','variance_refit_source_manifest_sha256','variance_refit_mode','risk_distribution_contract','normalized_risk_censor_floor','risk_tail_objective','flight_training_expansion','ensemble_sampling','flight_viable_progress_contract'):
+        if any(s.get(key)!=settings[0].get(key) for s in settings):
+            raise ValueError(f'Incompatible member {key}')
+    if 'ensemble_sampling' in settings[0]:
+        from .ensemble_sampling import validate_contract
+        for setting in settings:validate_contract(setting)
     domain=settings[0].get('gain_domain',dict(lower=.3,upper=4.))
     gain_dimension=settings[0].get('gain_dimension',2)
     if gain_dimension not in (1,2,4) or any(s.get('gain_dimension',2)!=gain_dimension for s in settings):raise ValueError('Incompatible gain dimension')
@@ -53,17 +61,35 @@ def export_pilot(members,output):
               controller=controller,
               weights_sha256=sha256(path),members=provenance,production_eligible=False,calibration=None,
               limitation='Uncalibrated development ensemble. No closed-loop superiority or deployment safety calibration established.')
-    for field in ('training_obstacle_capacity','training_scene_distribution','training_obstacle_count_histogram','bicycle_contract','quad3d_contract','normalization_sampling','progress_contrast_weight','progress_contrast_normalization','progress_contrast_scale_floor','bicycle_constraint_features_contract','bicycle_candidate_encoding_contract','bicycle_motion_history_contract','bicycle_motion_history_source','bicycle_motion_history_source_sha256','bicycle_motion_adapter_contract','bicycle_motion_adapter_source','bicycle_motion_adapter_source_sha256'):
+    for field in ('nearest_fc_contract','unicycle_constraint_features_contract','training_obstacle_capacity','training_scene_distribution','training_obstacle_count_histogram','bicycle_contract','quad3d_contract','normalization_sampling','progress_contrast_weight','progress_contrast_normalization','progress_contrast_scale_floor','bicycle_constraint_features_contract','bicycle_candidate_encoding_contract','bicycle_motion_history_contract','bicycle_motion_history_source','bicycle_motion_history_source_sha256','bicycle_motion_adapter_contract','bicycle_motion_adapter_source','bicycle_motion_adapter_source_sha256'):
         if field in settings[0]:
             if any(s.get(field)!=settings[0][field] for s in settings):raise ValueError('Ensemble count/distribution provenance mismatch')
             info[field]=settings[0][field]
+    for field in ('local_unicycle_contract','local_unicycle_supervision','local_unicycle_expansion','local_unicycle_stop_contrast','local_unicycle_prediction_selection','flight_local_residual_contract','flight_local_residual_source','flight_local_residual_source_manifest_sha256','bicycle_gain_contract','offline_wide_gain_pilot','bicycle_task_progress_contract','variance_weighted_objective','offline_variance_objective_pilot'):
+        if field in settings[0]:
+            if any(s.get(field)!=settings[0][field] for s in settings):raise ValueError('Ensemble gain contract mismatch')
+            info[field]=settings[0][field]
+    if info.get('offline_wide_gain_pilot'):
+        from .bicycle_gain_contract import model_bank
+        model_bank(info)
+    for key in ('flight_warmstart_source','flight_warmstart_source_manifest_sha256','flight_constraint_features_contract','flight_gain_attention_contract','flight_frozen_predictor_contract','variance_refit_contract','variance_refit_source','variance_refit_source_manifest_sha256','variance_refit_mode','risk_distribution_contract','normalized_risk_censor_floor','risk_tail_objective','flight_training_expansion','ensemble_sampling','flight_viable_progress_contract'):
+        if key in settings[0]:info[key]=settings[0][key]
+    if 'clipped_risk_components' in settings[0]:
+        if any(s.get('clipped_risk_components')!=settings[0]['clipped_risk_components'] for s in settings):
+            raise ValueError('Incompatible component count')
+        info['clipped_risk_components']=settings[0]['clipped_risk_components']
     write_json(root/'manifest.json',info)
+    if 'local_unicycle_reflection' in settings[0]:
+        from .local_unicycle_reflection_training import bind_export
+        bind_export(members,root)
     return root
 
 
 class ResearchPredictor:
     def __init__(self,bundle,allow_uncalibrated=False,device=None):
         root=Path(bundle);self.metadata=json.loads((root/'manifest.json').read_text())
+        if 'risk_distribution_contract' in self.metadata:
+            raise ValueError('Clipped-risk development bundle requires dedicated evaluation; ordinary Gaussian calibration/policy cannot load it')
         if (root/'INVALIDATED.json').exists():raise ValueError('Invalidated inference bundle; inspect INVALIDATED.json')
         if self.metadata['schema']!='oa_cbf_jax_research_bundle_v1':raise ValueError('Unknown inference schema')
         if not allow_uncalibrated:raise ValueError('Research bundle requires explicit uncalibrated diagnostic mode; not an operational OA-CBF policy')
@@ -78,11 +104,28 @@ class ResearchPredictor:
         raw=serialization.msgpack_restore(path.read_bytes())
         self.device=device or jax.devices()[0]
         self.model=make_model(GATConfig(**self.metadata['architecture']))
+        if self.model.config.flight_gain_attention:
+            from .quad2d_gain_attention import contract as gain_attention_contract
+            if self.metadata.get('flight_gain_attention_contract')!=gain_attention_contract() or self.metadata.get('graph_features')!=40:
+                raise ValueError('Missing candidate-obstacle attention provenance')
+        if self.model.config.flight_constraint_features:
+            from .quad2d_constraint_features import contract
+            if (self.metadata.get('flight_constraint_features_contract') != contract()
+                    or self.metadata.get('graph_features') != 40):
+                raise ValueError('Missing observed flight coefficient provenance')
+        if self.model.config.encoder == 'nearest_fc':
+            from .nearest_fc import validate_metadata
+            validate_metadata(self.metadata)
+        readout_refit='event_readout_refit' in self.metadata
+        if readout_refit:
+            from .bicycle_event_bundle import validate
+            validate(root,self.metadata)
         if self.model.config.compute_dtype=='float64':
-            from .precision_bundle import validate_derivation
-            validate_derivation(root,self.metadata)
-            # Lossless promotion of real FP32-trained weights, never new or
-            # fitted parameters. Explicit dtype avoids a global JAX flag.
+            if not readout_refit:
+                from .precision_bundle import validate_derivation
+                validate_derivation(root,self.metadata)
+            # Explicit FP64 arithmetic, with separate lineage validation for
+            # unchanged-weight ports and newly fitted adverse readouts.
             raw=jax.tree.map(lambda v:jnp.asarray(v,dtype=jnp.float64),raw)
         self.params=jax.device_put(raw,self.device)
         norm=self.metadata['normalization']
