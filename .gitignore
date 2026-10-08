@@ -24,3 +24,6 @@ local_experiment_tools/
 .pytest_cache/
 artifacts/
 *.pyc
+
+# Downloaded inference release (weights and frozen calibration)
+models/paper/
