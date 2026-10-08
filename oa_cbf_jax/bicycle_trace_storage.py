@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 MARKER='__oa_cbf_shared_prefix_v1__'
-FIELDS=('observed_obstacles','innovation_o','innovation_x')
+FIELDS=('observed_obstacles','raw_observed_obstacles','innovation_o','innovation_x')
 STORAGE_SCHEMA='byte_exact_shared_prefix_v1'
 
 
@@ -99,7 +99,7 @@ def write_query_traces(directory,names,payloads,replicas,stem):
     Any field without exact prefix equality stays in its individual trace.
     """
     root=Path(directory);root.mkdir(parents=True,exist_ok=True)
-    if type(replicas) is not int or replicas<2 or not payloads or len(payloads)%replicas or len(names)!=len(payloads) or len(set(names))!=len(names):
+    if type(replicas) is not int or replicas<1 or not payloads or len(payloads)%replicas or len(names)!=len(payloads) or len(set(names))!=len(names):
         raise ValueError('Invalid complete gain/replica query')
     shared_names=[f'{stem}_shared_r{r}.npz' for r in range(replicas)]
     paths=[_neighbor(root,name) for name in [*names,*shared_names]]

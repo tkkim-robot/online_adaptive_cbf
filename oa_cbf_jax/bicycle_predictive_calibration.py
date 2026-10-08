@@ -34,7 +34,22 @@ def reserved_role_groups(ids,roles,reserved):
     return selections,groups
 
 
-def validate_model(metadata,manifest,qualified_motion=False,qualified_candidate=False):
+def validate_model(metadata,manifest,qualified_motion=False,qualified_candidate=False,qualified_nearest=False):
+    from .bicycle_task_dataset import validate_target_metadata
+    validate_target_metadata(metadata);validate_target_metadata(manifest)
+    if metadata.get('bicycle_task_progress_contract')!=manifest.get('bicycle_task_progress_contract'):
+        raise ValueError('Changed task-progress calibration semantics')
+    from .bicycle_gain_contract import TRAIN_SCHEMA, validate_manifest
+    wide=metadata.get('offline_wide_gain_pilot',False)
+    nearest=metadata.get('architecture',{}).get('encoder')=='nearest_fc'
+    if nearest:
+        from .nearest_fc import validate_metadata
+        validate_metadata(metadata)
+        if not qualified_nearest:raise ValueError('Nearest-FC requires its own numerical qualification')
+    if wide:
+        validate_manifest(manifest)
+        if not (qualified_candidate or nearest and qualified_nearest) or metadata.get('bicycle_gain_contract')!=manifest['bicycle_gain_contract']:
+            raise ValueError('Reviewed wide-gain runtime qualification required')
     candidate=metadata.get('architecture',{}).get('bicycle_candidate_encoding',False)
     if candidate and not qualified_candidate:
         raise ValueError('Candidate-encoding pilot requires separate runtime qualification before calibration')
@@ -55,7 +70,7 @@ def validate_model(metadata,manifest,qualified_motion=False,qualified_candidate=
             raise ValueError('Missing or changed observed constraint feature contract')
     if metadata.get('offline_reserve_auxiliary_pilot') or metadata.get('architecture',{}).get('bicycle_reserve_auxiliary'):
         raise ValueError('Reserve auxiliary pilot requires explicit reviewed runtime qualification before calibration')
-    if metadata.get('dataset_schema')!=DATA_SCHEMA or metadata.get('gain_dimension')!=1 or metadata.get('graph_features')!=(39 if motion else 35) or metadata['architecture']['encoder'] not in ('gat','full_fc','matched_fc'):
+    if metadata.get('dataset_schema')!=(TRAIN_SCHEMA if wide else DATA_SCHEMA) or metadata.get('gain_dimension')!=1 or metadata.get('graph_features')!=(39 if motion else 35) or metadata['architecture']['encoder'] not in ('gat','full_fc','matched_fc','nearest_fc'):
         raise ValueError('Observed scalar-gain bicycle GAT or complete-input FC required')
     if metadata.get('bicycle_contract',{}).get('sensor_schema')!=SENSOR_SCHEMA or metadata['bicycle_contract'].get('source_graph_schema' if motion else 'graph_schema')!=GRAPH_SCHEMA:
         raise ValueError('Wrong bicycle sensing/feature contract')
@@ -128,13 +143,17 @@ def calibrate(bundle,dataset,output,batch=64,variance_method='moment',runtime_qu
     model=ResearchPredictor(bundle,allow_uncalibrated=True)
     motion=model.model.config.bicycle_motion_history
     candidate=model.model.config.bicycle_candidate_encoding
+    nearest=model.model.config.encoder=='nearest_fc'
+    if nearest:
+        from .nearest_fc_qualification import validate_qualification
+        validate_qualification(runtime_qualification,bundle,dataset)
     if candidate:
         from .bicycle_candidate_calibration import validate_qualification
         validate_qualification(runtime_qualification,bundle,dataset)
     if motion:
         from .bicycle_motion_calibration import validate_qualification
         validate_qualification(runtime_qualification,bundle,dataset)
-    validate_model(model.metadata,m,qualified_motion=motion,qualified_candidate=candidate)
+    validate_model(model.metadata,m,qualified_motion=motion,qualified_candidate=candidate,qualified_nearest=nearest)
     if model.model.config.bicycle_constraint_features and not (motion or candidate):
         from .bicycle_constraint_runtime import validate_qualification
         validate_qualification(runtime_qualification,bundle,dataset)
@@ -190,35 +209,44 @@ def calibrate(bundle,dataset,output,batch=64,variance_method='moment',runtime_qu
         data['features']=regenerated
     source=read(Path(m['source'])/'scenes.json');reserved={r['group_id']:r for r in source if r['partition']=='development_calibration'}
     selections,groups=reserved_role_groups(ids,roles,reserved)
-    replica=m['replicas'];bank=np.geomspace(.5,8,8).astype(np.float32)[:,None]
+    from .bicycle_gain_contract import model_bank
+    replica=m['replicas'];bank=model_bank(model.metadata)
     np.testing.assert_array_equal(data['gains'],np.broadcast_to(np.repeat(bank,replica,axis=0),data['gains'].shape))
     mean=jnp.asarray(model.metadata['normalization']['target_mean'],jnp.float32);scale=jnp.asarray(model.metadata['normalization']['target_scale'],jnp.float32)
     def raw(params,features,mask,gains):
         out=predict_ensemble(model.model,params,features,mask,gains)
         return dict(mean=out['mean']*scale+mean,variance=jnp.exp(out['log_variance'])*scale**2,event_logits=out['event_logits'])
     feature_dtype=jnp.float64 if model.model.config.compute_dtype=='float64' else jnp.float32
-    arguments=(jnp.zeros((batch,66,model.metadata['graph_features']),feature_dtype),jnp.ones((batch,66),bool),jnp.ones((batch,8,1),jnp.float32))
+    arguments=(jnp.zeros((batch,66,model.metadata['graph_features']),feature_dtype),jnp.ones((batch,66),bool),jnp.ones((batch,len(bank),1),jnp.float32))
     start=time.monotonic();raw_fn=jax.jit(raw);execute=raw_fn.lower(model.params,*arguments).compile();jax.block_until_ready(execute(model.params,*arguments));cold=time.monotonic()-start
     def predict(indices):
         result=[]
         for start in range(0,len(indices),batch):
             index=indices[start:start+batch];n=len(index)
             f=np.pad(data['features'][index],((0,batch-n),(0,0),(0,0)));mask=np.pad(data['node_mask'][index],((0,batch-n),(0,0)))
-            p=jax.tree.map(np.asarray,execute(model.params,jnp.asarray(f,dtype=feature_dtype),jnp.asarray(mask),jnp.asarray(np.broadcast_to(bank,(batch,8,1)))))
+            p=jax.tree.map(np.asarray,execute(model.params,jnp.asarray(f,dtype=feature_dtype),jnp.asarray(mask),jnp.asarray(np.broadcast_to(bank,(batch,len(bank),1)))))
             result.append({k:np.repeat(v[:,:n],replica,axis=2) for k,v in p.items()})
         return {k:np.concatenate([v[k] for v in result],axis=1) for k in result[0]}
     subset=lambda idx:{k:v[idx] for k,v in data.items()}
     print(json.dumps(dict(stage='fit_reserved_prediction_parameters',phase=phase,queries=len(selections['prediction_fit']))),flush=True)
     fit_prediction=predict(selections['prediction_fit']);parameters=calibrated_parameters(fit_prediction,subset(selections['prediction_fit']),variance_method)
+    audit_path=(dataset/'independent_replay.json' if 'task_progress_derivative' in m else
+        Path(m['reviewed_training_view']['review']) if model.metadata.get('offline_wide_gain_pilot') else dataset/'independent_replay.json')
     fit=dict(schema=SCHEMA,stage='prediction_fit_only',bundle=str(Path(bundle).resolve()),weights_sha256=model.metadata['weights_sha256'],bundle_manifest_sha256=sha256(Path(bundle)/'manifest.json'),
-        dataset=str(dataset.resolve()),dataset_manifest_sha256=sha256(dataset/'manifest.json'),dataset_index_sha256=sha256(dataset/'index.json'),dataset_audit_sha256=sha256(dataset/'independent_replay.json'),source_manifest_sha256=m['source_manifest_sha256'],
+        dataset=str(dataset.resolve()),dataset_manifest_sha256=sha256(dataset/'manifest.json'),dataset_index_sha256=sha256(dataset/'index.json'),dataset_audit_sha256=sha256(audit_path),source_manifest_sha256=m['source_manifest_sha256'],
         bicycle_contract=model.metadata['bicycle_contract'],controller=m['controller'],targets=m['targets'],events=m['events'],gain_domain=m['gain_domain'],candidates=bank.tolist(),group_ids=groups,
-        **parameters,prediction_batch=batch,prediction_candidates=8,compiled_prediction_signatures=1,compile_seconds=cold,
+        **parameters,prediction_batch=batch,prediction_candidates=len(bank),compiled_prediction_signatures=1,compile_seconds=cold,
         event_budget_statistic='Maximum-member calibrated any_adverse_termination only. Includes collision/physical bounds/CBF/QP/planner rejection; censored collision_first head is not unconditional collision probability.',
         inference_graph=graph_proof,trajectory_gate_ready=False,production_eligible=False,whole_goal_complete=False,
         limitation='Development variance/event fit under actual fixed-gain acquired histories. Empirical conditional prediction adjustment; no posterior, physical CVaR, adaptive-trajectory, OOD or rare-collision guarantee. Fresh trajectory gate and final-policy physical audit required.')
     if runtime_qualification is not None:
         fit.update(runtime_qualification=str(Path(runtime_qualification).resolve()),runtime_qualification_sha256=sha256(runtime_qualification))
+    if nearest:
+        fit['nearest_fc_contract']=model.metadata['nearest_fc_contract']
+    if model.metadata.get('offline_wide_gain_pilot'):
+        fit.update(bicycle_gain_contract=model.metadata['bicycle_gain_contract'],dataset_audit_file=str(audit_path.resolve()))
+    if 'bicycle_task_progress_contract' in m:
+        fit['bicycle_task_progress_contract']=m['bicycle_task_progress_contract']
     # Freeze the fitted artifact before predicting or evaluating the held role.
     if phase=='audit':
         frozen=read(root/'prediction_fit.json')

@@ -100,11 +100,14 @@ def diagnostic_fit(bundle,path):
     """Identity transformation ONLY for numerical tests; never a calibrated fit."""
     from .bicycle_predictive_calibration import SCHEMA as FIT_SCHEMA
     meta=read(Path(bundle)/'manifest.json')
+    from .bicycle_gain_contract import model_bank
     result=dict(schema=FIT_SCHEMA,diagnostic_identity_only=True,calibration_fitted=False,
         weights_sha256=meta['weights_sha256'],bundle_manifest_sha256=sha256(Path(bundle)/'manifest.json'),
         bicycle_contract=meta['bicycle_contract'],controller=meta['controller'],variance_scale=[1.,1.],
         event_calibration=[dict(temperature=1.,bias=0.,usable_for_failure_budget=True) for _ in range(2)],
-        candidates=np.geomspace(.5,8,8).astype(np.float32)[:,None].tolist())
+        candidates=model_bank(meta).tolist())
+    if meta.get('offline_wide_gain_pilot'):
+        result['bicycle_gain_contract']=meta['bicycle_gain_contract']
     write_json(path,result);return result
 
 

@@ -59,17 +59,29 @@ def select_gain(means,variances,logits,previous,bank,temperature,bias,cs_limit,c
 class BicycleSelector:
     def __init__(self,bundle,prediction_fit,trajectory_gate=None,reference_recording=False,config=BicyclePolicyConfig(),numerical_test=False):
         self.predictor=ResearchPredictor(bundle,allow_uncalibrated=True);self.metadata=self.predictor.metadata
+        from .bicycle_gain_contract import model_bank
+        self.bank=model_bank(self.metadata)
         self.motion_history=self.predictor.model.config.bicycle_motion_history
         if self.motion_history:
             from .bicycle_motion_runtime import validate_metadata
             validate_metadata(self.metadata)
         self.fit_path=Path(prediction_fit);self.fit=read(self.fit_path);self.config=config;self.reference_recording=reference_recording
+        readout_refit=bool(self.metadata.get('event_readout_refit'))
+        if readout_refit:
+            from .bicycle_event_policy import validate_fit
+            validate_fit(self.fit,bundle)
+            if jax.default_backend()!='cpu':raise ValueError('Readout policy is CPU-qualified only')
+        elif self.predictor.model.config.encoder=='nearest_fc':
+            from .nearest_fc_qualification import validate_fit
+            validate_fit(self.fit,bundle)
+        if self.metadata.get('offline_wide_gain_pilot') and self.fit.get('bicycle_gain_contract')!=self.metadata['bicycle_gain_contract']:
+            raise ValueError('Wide-gain fit requires the exact qualified candidate contract')
         if self.predictor.model.config.bicycle_candidate_encoding:
             from .bicycle_candidate_features import validate_metadata,validate_numerical_mode
             validate_metadata(self.metadata)
             if self.fit.get('diagnostic_identity_only'):
                 validate_numerical_mode(self.fit,reference_recording,numerical_test)
-            else:
+            elif not readout_refit:
                 from .bicycle_candidate_calibration import validate_fitted_model
                 validate_fitted_model(self.fit,bundle)
         if self.fit.get('diagnostic_identity_only') and not (numerical_test and reference_recording):
@@ -82,13 +94,18 @@ class BicycleSelector:
         from .bicycle_guidance import guidance_from_controller
         if self.fit.get('controller')!=self.metadata.get('controller'):raise ValueError('Bicycle fitted controller semantics mismatch')
         self.guidance=guidance_from_controller(self.metadata['controller'])
-        self.bank=np.geomspace(.5,8,8).astype(np.float32)[:,None]
+        if readout_refit:
+            from .bicycle_guidance import BicycleGuidanceConfig
+            self.guidance=BicycleGuidanceConfig(**self.fit['runtime_guidance'])
         np.testing.assert_array_equal(self.bank,np.asarray(self.fit['candidates'],np.float32))
         if trajectory_gate is None:
             if not reference_recording:raise ValueError('Adaptive bicycle selection requires a frozen trajectory gate')
             self.threshold=np.float32(np.inf)
         else:
             gate=read(trajectory_gate)
+            if readout_refit:
+                from .bicycle_event_policy import validate_gate
+                validate_gate(trajectory_gate,self.fit,bundle)
             if (gate['schema']!='oa_cbf_bicycle_trajectory_gate_v70' or gate['prediction_fit_sha256']!=sha256(self.fit_path)
                     or gate['weights_sha256']!=self.metadata['weights_sha256'] or asdict(BicyclePolicyConfig(**gate['policy_config']))!=asdict(config)
                     or not math.isfinite(gate['threshold']) or gate['threshold']<0):raise ValueError('Bicycle trajectory gate mismatch')
@@ -104,7 +121,7 @@ class BicycleSelector:
                 if past_positions is None or history_elapsed is None:raise ValueError('Observed motion history is required')
                 from .bicycle_motion_features import append_history
                 features=jax.vmap(append_history)(features,node_mask,x,obstacles,past_positions,noise,history_elapsed)
-            gains=jnp.broadcast_to(bank,(len(x),8,1));raw=predict_ensemble(self.predictor.model,params,features,node_mask,gains)
+            gains=jnp.broadcast_to(bank,(len(x),len(self.bank),1));raw=predict_ensemble(self.predictor.model,params,features,node_mask,gains)
             means=raw['mean']*scale+mean;variances=jnp.exp(raw['log_variance'])*scale**2*variance_scale
             result=select_gain(means,variances,raw['event_logits'],previous_gain,bank,temperature,bias,threshold,config)
             if config.incumbent_progress and not reference_recording:

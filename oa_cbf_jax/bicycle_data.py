@@ -290,6 +290,9 @@ def audit(directory,workers=12):
 
 def validate_training_dataset(directory):
     root=Path(directory);m=read(root/'manifest.json')
+    from .bicycle_gain_contract import TRAIN_SCHEMA, validate_training_view
+    if m['schema']==TRAIN_SCHEMA:
+        return validate_training_view(root)
     if 'shared_observation_union' in m:
         from .bicycle_shared_data import validate_union
         return validate_union(root)

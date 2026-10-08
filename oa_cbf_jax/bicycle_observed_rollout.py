@@ -10,13 +10,15 @@ from .dynamics import signed_clearance,swept_disk_clearance
 from .routing import physical_route_coordinate
 
 
-def make_observed_episode(config=BicycleControlConfig(),steps=80,guidance=BicycleGuidanceConfig(),stop_at_goal=True,pulse_steps=None):
+def make_observed_episode(config=BicycleControlConfig(),steps=80,guidance=BicycleGuidanceConfig(),stop_at_goal=True,pulse_steps=None,bounded_motion=False):
     if pulse_steps is not None and (type(pulse_steps) is not int or not 1<=pulse_steps<=steps):
         raise ValueError('An offline gain pulse must fit inside the unchanged horizon')
     c=config.robot
-    def episode(initial,goal,obstacles,mask,alpha,points,route_mask,ready,cursor,first_x,first_o,bias_x,bias_o,noise,key,recovery_gain=None):
+    def episode(initial,goal,obstacles,mask,alpha,points,route_mask,ready,cursor,first_x,first_o,bias_x,bias_o,noise,key,recovery_gain=None,velocity_offset=None):
         if (pulse_steps is None)!=(recovery_gain is None):
             raise ValueError('Recovery gain belongs only to an explicit offline pulse')
+        if bounded_motion != (velocity_offset is not None):
+            raise ValueError('Velocity correction belongs only to explicit offline bounded-motion branches')
         initial=initial.astype(jnp.float64);obstacles=obstacles.astype(jnp.float64)
         dt=constant(c.dt,jnp.float64);radius=constant(c.radius,jnp.float64);error=speed_error_bound(noise)
         minimum=jnp.min(signed_clearance(initial[:2],obstacles,mask,radius))
@@ -34,6 +36,11 @@ def make_observed_episode(config=BicycleControlConfig(),steps=80,guidance=Bicycl
             ix=jnp.where(k==0,0.,ix);io=jnp.where(k==0,0.,io)
             sensed,seen=observe(x,current,mask,bias_x,bias_o,noise,ix,io)
             sensed=jnp.where(k==0,first_x,sensed);seen=jnp.where(k==0,first_o,seen)
+            raw_seen=seen
+            if bounded_motion:
+                with jax.enable_x64(True):
+                    velocity=(seen[:,3:5].astype(jnp.float64)+velocity_offset.astype(jnp.float64)).astype(jnp.float32)
+                seen=seen.at[:,3:5].set(jnp.where(mask[:,None],velocity,seen[:,3:5]))
             applied_gain=alpha if pulse_steps is None else jnp.where(k<pulse_steps,alpha,recovery_gain)
             guide={}
             if guidance is None:
@@ -57,6 +64,7 @@ def make_observed_episode(config=BicycleControlConfig(),steps=80,guidance=Bicycl
                 qp_violation=qp.max_violation,route_progress=cursor,cursor_before=before_cursor,route_remaining=remaining,route_target=target,
                 clearance=jnp.where(accepted,clearance,jnp.nan),state_violation=jnp.where(accepted,violation,jnp.nan),innovation_x=ix,innovation_o=io,**guide)
             if pulse_steps is not None:trace['controller_gain']=applied_gain
+            if bounded_motion:trace['raw_observed_obstacles']=raw_seen
             return (x,status,count,minimum,cursor,worst),trace
         carry=(initial,status,jnp.int32(0),minimum,cursor,jnp.float32(-jnp.inf))
         template=jax.eval_shape(tick,carry,jnp.int32(0))[1];storage=jax.tree.map(lambda a:jnp.zeros((steps,*a.shape),a.dtype),template)

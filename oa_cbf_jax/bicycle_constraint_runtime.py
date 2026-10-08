@@ -115,7 +115,8 @@ def raw_inference(predictor,features,mask,batch=64,repeats=3):
     import jax.numpy as jnp
     from .models import predict_ensemble
     norm=predictor.metadata['normalization'];mean=jnp.asarray(norm['target_mean'],jnp.float32);scale=jnp.asarray(norm['target_scale'],jnp.float32)
-    bank=np.geomspace(.5,8,8).astype(np.float32)[:,None]
+    from .bicycle_gain_contract import model_bank
+    bank=model_bank(predictor.metadata)
     def raw(p,f,m,g):
         result=predict_ensemble(predictor.model,p,f,m,g)
         return dict(mean=result['mean']*scale+mean,variance=jnp.exp(result['log_variance'])*scale**2,event_logits=result['event_logits'])
@@ -124,7 +125,7 @@ def raw_inference(predictor,features,mask,batch=64,repeats=3):
         n=min(batch,len(features)-start)
         dtype=jnp.float64 if predictor.model.config.compute_dtype=='float64' else jnp.float32
         return (predictor.params,jnp.asarray(np.pad(features[start:start+n],((0,batch-n),(0,0),(0,0))),dtype=dtype),
-            jnp.asarray(np.pad(mask[start:start+n],((0,batch-n),(0,0)))),jnp.asarray(np.broadcast_to(bank,(batch,8,1))))
+            jnp.asarray(np.pad(mask[start:start+n],((0,batch-n),(0,0)))),jnp.asarray(np.broadcast_to(bank,(batch,len(bank),1))))
     begin=time.monotonic();exe=fn.lower(*args(0)).compile();jax.block_until_ready(exe(*args(0)));cold=time.monotonic()-begin
     arrays=[];timing=[]
     for repeat in range(repeats):

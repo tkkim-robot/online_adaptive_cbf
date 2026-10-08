@@ -21,11 +21,24 @@ class BicycleGuidanceConfig:
     horizon:int=40
     observation_margin:bool=False
     terminal_heading:bool=False
+    turn_primitives:bool=False
+    speed_primitives:bool=False
+    recover_margin:bool=False
+    recovery_preserve_preview:bool=False
+    deterministic_witness:bool=False
 
     def __post_init__(self):
         if type(self.horizon) is not int or not 2<=self.horizon<=80:raise ValueError('Preview horizon must be2..80fixed ticks')
         if type(self.observation_margin) is not bool:raise ValueError('Observation margin must be a boolean')
         if type(self.terminal_heading) is not bool:raise ValueError('Terminal heading must be a boolean')
+        if type(self.turn_primitives) is not bool:raise ValueError('Turn primitives must be a boolean')
+        if type(self.speed_primitives) is not bool:raise ValueError('Speed primitives must be a boolean')
+        if type(self.recover_margin) is not bool or (self.recover_margin and not self.observation_margin):
+            raise ValueError('Margin recovery requires explicit observation-margin guidance')
+        if type(self.recovery_preserve_preview) is not bool or (self.recovery_preserve_preview and not self.recover_margin):
+            raise ValueError('Preview preservation requires explicit margin recovery')
+        if type(self.deterministic_witness) is not bool or (self.deterministic_witness and not self.recovery_preserve_preview):
+            raise ValueError('Deterministic witness requires preview-preserving recovery')
 
 
 def guidance_from_controller(controller):
@@ -33,17 +46,49 @@ def guidance_from_controller(controller):
     if not isinstance(controller,dict) or not isinstance(controller.get('predictive_guidance'),dict):
         raise ValueError('Missing bicycle predictive guidance contract')
     value=controller['predictive_guidance']
-    if 'horizon' not in value or set(value)-{'horizon','observation_margin','terminal_heading'}:
+    if 'horizon' not in value or set(value)-{'horizon','observation_margin','terminal_heading','turn_primitives','speed_primitives','recover_margin','recovery_preserve_preview','deterministic_witness'}:
         raise ValueError('Unsupported bicycle predictive guidance contract')
     return BicycleGuidanceConfig(**value)
 
 
-def profile_bank():
+def margin_recovery_index(original, lower, noisy, eligible=None):
+    """Use only present-observation bounds at the externally supplied gain.
+
+    A negative bound is not a certificate. If every candidate lacks a witness,
+    try the largest finite bound instead of reverting to progress alone.
+    Preserve the original index for zero noise, witnesses, unsupported domains
+    and ties. No alternative gain or future measurement enters this rule.
+    """
+    # Explicit FP64 with default scalar types32 needs a boolean argmax: JAX's
+    # nested floating argmax otherwise creates an FP32 reduction initializer.
+    supported=lower if eligible is None else jnp.where(eligible,lower,-jnp.inf)
+    best=jnp.argmax(supported==jnp.max(supported))
+    recover=(noisy & (lower[original]<0) & ~jnp.any(lower>=0)
+             & jnp.isfinite(supported[best])
+             & (lower[best]>lower[original]+constant(1e-10,lower.dtype)))
+    return jnp.where(recover,best,original),recover
+
+
+def deterministic_witness_index(original, lower, noisy, eligible):
+    """At zero declared noise, retain a nonnegative bound of equal preview length.
+
+    Only existing nominal profiles at the supplied gain are considered. A
+    negative or missing bound is never accepted as a witness; unchanged/noisy
+    cases retain the original action. This is not recursive feasibility.
+    """
+    supported=jnp.where(eligible & jnp.isfinite(lower) & (lower>=0),lower,-jnp.inf)
+    best=jnp.argmax(supported==jnp.max(supported))
+    changed=(~noisy & (lower[original]<0) & jnp.isfinite(supported[best]))
+    return jnp.where(changed,best,original),changed
+
+
+def profile_bank(speed_primitives=False):
     # Candidate0 is the complete unchanged route nominal. Remaining candidates
     # include both turn directions, including the wrap boundary behind the ego.
     angles=np.deg2rad(np.array([0,-30,30,-60,60,-90,90,-120,120,-180,180],np.float32))
-    return (jnp.asarray(np.r_[0.,np.tile(angles,3)].astype(np.float32)),
-        jnp.asarray(np.r_[1.,np.repeat([1.,.6,.3],11)].astype(np.float32)))
+    fractions=[1.,.6,.3]+([1.5,2.] if speed_primitives else [])
+    return (jnp.asarray(np.r_[0.,np.tile(angles,len(fractions))].astype(np.float32)),
+        jnp.asarray(np.r_[1.,np.repeat(fractions,11)].astype(np.float32)))
 
 
 def profile_reference(state,goal,target,offset,fraction,is_original,config):
@@ -55,6 +100,25 @@ def profile_reference(state,goal,target,offset,fraction,is_original,config):
     speed=jnp.maximum(config.robot.speed_min,base*jnp.maximum(jnp.cos(error),.35))
     reference=jnp.stack((config.speed_feedback*(speed-state[3]),steering_to_slip(steering,config.robot)))
     return jnp.where(is_original,nominal_bicycle(state,goal,target,config),reference)
+
+
+def turn_profile_bank(horizon):
+    """Twelve fixed steering arcs: both turns, three speeds, two durations.
+
+    This changes nominal inputs only. Each input is still projected through the
+    same CBF-QP at the externally supplied gain. No gain is searched here.
+    """
+    rows=np.array([(direction,fraction,duration*horizon)
+        for direction in (-1.,1.) for fraction in (1.,.6,.3) for duration in (.5,1.)],np.float32)
+    return tuple(jnp.asarray(rows[:,i]) for i in range(3))
+
+
+def turn_reference(state,goal,target,direction,fraction,turning,config):
+    speed=jnp.maximum(config.robot.speed_min,
+        jnp.minimum(config.cruise_speed,1.2*jnp.maximum(jnp.linalg.norm(goal-state[:2])-.1,0.))*fraction)
+    reference=jnp.stack((config.speed_feedback*(speed-state[3]),
+        direction*constant(config.robot.slip_max,state.dtype)))
+    return jnp.where(turning,reference,nominal_bicycle(state,goal,target,config))
 
 
 def terminal_heading_cost(state,target,config=BicycleControlConfig()):
@@ -77,7 +141,14 @@ def terminal_heading_cost(state,target,config=BicycleControlConfig()):
 def preview_profiles(state,goal,obstacles,mask,alpha,points,route_mask,cursor,config=BicycleControlConfig(),guidance=BicycleGuidanceConfig(),record=False,speed_error=0.,noise=None):
     if guidance.observation_margin and (noise is None or noise.shape!=(6,)):
         raise ValueError('Observation-margin guidance requires six declared noise ranges')
-    offsets,fractions=profile_bank();size=len(offsets);c=config.robot;dt=constant(c.dt,jnp.float64);radius=constant(c.radius,jnp.float64)
+    # Optional faster references add nominal choices, never change the supplied
+    # gain, existing profile indices, actuator limits, speed rows or CBF rows.
+    offsets,fractions=profile_bank(guidance.speed_primitives);legacy_size=len(offsets)
+    if guidance.turn_primitives:
+        directions,turn_fractions,durations=turn_profile_bank(guidance.horizon)
+        offsets=jnp.concatenate((offsets,jnp.zeros_like(directions)))
+        fractions=jnp.concatenate((fractions,turn_fractions))
+    size=len(offsets);c=config.robot;dt=constant(c.dt,jnp.float64);radius=constant(c.radius,jnp.float64)
     original=jnp.arange(size)==0
     x=jnp.broadcast_to(state.astype(jnp.float64),(size,4));cursors=jnp.full((size,),cursor,jnp.float32)
     obs0=obstacles.astype(jnp.float64)
@@ -92,6 +163,10 @@ def preview_profiles(state,goal,obstacles,mask,alpha,points,route_mask,cursor,co
         # Return toward the route over the second half of the finite preview.
         decay=jnp.clip(2.-2.*k/guidance.horizon,0.,1.)
         references=jax.vmap(lambda s,t,o,f,z:profile_reference(s,goal,t,o*decay,f,z,config))(observed,target,offsets,fractions,original)
+        if guidance.turn_primitives:
+            arcs=jax.vmap(lambda s,t,d,f,h:turn_reference(s,goal,t,d,f,k<h,config))(
+                observed[legacy_size:],target[legacy_size:],directions,turn_fractions,durations)
+            references=references.at[legacy_size:].set(arcs)
         a,b,h,domain=jax.vmap(lambda s:bicycle_rows(s,seen,mask,alpha,config,speed_error))(observed)
         qp=jax.vmap(lambda r,a,b:project_bicycle_reference(r,a,b,jnp.float32,config))(references,a,b)
         hmin=jnp.min(jnp.where(mask,h,jnp.inf),axis=1);dmin=jnp.min(jnp.where(mask,domain,jnp.inf),axis=1)
@@ -142,10 +217,24 @@ def preview_profiles(state,goal,obstacles,mask,alpha,points,route_mask,cursor,co
         prefer=jnp.any(noise>0)&jnp.any(witness)
         rank=jnp.where(prefer&~witness,-jnp.inf,rank)
     index=jnp.argmax(rank==jnp.max(rank))
+    if guidance.recover_margin:
+        original_index=index
+        eligible=None
+        if guidance.recovery_preserve_preview:
+            eligible=(steps>=steps[index]) & (~alive[index]|alive)
+        index,recovered=margin_recovery_index(index,first_margin,jnp.any(noise>0),eligible)
+        if guidance.deterministic_witness:
+            index,witness_recovered=deterministic_witness_index(index,first_margin,jnp.any(noise>0),eligible)
+            recovered=recovered|witness_recovered
     metrics=dict(selected=index,complete=alive[index],complete_profiles=jnp.sum(alive),steps=steps[index],clearance=minimum[index],
         barrier=min_h[index],route_progress=progress[index],cross_track=cross_track[index],score=score[index])
     if guidance.observation_margin:
         metrics.update(next_observation_lower=first_margin[index],margin_profiles=jnp.sum(witness),margin_preferred=prefer)
+    if guidance.recover_margin:
+        metrics.update(recovery_applied=recovered,recovery_original_index=original_index,
+            recovery_profile_lower=first_margin,recovery_first_controls=history['control'][0])
+        if guidance.recovery_preserve_preview:
+            metrics.update(recovery_profile_steps=steps,recovery_profile_complete=alive)
     if guidance.terminal_heading:
         metrics['terminal_heading_cost']=heading_cost[index]
     return metrics,history,dict(final_state=final,steps=steps,complete=alive,clearance=minimum,barrier=min_h,progress=progress,score=score)

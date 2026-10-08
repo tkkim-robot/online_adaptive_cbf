@@ -3,7 +3,8 @@
 The original continuous barrier is differentiated automatically: this corrects
 the independently demonstrated hand-gradient error, without changing h or gains.
 The dynamic tracker passes five nearest centers into a ten-slot fixed QP; OD
-uses only the first center. Both retain the native omission of obstacle-time drift.
+uses only the first center. Moving-obstacle rows include the obstacle-position
+derivative, as corrected upstream in safe_control commit 27d8569.
 """
 from dataclasses import asdict
 from pathlib import Path
@@ -16,6 +17,8 @@ from .bicycle_control import BicycleControlConfig, constant
 from .dataset import sha256
 
 METHODS={'fixed_low':.1,'fixed_high':70.,'optimal_decay':.1}
+DPCBF_DERIVATIVE_CONTRACT='total_position_drift_constant_obstacle_velocity'
+UPSTREAM_DRIFT_FIX='27d856980435e374534cd158f3514eceb1433199'
 SOURCE_FILES=('online_cbf_config.py','safe_control/dynamic_env/main.py',
     'safe_control/tracking.py','safe_control/robots/robot.py',
     'safe_control/robots/kinematic_bicycle2D.py','safe_control/robots/kinematic_bicycle2D_dpcbf.py',
@@ -54,13 +57,14 @@ def contract(method,c=BicycleControlConfig(),acceptance='strict_rows'):
     import osqp
     if method not in METHODS:raise ValueError('Unknown registered method')
     if acceptance not in ('strict_rows','native_status'):raise ValueError('Unknown acceptance rule')
-    return dict(schema='bicycle_native_continuous_qp_v81',method=method,alpha=METHODS[method],
+    return dict(schema='bicycle_native_continuous_qp_total_drift',method=method,alpha=METHODS[method],
         solver='OSQP',solver_version=osqp.__version__,solver_options={'verbose':False},
         source_sha256={f:sha256(f) for f in SOURCE_FILES},config=asdict(c),
         obstacle_rows=1 if method=='optimal_decay' else 10,
         used_obstacles='Single nearest center' if method=='optimal_decay' else 'Five nearest centers from dynamic tracker; ten original QP slots with unused rows zero',
         nominal='Native BaseRobot wrapper gains (3,.5,.5) for OD or (2,1,1) fixed; original nominal clipping only',
-        barrier='Original beta1.05, shape.5/1, max(domain,1e-6), no OA buffer or relative-speed regularizer; instantaneous obstacle parameters, original no explicit obstacle-time drift',
+        barrier='Original beta1.05, shape.5/1, max(domain,1e-6), no OA buffer or relative-speed regularizer; total robot and obstacle-position drift at constant obstacle velocity',
+        derivative_contract=DPCBF_DERIVATIVE_CONTRACT,upstream_drift_fix=UPSTREAM_DRIFT_FIX,
         derivative='Exact JAX derivative of native scalar h replaces erroneous hand gradient; no h/gain/objective tuning',
         decay='Unrestricted omega with reference1 and10000*(omega-1)^2' if method=='optimal_decay' else 'Fixed configured alpha',
         physical_adapter='Shared actual unclipped affine-slip plant, FP32 observations/actuators, common sensor streams and rolling goal condition. Original acceleration/slip bounds only; actual speed violations end and fail the task.',
@@ -89,7 +93,10 @@ def problem(x,goal,obs,mask,method,h,grad,c=BicycleControlConfig()):
     A=np.zeros((slots+4,columns));b=np.zeros(slots+4);v=x[3];theta=x[2]
     drift=np.array([v*np.cos(theta),v*np.sin(theta),0.,0.])
     authority=np.array([[0.,-v*np.sin(theta)],[0.,v*np.cos(theta)],[0.,v/c.robot.rear_axle_distance],[1.,0.]])
-    n=len(selected);A[:n,:2]=-grad[selected]@authority;b[:n]=grad[selected]@drift
+    # Translation invariance gives dh/dp_obs = -dh/dp_robot. Velocity already
+    # appearing inside h does NOT replace this explicit obstacle-motion term.
+    n=len(selected);A[:n,:2]=-grad[selected]@authority
+    b[:n]=grad[selected]@drift-np.sum(grad[selected,:2]*obs[selected,3:5],axis=1)
     if od:A[:n,2]=-METHODS[method]*h[selected]
     else:b[:n]+=METHODS[method]*h[selected]
     A[slots:,:2]=[[1.,0.],[-1.,0.],[0.,1.],[0.,-1.]]

@@ -24,6 +24,12 @@ def reference_gradient(x,o,c=BicycleControlConfig()):
     return np.array([reference_barrier(x.astype(complex)+1j*1e-25*np.eye(4)[i],o,c).imag/1e-25 for i in range(4)])
 
 
+def reference_obstacle_gradient(x,o,c=BicycleControlConfig()):
+    # Differentiate obstacle coordinates independently; do not assume the
+    # negative-robot-gradient identity used by the runtime implementation.
+    return np.array([reference_barrier(x,o.astype(complex)+1j*1e-25*np.eye(5)[i],c).imag/1e-25 for i in range(2)])
+
+
 def reference_problem(x,goal,obs,mask,method,c=BicycleControlConfig()):
     """Rebuild the original inequalities without the runtime AD/row builder."""
     od=method=='optimal_decay';alpha=.1 if method!='fixed_high' else 70.
@@ -34,7 +40,9 @@ def reference_problem(x,goal,obs,mask,method,c=BicycleControlConfig()):
     grad=np.array([reference_gradient(x,o,c) for o in obs[selected]]).reshape(-1,4)
     f=reference_flow(0,x,np.zeros(2),c)
     g=np.stack([reference_flow(0,x,u,c)-f for u in np.eye(2)],axis=1)
-    A[:len(selected),:2]=-grad@g;b[:len(selected)]=grad@f
+    obstacle_grad=np.array([reference_obstacle_gradient(x,o,c) for o in obs[selected]]).reshape(-1,2)
+    A[:len(selected),:2]=-grad@g
+    b[:len(selected)]=grad@f+np.sum(obstacle_grad*obs[selected,3:5],axis=1)
     if od:A[:len(selected),2]=-alpha*h
     else:b[:len(selected)]+=alpha*h
     A[slots:,:2]=[[1,0],[-1,0],[0,1],[0,-1]]

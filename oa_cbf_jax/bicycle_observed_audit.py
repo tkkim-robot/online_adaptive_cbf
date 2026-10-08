@@ -114,7 +114,21 @@ def recorded_gain(data,mask):
     return value.astype(float)
 
 
-def audit_trace(d,config=BicycleControlConfig()):
+def validate_tick_gains(values,candidates=None):
+    """Check the declared bank without inferring authorization from a trace."""
+    values=np.asarray(values)
+    if values.ndim!=1 or not np.isfinite(values).all():
+        raise ValueError('Invalid per-tick bicycle gain')
+    if candidates is None:
+        valid=(values>=.5)&(values<=8.)
+    else:
+        from .bicycle_gain_contract import validate_bank
+        bank=validate_bank(candidates)[:,0]
+        valid=np.isin(values,bank)
+    if not valid.all():raise ValueError('Invalid per-tick bicycle gain')
+
+
+def audit_trace(d,config=BicycleControlConfig(),*,gain_candidates=None):
     from .route_audit import check_transition
     c=config.robot;physical=d['initial'].astype(float);obs=d['obstacles'].astype(float);mask=d['mask'].astype(bool);noise=d['noise'].astype(float)
     bias_x=d['bias_x'].astype(float);bias_o=d['bias_o'].astype(float);alpha=recorded_gain(d,mask);status=int(d['final_status']);count=int(d['expected_steps']);horizon=int(d['horizon'])
@@ -123,22 +137,41 @@ def audit_trace(d,config=BicycleControlConfig()):
     assert np.linalg.norm(bias_x[:2])<=noise[0]+1e-7 and abs(bias_x[2])<=noise[1]+1e-7 and abs(bias_x[3])<=noise[2]+1e-7
     assert np.all(np.linalg.norm(bias_o[mask,:2],axis=1)<=noise[3]+1e-7) and np.all(np.linalg.norm(bias_o[mask,3:5],axis=1)<=noise[4]+1e-7) and np.all(np.abs(bias_o[mask,2])<=noise[5]+1e-7)
     assert not np.any(bias_o[~mask])
-    np.testing.assert_array_equal(d['observed_state'][0],d['first_x']);np.testing.assert_array_equal(d['observed_obstacles'][0],d['first_o'])
+    bounded_motion=bool(d.get('bounded_motion',False))
+    if bounded_motion:
+        from .bicycle_bounded_motion import held_offset
+        correction=held_offset(d['first_o'],d['motion_past'],mask,noise,float(d['motion_elapsed']))
+        np.testing.assert_array_equal(correction['offset'],d['motion_offset'])
+        raw_obstacles=d['raw_observed_obstacles']
+        expected=raw_obstacles.copy()
+        expected[:,:,3:5]=(raw_obstacles[:,:,3:5].astype(float)+d['motion_offset'].astype(float)).astype(np.float32)
+        np.testing.assert_array_equal(expected,d['observed_obstacles'])
+    else:
+        if 'raw_observed_obstacles' in d or 'motion_offset' in d:raise ValueError('Undeclared observation correction')
+        raw_obstacles=d['observed_obstacles']
+    np.testing.assert_array_equal(d['observed_state'][0],d['first_x']);np.testing.assert_array_equal(raw_obstacles[0],d['first_o'])
     if np.any(np.diff(d['active'].astype(int))>0):raise ValueError('Post-terminal physical command')
+    if 'controller_gain' in d:
+        validate_tick_gains(d['controller_gain'],gain_candidates)
+        if len(d['controller_gain'])!=len(d['active']):raise ValueError('Incomplete per-tick gain trace')
     minimum=np.min(np.where(mask,np.linalg.norm(obs[:,:2]-physical[:2],axis=1)-c.radius-obs[:,2],np.inf));worst=-np.inf;max_error=0.;checked=0;feasible_rejection=False
     for k,accepted in enumerate(d['active']):
         if 'controller_gain' in d:
             alpha=float(d['controller_gain'][k])
-            if not np.isfinite(alpha) or not .5<=alpha<=8.:raise ValueError('Invalid per-tick bicycle gain')
         current=obs.copy();current[:,:2]+=k*c.dt*current[:,3:5]
         sensed=d['observed_state'][k].astype(float);seen=d['observed_obstacles'][k].astype(float)
+        raw_seen=raw_obstacles[k].astype(float)
+        if bounded_motion:
+            error_velocity=np.linalg.norm(seen[mask,3:5]-current[mask,3:5],axis=-1)
+            if np.any(error_velocity>correction['future_radius'][mask]+1e-10):
+                raise ValueError('Corrected velocity escaped the declared absolute error bound')
         ix=d['innovation_x'][k];io=d['innovation_o'][k]
         assert np.linalg.norm(ix[:2])<=1+1e-6 and np.max(np.abs(ix[2:]))<=1+1e-6
         assert np.all(np.linalg.norm(io[:,:2],axis=1)<=1+1e-6) and np.all(np.linalg.norm(io[:,3:5],axis=1)<=1+1e-6) and np.max(np.abs(io[:,2]))<=1+1e-6
         if k:
             np.testing.assert_allclose(sensed,(physical+bias_x+.15*xs*ix).astype(np.float32),atol=3e-6,rtol=2e-6)
             expected=(current+bias_o+.15*os*io).astype(np.float32);expected[~mask]=0.
-            np.testing.assert_allclose(seen,expected,atol=3e-6,rtol=2e-6)
+            np.testing.assert_allclose(raw_seen,expected,atol=3e-6,rtol=2e-6)
         else:
             # Later acquired observations contain their actual acquisition
             # innovation. The branch does not substitute a new latent draw.

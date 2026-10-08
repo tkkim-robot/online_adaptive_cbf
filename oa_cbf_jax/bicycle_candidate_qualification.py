@@ -15,6 +15,36 @@ from .dataset import sha256
 from .io import write_json
 
 SCHEMA='bicycle_candidate_encoding_runtime_qualification'
+WIDE_SCHEMA='bicycle_wide_candidate_encoding_runtime_qualification'
+
+
+def learning_entries(spec):
+    """A wider domain requires its own reviewed dataset and exact fresh weights."""
+    proof=read(spec['learning_review']);report=read(spec['learning_report'])
+    common=('all_source_parent_feature_checkpoint_and_metric_bindings_verified','matched_encoder_only_training_verified')
+    if (proof.get('status')!='passed' or proof.get('report_sha256')!=sha256(spec['learning_report'])
+            or any(proof.get(k) is not True for k in common)):
+        raise ValueError('Independently reviewed frozen-model learning required')
+    if spec.get('wide_gain'):
+        from .bicycle_gain_contract import contract,validate_training_view
+        if (proof.get('permits_separate_runtime_qualification') is not True
+                or proof.get('new_gain_contract_verified') is not True
+                or spec.get('bicycle_gain_contract')!=contract()
+                or proof.get('protocol_sha256')!=sha256(spec['learning_protocol'])):
+            raise ValueError('Reviewed wide-gain learning required')
+        manifest=validate_training_view(spec['dataset'])
+        target=manifest.get('bicycle_task_progress_contract')
+        if (spec.get('bicycle_task_progress_contract')!=target
+                or proof.get('task_progress_contract')!=target):
+            raise ValueError('Task-progress qualification differs from reviewed learning')
+        original=read(spec['learning_protocol'])
+        if any(Path(original[k]).resolve()!=Path(spec[k]).resolve() for k in ('dataset','training')):
+            raise ValueError('Unreviewed wide-gain source')
+        return report['reports']
+    if (not proof.get('warrants_runtime_integration') or not all(proof['development_checks'].values())
+            or proof.get('only_candidate_conditioned_encoding_changed') is not True):
+        raise ValueError('Positive candidate-encoding learning required')
+    return report['reports']['candidate_encoding']
 
 
 def prepare(spec,out):
@@ -55,13 +85,17 @@ def worker(protocol,encoder,backend):
     for name in ('bundle','bundle_fp64'):validate_metadata(read(root/name/'manifest.json'))
     for name,features,bundle in [('offline_fp32',offline,root/'bundle'),('runtime_fp32',f32,root/'bundle'),('runtime_fp64',f64,root/'bundle_fp64')]:
         pred[name],timing[name]=raw_inference(ResearchPredictor(bundle,allow_uncalibrated=True),features,mask)
-    reviewed=read(read(spec['learning_report'])['reports']['candidate_encoding'][encoder]['path'])
-    prediction_file=Path(spec['learning_report']).parent/'candidate_encoding'/encoder/'validation_predictions.npz'
+    entries=read(spec['learning_report'])['reports']
+    entry=entries[encoder] if spec.get('wide_gain') else entries['candidate_encoding'][encoder]
+    reviewed=read(entry['path']);check_files({entry['path']:entry['sha256']})
+    prediction_file=Path(entry['path']).parent/'validation_predictions.npz'
     if sha256(prediction_file)!=reviewed['prediction_sha256']:raise ValueError('Changed reviewed checkpoint predictions')
     with np.load(prediction_file) as z:
         norm=read(root/'member_0/settings.json')['normalization'];mu=np.asarray(norm['target_mean'],np.float32);scale=np.asarray(norm['target_scale'],np.float32)
         expected=dict(mean=z['mean'][:,data['indices'],::2]*scale+mu,variance=z['variance'][:,data['indices'],::2]*scale**2,event_logits=z['event_logits'][:,data['indices'],::2])
-    np.testing.assert_array_equal(data['gains'][:,::2],np.broadcast_to(np.geomspace(.5,8,8).astype(np.float32)[None,:,None],(len(mask),8,1)))
+    from .bicycle_gain_contract import model_bank
+    bank=model_bank(read(root/'bundle/manifest.json'))
+    np.testing.assert_array_equal(data['gains'][:,::2],np.broadcast_to(bank,(len(mask),len(bank),1)))
     for k in expected:np.testing.assert_allclose(pred['offline_fp32'][k],expected[k],atol=2e-5,rtol=2e-5)
     fit=diagnostic_fit(root/'bundle_fp64',out/'identity_test_fit.json')
     policy=BicycleSelector(root/'bundle_fp64',out/'identity_test_fit.json',reference_recording=True,numerical_test=True)
@@ -94,13 +128,9 @@ def run(protocol,directory):
     spec=read(protocol);check_files(spec['bound_files']);job=Path(directory);out=Path(spec['output']);out.mkdir(parents=True,exist_ok=False);start=time.monotonic()
     import shutil
     if shutil.disk_usage(out).free/2**30<spec['minimum_free_gib']+1.:raise ValueError('Insufficient runtime artifact reserve')
-    proof=read(spec['learning_review']);report=read(spec['learning_report'])
-    if (proof['status']!='passed' or proof['report_sha256']!=sha256(spec['learning_report']) or not proof['warrants_runtime_integration']
-            or not proof['all_source_parent_feature_checkpoint_and_metric_bindings_verified'] or not all(proof['development_checks'].values())
-            or not proof['matched_encoder_only_training_verified'] or not proof['only_candidate_conditioned_encoding_changed']):
-        raise ValueError('Positive independently reviewed frozen-model learning required')
+    entries=learning_entries(spec)
     for encoder in ('gat','matched_fc'):
-        entry=report['reports']['candidate_encoding'][encoder];check_files({entry['path']:entry['sha256']})
+        entry=entries[encoder];check_files({entry['path']:entry['sha256']})
         r=read(entry['path']);check_files(r['bound_checkpoints'])
         if Path(r['training']).resolve()!=Path(spec['training']).resolve():raise ValueError('Unreviewed model source')
     def progress(stage):
@@ -146,11 +176,15 @@ def run(protocol,directory):
         models[e]=dict(bundle=str(bundle),bundle_manifest_sha256=sha256(bundle/'manifest.json'),weights_sha256=sha256(bundle/'weights.msgpack'),
             parity_passed=True,maximum_errors=errors,selected_backend=min(results,key=lambda b:results[b]['policy_timing']['p50_batch_seconds']),
             reports={b:dict(path=str(out/e/b/'report.json'),sha256=sha256(out/e/b/'report.json')) for b in results})
-    result=dict(schema=SCHEMA,status='passed',models=models,inputs_sha256=sha256(inputs),observation_sources_sha256=sha256(out/'observation_sources.json'),
+    result=dict(schema=WIDE_SCHEMA if spec.get('wide_gain') else SCHEMA,status='passed',models=models,inputs_sha256=sha256(inputs),observation_sources_sha256=sha256(out/'observation_sources.json'),
         protocol_sha256=sha256(job/'protocol.json'),dataset_manifest_sha256=sha256(Path(spec['dataset'])/'manifest.json'),
         dataset_index_sha256=sha256(Path(spec['dataset'])/'index.json'),learning_review_sha256=sha256(spec['learning_review']),
         calibration_fitted=False,benchmark_parents_used=False,reserved_calibration_parents_used=False,model_promoted=False,whole_goal_complete=False,
         limitation='Candidate-conditioned observed graph, raw prediction and fixed-reference numerical qualification only. Reserved prediction calibration, adaptive physical timing/trajectory gates and fresh navigation still required.')
+    if spec.get('wide_gain'):result['bicycle_gain_contract']=spec['bicycle_gain_contract']
+    if 'bicycle_task_progress_contract' in spec:
+        result['bicycle_task_progress_contract']=spec['bicycle_task_progress_contract']
+        result['targets']=read(Path(spec['dataset'])/'manifest.json')['targets']
     write_json(out/'report.json',result);check_files(spec['bound_files'])
     write_json(job/'complete.json',dict(status='completed',report=str(out/'report.json'),report_sha256=sha256(out/'report.json'),elapsed_seconds=time.monotonic()-start,whole_goal_complete=False));progress('completed')
 

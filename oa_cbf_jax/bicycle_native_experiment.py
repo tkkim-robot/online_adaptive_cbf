@@ -99,7 +99,8 @@ def episode(parent,method,kernels,steps=1600,acceptance='strict_rows'):
     return row,payload
 
 
-def collect(source,output,method,shard=0,shards=4,steps=1600,limit=None,acceptance='strict_rows'):
+def collect(source,output,method,shard=0,shards=4,steps=1600,limit=None,acceptance='strict_rows',min_free_gib=150.35):
+    if not np.isfinite(min_free_gib) or min_free_gib<1:raise ValueError('Invalid disk reserve')
     root=Path(output);root.mkdir(parents=True,exist_ok=False);source=Path(source);sm=read(source/'manifest.json');parents=read(source/'scenes.json')
     if sm['weight_fit_authorized'] is not False or sm['scenes_sha256']!=sha256(source/'scenes.json'):raise ValueError('Changed evaluation source')
     indices=sm['phase_order']['policy_audit'][shard::shards]
@@ -107,13 +108,13 @@ def collect(source,output,method,shard=0,shards=4,steps=1600,limit=None,acceptan
     if not indices or not 0<=shard<shards or steps<1:raise ValueError('Invalid native cohort')
     c=control_config(sm['config']);start=time.perf_counter();kernels=PhysicalKernels(c)
     manifest=dict(source=str(source.resolve()),source_manifest_sha256=sha256(source/'manifest.json'),source_fingerprint=source_fingerprint(),
-        selected_indices=indices,method=method,contract=contract(method,c,acceptance),acceptance=acceptance,steps=steps,smoke_only=limit is not None,config=asdict(c),
-        source_task='Exact V80 physical parents/goal/noise/bias/first observations. Native nominal follows the task goal directly; no OA route or predictive guidance.',
+        selected_indices=indices,method=method,contract=contract(method,c,acceptance),acceptance=acceptance,steps=steps,smoke_only=limit is not None,config=asdict(c),min_free_gib=min_free_gib,
+        source_task='Exact reserved physical parents/goal/noise/bias/first observations. Native nominal follows the task goal directly; no OA route or predictive guidance.',
         sensor_key='parent.seed+4; same global-tick innovation rule as OA/FC',device=str(jax.devices()[0]),whole_goal_complete=False)
     write_json(root/'manifest.json',manifest);index=[]
     print(json.dumps(dict(stage='ready',compiled_signatures=3,compile_seconds=kernels.compile_seconds,device=str(jax.devices()[0]))),flush=True)
     for i in indices:
-        if shutil.disk_usage(root).free/2**30<150.35:raise ValueError('Native evaluation disk safety buffer reached')
+        if shutil.disk_usage(root).free/2**30<min_free_gib:raise ValueError('Native evaluation disk safety buffer reached')
         row,payload=episode(parents[i],method,kernels,steps,acceptance);file=f'parent_{i:04d}.npz'
         np.savez_compressed(root/file,**payload);row.update(source_index=i,file=file,sha256=sha256(root/file));index.append(row)
         write_json(root/'index.json',index)
@@ -144,5 +145,6 @@ if __name__=='__main__':
     q.add_argument('--shard',type=int,default=0);q.add_argument('--shards',type=int,default=4)
     q.add_argument('--steps',type=int,default=1600);q.add_argument('--limit',type=int)
     q.add_argument('--acceptance',choices=('strict_rows','native_status'),default='strict_rows')
+    q.add_argument('--min-free-gib',type=float,default=150.35)
     q=s.add_parser('audit');q.add_argument('--directory',required=True);q.add_argument('--workers',type=int,default=12)
     a=vars(p.parse_args());cmd=a.pop('command');dict(collect=collect,audit=audit)[cmd](**a)

@@ -4,7 +4,10 @@ import jax.numpy as jnp
 import numpy as np
 
 
-def contract():
+def contract(gain_domain=None):
+    domain=dict(lower=.5,upper=8.) if gain_domain is None else gain_domain
+    if domain not in (dict(lower=.5,upper=8.),dict(lower=.0625,upper=64.)):
+        raise ValueError('Unqualified candidate encoding gain domain')
     return dict(schema='bicycle_candidate_conditioned_scene_encoding',raw_graph_features=35,
         prepared_graph_features=41,encoded_graph_features=43,
         added_fields=['log_gain_center2_scale_log4','asinh_candidate_constraint_rhs_over_speed_max'],
@@ -13,21 +16,30 @@ def contract():
         treatment='Encode each scene-candidate pair before the unchanged Gaussian/event head; identical transform for GAT and matched FC.',
         padding='Both added fields zero on padding; rhs zero on ego/goal or invalid geometric domain.',
         learned_parameters='Original encoder and head; only input projection gains two columns per node.',
-        gain_domain=[.5,8.],controller_solve=False,physical_truth_used=False,training_labels_used=False,
+        gain_domain=[domain['lower'],domain['upper']],controller_solve=False,physical_truth_used=False,training_labels_used=False,
         limitation='Observed instantaneous inequality coefficients, not a forecast or safety certificate.')
 
 
 def validate_metadata(metadata):
+    from .bicycle_task_dataset import validate_target_metadata
+    validate_target_metadata(metadata)
     from .bicycle_constraint_features import contract as constraint_contract
     from .bicycle_features import SCHEMA as graph_schema
     architecture=metadata.get('architecture',{})
+    domain=metadata.get('gain_domain',dict(lower=.5,upper=8.))
+    if domain==dict(lower=.0625,upper=64.):
+        from .bicycle_gain_contract import contract as gain_contract, TRAIN_SCHEMA
+        if (metadata.get('bicycle_gain_contract')!=gain_contract()
+                or metadata.get('dataset_schema')!=TRAIN_SCHEMA
+                or metadata.get('offline_wide_gain_pilot') is not True):
+            raise ValueError('Wide candidate encoding requires explicit new training contract')
     if (metadata.get('graph_features')!=35 or metadata.get('gain_dimension')!=1
             or architecture.get('bicycle_candidate_encoding') is not True
             or architecture.get('bicycle_constraint_features') is not True
             or architecture.get('bicycle_motion_history',False)
             or architecture.get('bicycle_affine_gain',False)
             or architecture.get('encoder') not in ('gat','matched_fc')
-            or metadata.get('bicycle_candidate_encoding_contract')!=contract()
+            or metadata.get('bicycle_candidate_encoding_contract')!=contract(domain)
             or metadata.get('bicycle_constraint_features_contract')!=constraint_contract()
             or metadata.get('bicycle_contract',{}).get('graph_schema')!=graph_schema):
         raise ValueError('Changed candidate-conditioned observed model contract')

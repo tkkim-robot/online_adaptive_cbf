@@ -27,6 +27,9 @@ def models(training, completion):
         path = root/encoder
         bundle, fit = path/'bundle_fp64', path/'prediction_calibration/prediction_fit.json'
         metadata, calibration = read(bundle/'manifest.json'), read(fit)
+        if metadata.get('offline_wide_gain_pilot'):
+            from .bicycle_candidate_calibration import validate_fitted_model
+            validate_fitted_model(calibration,bundle)
         finished = read(path/'prediction_calibration/complete.json')
         if (metadata['architecture']['encoder'] != encoder or metadata['architecture']['compute_dtype'] != 'float64'
                 or metadata['weights_sha256'] != sha256(bundle/'weights.msgpack')
@@ -38,6 +41,8 @@ def models(training, completion):
         for field in ('controller', 'bicycle_contract', 'targets', 'events', 'gain_domain', 'dataset_manifest_sha256'):
             if calibration[field] != metadata[field]:
                 raise ValueError('Prediction fit/model semantics differ: '+field)
+        if calibration.get('bicycle_task_progress_contract')!=metadata.get('bicycle_task_progress_contract'):
+            raise ValueError('Prediction fit/model task-progress contracts differ')
         result[encoder] = dict(bundle=str(bundle.resolve()), fit=str(fit.resolve()), metadata=metadata,
             calibration=calibration, weights_sha256=sha256(bundle/'weights.msgpack'),
             bundle_manifest_sha256=sha256(bundle/'manifest.json'), fit_sha256=sha256(fit))
@@ -49,4 +54,6 @@ def models(training, completion):
                   'dataset_index_sha256', 'dataset_audit_sha256', 'source_manifest_sha256', 'event_budget_statistic'):
         if result['gat']['calibration'][field] != result['matched_fc']['calibration'][field]:
             raise ValueError('Unmatched reserved calibration protocol: '+field)
+    if result['gat']['metadata'].get('bicycle_task_progress_contract')!=result['matched_fc']['metadata'].get('bicycle_task_progress_contract'):
+        raise ValueError('Unmatched encoder task-progress treatment')
     return result

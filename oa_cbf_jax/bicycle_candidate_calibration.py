@@ -16,15 +16,26 @@ def validate_qualification(review_path,bundle,dataset):
     if review_path is None:raise ValueError('Independent candidate runtime qualification is required')
     review=read(review_path);report=read(review['report']);meta=read(Path(bundle)/'manifest.json')
     from .bicycle_candidate_features import validate_metadata
-    from .bicycle_candidate_qualification import SCHEMA
+    from .bicycle_candidate_qualification import SCHEMA,WIDE_SCHEMA
     validate_metadata(meta);encoder=meta['architecture']['encoder']
+    target=meta.get('bicycle_task_progress_contract')
+    manifest=read(Path(dataset)/'manifest.json')
+    if any(record.get('bicycle_task_progress_contract')!=target for record in (manifest,report,review)):
+        raise ValueError('Qualification changed the task-progress target contract')
+    wide=meta.get('offline_wide_gain_pilot',False)
+    if wide:
+        from .bicycle_gain_contract import contract
+        if (review.get('wide_gain_contract_and_all_candidates_verified') is not True
+                or report.get('bicycle_gain_contract')!=contract()
+                or review.get('bicycle_gain_contract')!=contract()):
+            raise ValueError('Independent wide-gain qualification required')
     flags=('all_source_and_checkpoint_bindings_verified','all_candidate_and_observed_features_verified',
         'exported_weights_equal_selected_trained_members','cpu_gpu_and_live_selector_parity_verified',
         'independent_selection_statistics_verified','warrants_reserved_calibration')
-    if (review.get('schema')!='independent_bicycle_candidate_runtime_review' or review.get('status')!='passed'
+    if (review.get('schema')!=('independent_bicycle_wide_candidate_runtime_review' if wide else 'independent_bicycle_candidate_runtime_review') or review.get('status')!='passed'
             or any(review.get(k) is not True for k in flags) or review['report_sha256']!=sha256(review['report'])
             or review.get('protocol_sha256')!=report.get('protocol_sha256')
-            or report.get('schema')!=SCHEMA or report.get('status')!='passed'
+            or report.get('schema')!=(WIDE_SCHEMA if wide else SCHEMA) or report.get('status')!='passed'
             or report['dataset_manifest_sha256']!=sha256(Path(dataset)/'manifest.json')
             or meta.get('dataset_manifest_sha256')!=report['dataset_manifest_sha256']
             or report['dataset_index_sha256']!=sha256(Path(dataset)/'index.json')
@@ -43,6 +54,15 @@ def validate_fitted_model(fit,bundle):
             or not Path(path).is_file() or fit.get('runtime_qualification_sha256')!=sha256(path)):
         raise ValueError('Candidate policy requires a bound independently reviewed runtime qualification')
     report=validate_qualification(path,bundle,dataset)
+    from .bicycle_task_dataset import validate_target_metadata
+    validate_target_metadata(fit)
+    meta=read(Path(bundle)/'manifest.json')
+    if fit.get('bicycle_task_progress_contract')!=meta.get('bicycle_task_progress_contract'):
+        raise ValueError('Fitted model changed task-progress semantics')
+    if 'bicycle_gain_contract' in report:
+        from .bicycle_gain_contract import contract, candidate_bank
+        if fit.get('bicycle_gain_contract')!=contract() or fit.get('candidates')!=candidate_bank()[:,None].tolist():
+            raise ValueError('Changed wide-gain calibrated candidate contract')
     if (fit.get('dataset_manifest_sha256')!=report['dataset_manifest_sha256']
             or fit.get('dataset_index_sha256')!=report['dataset_index_sha256']):
         raise ValueError('Candidate calibration dataset differs from runtime qualification')
@@ -53,6 +73,8 @@ def run(protocol,directory):
     spec=read(protocol);check_files(spec['bound_files']);job=Path(directory);start=time.monotonic();training=Path(spec['training'])
     report=read(read(spec['runtime_review'])['report'])
     for e in ('gat','matched_fc'):validate_qualification(spec['runtime_review'],training/e/'bundle_fp64',spec['dataset'])
+    spec['bound_files'][spec['runtime_review']]=sha256(spec['runtime_review'])
+    spec['bound_files'][read(spec['runtime_review'])['report']]=sha256(read(spec['runtime_review'])['report'])
     write_json(job/'protocol.json',spec);times={}
     def calibrate(item,phase):
         slot,e=item;backend=report['models'][e]['selected_backend']
