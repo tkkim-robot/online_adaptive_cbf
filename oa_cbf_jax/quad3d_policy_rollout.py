@@ -22,7 +22,7 @@ def failure_query_trigger(running,scheduled,arrived,held_feasible):
     return running&~scheduled&~arrived&~held_feasible
 
 
-def make_policy_rollout(selector,steps=1600,ordered=False,failure_requery=False):
+def make_policy_rollout(selector,steps=1600,ordered=False,failure_requery=False,return_stepper=False):
     c=selector.robot;p=selector.config
     estimating=c.nominal_bias_observer=='innovation_ema_v97'
     def rollout(params,x,goal,obs,mask,initial_gain,points,rm,noise,bx,bo,ix,io,waypoint_count=None):
@@ -97,10 +97,17 @@ def make_policy_rollout(selector,steps=1600,ordered=False,failure_requery=False)
             if ordered:data.update(waypoint_index=leg,waypoint_handoff=handoff,mission_goal=goal)
             return (next_state,status,count+active.astype(jnp.int32),next_cursor,jnp.where(active,applied,previous_u),jnp.where(active,gain,previous_gain),bias_estimate,seen,leg),(data,prediction)
         initial=(x,jnp.int32(0),jnp.int32(0),jnp.zeros((),x.dtype),jnp.zeros(4,x.dtype),initial_gain,jnp.zeros(12,x.dtype),jnp.zeros(12,x.dtype),jnp.int32(0))
+        def final_status(carry,elapsed):
+            state,status=carry[:2];leg=carry[-1]
+            seen,_=current(state,jnp.asarray(elapsed,jnp.int32))
+            final_goal,_,_=mission(leg)
+            final_leg=(leg==waypoint_count-1) if ordered else jnp.bool_(True)
+            status=jnp.where((status==0)&final_leg&observed_arrived(seen,final_goal,noise,c),1,status)
+            return jnp.where(status==0,6,status)
+        if return_stepper:
+            return tick,initial,final_status,dict(initial_state=x,obstacles=obs)
         result,trace=jax.lax.scan(tick,initial,jnp.arange(steps,dtype=jnp.int32))
-        state,status,count,*_=result;leg=result[-1];seen,_=current(state,jnp.int32(steps))
-        goal,_,_=mission(leg);final_leg=(leg==waypoint_count-1) if ordered else jnp.bool_(True)
-        status=jnp.where((status==0)&final_leg&observed_arrived(seen,goal,noise,c),1,status);status=jnp.where(status==0,6,status)
+        state,_,count,*_=result;leg=result[-1];status=final_status(result,steps)
         summary=dict(final_state=state,status=status,steps=count)
         if ordered:summary.update(waypoint_index=leg,waypoints_visited=leg+(status==1).astype(jnp.int32))
         return summary,trace

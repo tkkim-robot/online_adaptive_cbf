@@ -87,6 +87,11 @@ class Quad3DSelector:
             g=read(gate)
             if g['schema']!=GATE_SCHEMA or g['weights_sha256']!=self.metadata['weights_sha256'] or g['prediction_fit_sha256']!=sha256(prediction_fit) or g['policy_config']!=asdict(config) or not math.isfinite(g['threshold']) or g['threshold']<0:raise ValueError('Quad3D trajectory gate mismatch')
             self.threshold=np.float32(g['threshold'])
+        self._build_predictor()
+
+    def _build_predictor(self):
+        """Build the shared pure inference kernel after bundle validation."""
+        config=self.config;reference=self.reference;fit=self.fit
         norm=self.metadata['normalization'];mean=jnp.asarray(norm['target_mean'],jnp.float32);scale=jnp.asarray(norm['target_scale'],jnp.float32)
         variance_scale=jnp.asarray(fit['variance_scale'],jnp.float32);temperature=jnp.asarray([e['temperature'] for e in fit['event_calibration']],jnp.float32);bias=jnp.asarray([e['bias'] for e in fit['event_calibration']],jnp.float32)
         bank=jnp.asarray(self.bank,jnp.float32);c=self.robot;p=config

@@ -1,3 +1,8 @@
+# Direct execution runs the navigation example; imported APIs remain available.
+if __name__ == "__main__":
+    from oa_cbf_jax.demo import main
+    raise SystemExit(main())
+
 import os
 import sys
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -689,53 +694,3 @@ def single_agent_simulation(velocity,
     tracking_controller.export_video()
     plt.ioff()
     plt.close()
-
-
-if __name__ == "__main__":
-    controller_list = [
-        "CBF-QP low fixed param",      # 0
-        "CBF-QP high fixed param",     # 1
-        "MPC-CBF low fixed param",     # 2
-        "MPC-CBF high fixed param",    # 3
-        "Optimal Decay CBF-QP",        # 4
-        "Optimal Decay MPC-CBF",       # 5
-        "Online Adaptive CBF-QP",      # 6
-        "Online Adaptive CBF-QP MLP",  # 7
-        "Online Adaptive CBF-QP GAT",  # 8
-        "Online Adaptive MPC-CBF MLP", # 9
-        "Online Adaptive MPC-CBF GAT", # 10
-    ]
-    robot_model_list = [
-        "DynamicUnicycle2D",           # 0
-        "KinematicBicycle2D_DPCBF",    # 1
-        "Quad2D",                      # 2
-        "Quad3D",                      # 3
-        "VTOL2D",                      # 4
-    ]
-
-    # Pick a specific controller and robot model
-    controller_name = controller_list[8]   
-    robot_model = robot_model_list[1]       
-    
-    # Define waypoints for the simulation
-    if robot_model == "VTOL2D":
-        waypoints = np.array([
-                    [70, 10],
-                    [70, 0.5]
-                ], dtype=np.float64) 
-    else:
-        waypoints = np.array([
-                    [0.75, 2.0, 0.01],
-                    [10.0, 1.5, 0.0]
-                ], dtype=np.float64)
-
-    # For ground vehicles, velocity is a single scalar
-    if robot_model in ["Quad2D", "Quad3D"]:
-        init_vel = [0.4, 0.2]
-    elif robot_model == "VTOL2D":
-        init_vel = 20.0
-    else:
-        init_vel = 0.4
-
-    # Run the simulation
-    single_agent_simulation(init_vel, waypoints, controller_name, robot_model)

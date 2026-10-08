@@ -110,6 +110,11 @@ class BicycleSelector:
                     or gate['weights_sha256']!=self.metadata['weights_sha256'] or asdict(BicyclePolicyConfig(**gate['policy_config']))!=asdict(config)
                     or not math.isfinite(gate['threshold']) or gate['threshold']<0):raise ValueError('Bicycle trajectory gate mismatch')
             self.threshold=np.float32(gate['threshold'])
+        self._build_predictor()
+
+    def _build_predictor(self):
+        """Build the shared pure inference kernel after bundle validation."""
+        config=self.config;reference_recording=self.reference_recording
         norm=self.metadata['normalization'];mean=jnp.asarray(norm['target_mean'],jnp.float32);scale=jnp.asarray(norm['target_scale'],jnp.float32)
         variance_scale=jnp.asarray(self.fit['variance_scale'],jnp.float32);temperature=jnp.asarray([e['temperature'] for e in self.fit['event_calibration']],jnp.float32);bias=jnp.asarray([e['bias'] for e in self.fit['event_calibration']],jnp.float32)
         bank=jnp.asarray(self.bank)

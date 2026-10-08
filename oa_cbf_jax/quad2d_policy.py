@@ -302,7 +302,7 @@ def observed_waypoint_arrival(x,goal,noise,config=FlightConfig()):
         &(jnp.abs(x[5])+1.15*noise[3]<=config.terminal_pitch_rate))
 
 
-def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=False,record_query_statistics=False,diagnostic_nearest_obstacles=None):
+def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=False,record_query_statistics=False,diagnostic_nearest_obstacles=None,return_stepper=False):
     if diagnostic_nearest_obstacles is not None:
         from .quad2d_neighborhood import neighborhood_contract, neighborhood_mask
         neighborhood_contract(diagnostic_nearest_obstacles)
@@ -422,6 +422,8 @@ def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=
             jnp.full(2,c.mass*c.gravity/2,jnp.float32),jnp.asarray((4.,4.) if guided_select is not None else (2.,2.) if policy.mode=='learned' else policy.fixed_gain,jnp.float32))
         if ordered_waypoints:carry+=(jnp.int32(0),)
         if tracked:carry+=(motion_observer.initialize(obstacles),)
+        if return_stepper:
+            return tick,carry,innovations,dict(initial_state=initial,obstacles=truth_obs)
         if policy.stop_finished:
             # Batched while uses a shared "any scene still running" condition.
             # Finished scenes keep their exact prefix; no horizon padding work

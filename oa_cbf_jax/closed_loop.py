@@ -21,7 +21,7 @@ from .position_observer import initialize as position_initialize,update as posit
 PLANNER_FAILURE=7
 
 
-def make_closed_loop(policy,steps=800,batch_axis=None,ordered_waypoints=False):
+def make_closed_loop(policy,steps=800,batch_axis=None,ordered_waypoints=False,return_stepper=False):
     """Run one continuous physical episode, optionally through ordered goals.
 
     Ordered inputs use goal[L,2], points[L,C,2], route_mask[L,C] and
@@ -130,6 +130,8 @@ def make_closed_loop(policy,steps=800,batch_axis=None,ordered_waypoints=False):
             return (new_x,status,count,clearance,psi_min,violation_max,cursor,gain,previous_control,committed,observer,position,leg),trace
         initial=(x0,status,jnp.int32(0),initial_clearance,jnp.asarray(jnp.inf,x0.dtype),jnp.asarray(-jnp.inf,x0.dtype),
                  jnp.asarray(0.,x0.dtype),initial_gain,jnp.zeros(2,x0.dtype),empty,initialize_observer(obstacles),position_initialize(obstacles) if config.filter_obstacle_position else None,jnp.int32(0))
+        if return_stepper:
+            return tick,initial,innovations,dict(initial_state=x0,obstacles=truth_obs)
         (x,status,count,clearance,psi,violation,cursor,_,_,_,_,_,leg),trace=jax.lax.scan(tick,initial,(jnp.arange(steps),innovations))
         status=jnp.where(status==RUNNING,TIMEOUT,status)
         summary=Summary(x,status,count,clearance,psi,jnp.linalg.norm(x0[:2]-final_goal)-jnp.linalg.norm(x[:2]-final_goal),violation)

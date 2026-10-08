@@ -1,5 +1,6 @@
 absl-py==2.5.0
 aiofiles==25.1.0
+casadi==3.7.2
 cffi==2.1.1
 chex==0.1.92
 clarabel==0.11.1
