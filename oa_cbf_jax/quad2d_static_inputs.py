@@ -90,6 +90,9 @@ def prior_inventory(artifacts, ids, own):
 def verify(directory):
     root = Path(directory)
     reservation = read(root / 'reservation.json')
+    if reservation.get('schema') == 'quad2d_static_coverage_reservation':
+        from .quad2d_coverage_inputs import verify as verify_coverage
+        return verify_coverage(root)
     manifest, rows = read(root / 'manifest.json'), read(root / 'scenes.json')
     if reservation['schema'] != SCHEMA or reservation['manifest_sha256'] != sha256(root / 'manifest.json'):
         raise ValueError('Changed static source manifest')

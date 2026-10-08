@@ -23,7 +23,7 @@ TARGETS=['failure_capped_clearance_cost','observed_prefix_route_progress_div_hor
 EVENTS=['collision_first','any_adverse_termination']
 
 
-def augment_gain_bank(base,queries,seed):
+def augment_gain_bank(base,queries,seed,upper=8.):
     """Preserve the audited bank, cover its upper boundary, then add Sobol pairs.
 
     Deterministic design coverage, independent of outcomes. This expands label
@@ -34,20 +34,26 @@ def augment_gain_bank(base,queries,seed):
             or base.min()<.5 or base.max()>8 or len(np.unique(base,axis=0))!=len(base)):
         raise ValueError('Unique finite base gain pairs in [.5,8] required')
     if isinstance(seed,bool) or not isinstance(seed,int) or seed<0:raise ValueError('Nonnegative integer augmentation seed required')
+    if isinstance(upper,bool) or upper not in (8.,16.):raise ValueError('Only original8 or explicit16 gain ceiling supported')
     if isinstance(queries,bool) or not isinstance(queries,int) or queries<4 or queries&(queries-1):raise ValueError('Power-of-two query budget required')
     boundary=np.array([[8,8],[.5,8],[8,.5],[1,8],[8,1],[2,8],[8,2],[4,8],[8,4]],np.float32)
+    if upper==16.:
+        boundary=np.array([(16.,v) for v in (.5,1.,2.,4.,8.,16.)]+[(v,16.) for v in (.5,1.,2.,4.,8.)],np.float32)
     rows=[tuple(row) for row in base]
     for row in boundary:
         if tuple(row) not in rows:rows.append(tuple(row))
     if len(rows)>queries:raise ValueError('Query budget cannot fit preserved bank and boundary coverage')
-    sobol=np.exp(np.log(.5)+qmc.Sobol(2,scramble=True,seed=seed).random_base2(int(np.log2(queries))+1)*np.log(16)).astype(np.float32)
+    sobol=np.exp(np.log(.5)+qmc.Sobol(2,scramble=True,seed=seed).random_base2(int(np.log2(queries))+1)*np.log(upper/.5)).astype(np.float32)
     for row in sobol:
         if len(rows)==queries:break
+        if upper==16. and row.max()<=8.:continue
         if tuple(row) not in rows:rows.append(tuple(row))
     if len(rows)!=queries:raise ValueError('Insufficient unique candidate coverage')
     bank=np.asarray(rows,np.float32)
-    return bank,dict(schema='preserved_bank_upper_boundary_log_sobol_v1',seed=seed,queries=queries,
+    contract=dict(schema='preserved_bank_upper_boundary_log_sobol_v1',seed=seed,queries=queries,
         boundary_pairs=boundary.tolist(),candidates=bank.tolist())
+    if upper==16.:contract.update(schema='preserved_bank_single_ceiling_expansion_v1',lower=.5,upper=16.,original_upper=8.,additional_pairs='Only outside original[.5,8]^2; original bank preserved exactly')
+    return bank,contract
 
 
 def load_gain_bank(dataset,config=None,queries=None):
@@ -108,7 +114,10 @@ def collection_kernels(config,gains,queries,replicas,horizon,guidance):
     return summaries,graph,trace
 
 
-def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shard_index=0,shards=1,guidance_horizon=0,gain_dataset=None,noise_clearance_weight=0.,gain_augmentation_seed=None,terminal_transition_distance=0.,performance_target='route'):
+def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shard_index=0,shards=1,guidance_horizon=0,gain_dataset=None,noise_clearance_weight=0.,gain_augmentation_seed=None,terminal_transition_distance=0.,performance_target='route',gain_upper=8.):
+    if (isinstance(gain_upper,bool) or gain_upper not in (8.,16.)
+            or (gain_upper==16. and (gain_dataset is None or gain_augmentation_seed is None or queries!=64))):
+        raise ValueError('Explicit64query preserved-bank augmentation required for ceiling16')
     source=Path(source);root=Path(output);root.mkdir(parents=True,exist_ok=False);start=time.perf_counter()
     sm=json.loads((source/'manifest.json').read_text());records=json.loads((source/'scenes.json').read_text())
     config=flight_config_from_contract(sm['config'])
@@ -138,13 +147,13 @@ def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shar
     if gain_augmentation_seed is not None and gain_dataset is None:raise ValueError('Augmentation requires an audited source bank')
     if gain_dataset is not None:
         canonical,bank_provenance=load_gain_bank(gain_dataset,config,queries if gain_augmentation_seed is None else None)
-        if gain_augmentation_seed is not None:canonical,augmentation=augment_gain_bank(canonical,queries,gain_augmentation_seed)
+        if gain_augmentation_seed is not None:canonical,augmentation=augment_gain_bank(canonical,queries,gain_augmentation_seed,gain_upper)
     gains=np.repeat(canonical,replicas,axis=0);Q=len(gains)
     summaries,graph,trace_fn=collection_kernels(config,gains,queries,replicas,horizon,guidance)
     manifest=dict(schema=SCHEMA,stage='quad2d_initial_flight_pilot',production_eligible=False,final_test=False,
         source=str(source.resolve()),source_manifest_sha256=sha256(source/'manifest.json'),source_fingerprint=source_fingerprint(),
         config=asdict(config),capacity=64,route_capacity=64,graph_schema=GRAPH_SCHEMA,graph_features=40,
-        queries=queries,replicas=replicas,horizon_steps=horizon,gain_domain=dict(lower=.5,upper=8.),targets=TARGETS,events=EVENTS,
+        queries=queries,replicas=replicas,horizon_steps=horizon,gain_domain=dict(lower=.5,upper=gain_upper),targets=TARGETS,events=EVENTS,
         controller=dict(dynamics='Quad2D',config=asdict(config),nominal='bounded velocity/pitch feedback',solver='exact reduced8row hard QP with every original row rechecked',
             sensor='raw7range latent uniform+15%innovations',prediction='held gains across actual nonlinear8substepRK4 physical branches'),
         groups=[{k:r[k] for k in ['group_id','family','seed','partition']} for r in records],scene_distribution=sm['distribution'],
@@ -278,8 +287,9 @@ if __name__=='__main__':
     p.add_argument('--workers',type=int,default=28);p.add_argument('--queries',type=int,default=16);p.add_argument('--replicas',type=int,default=4);p.add_argument('--horizon',type=int,default=160)
     p.add_argument('--shard-groups',type=int,default=16);p.add_argument('--shard-index',type=int,default=0);p.add_argument('--shards',type=int,default=1);p.add_argument('--guidance-horizon',type=int,default=0);p.add_argument('--gain-dataset')
     p.add_argument('--noise-clearance-weight',type=float,default=0.);p.add_argument('--gain-augmentation-seed',type=int)
+    p.add_argument('--gain-upper',type=float,default=8.,choices=[8.,16.])
     p.add_argument('--terminal-transition-distance',type=float,default=0.);p.add_argument('--performance-target',choices=['route','terminal_task'],default='route');a=p.parse_args()
     if a.stationary_obstacles and a.action!='prepare':p.error('--stationary-obstacles belongs to prepare; collect uses its saved source contract')
     if a.action=='prepare':prepare(a.output,a.groups,a.seed,a.workers,a.stationary_obstacles)
     elif a.action=='merge':merge(a.parts,a.output)
-    else:collect(a.source,a.output,a.queries,a.replicas,a.horizon,a.shard_groups,a.shard_index,a.shards,a.guidance_horizon,a.gain_dataset,a.noise_clearance_weight,a.gain_augmentation_seed,a.terminal_transition_distance,a.performance_target)
+    else:collect(a.source,a.output,a.queries,a.replicas,a.horizon,a.shard_groups,a.shard_index,a.shards,a.guidance_horizon,a.gain_dataset,a.noise_clearance_weight,a.gain_augmentation_seed,a.terminal_transition_distance,a.performance_target,a.gain_upper)

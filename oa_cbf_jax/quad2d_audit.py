@@ -227,10 +227,14 @@ def check_trace(data,summary,observation,obstacles,mask,noise,gains,config,*,com
         residual,h,psi=command_residual(sensed,u,control_seen,mask,recorded_gains[k] if recorded_gains.ndim==2 else recorded_gains,config)
         violation=max(violation,float(-residual.min()),-h,-psi)
     saved=float(summary['min_clearance']);minimum_error=abs(saved-minimum) if np.isfinite(saved) or np.isfinite(minimum) else 0.
-    status=int(summary['status']);collision_consistent=(minimum>1e-5 and status!=COLLISION) or (minimum<=1e-5 and status==COLLISION)
+    # The plant terminates at clearance <= 0. A numerical comparison tolerance
+    # is not an additional physical collision radius: a positive near miss must
+    # not become a collision, nor may a negative clearance pass as noncollision.
+    status=int(summary['status']);collision_consistent=(minimum<=0.)==(status==COLLISION)
     passed=bool(state_error<1e-5 and clear_error<1e-4 and minimum_error<1e-4 and bound_error<1e-4 and violation<=2e-5 and sensor_excess<2e-5 and collision_consistent)
     return dict(audit_passed=passed,steps=expected_steps,status=NAMES[status],state_error=state_error,clearance_error=clear_error,
-        minimum_clearance_error=minimum_error,bound_recording_error=bound_error,max_cbf_input_violation=violation,sensor_bound_excess=sensor_excess,collision_consistent=collision_consistent)
+        minimum_clearance_error=minimum_error,replayed_minimum_clearance=minimum,
+        bound_recording_error=bound_error,max_cbf_input_violation=violation,sensor_bound_excess=sensor_excess,collision_consistent=collision_consistent)
 
 
 def audit(dataset):
@@ -261,8 +265,10 @@ def audit(dataset):
         bank,provenance=load_gain_bank(manifest['frozen_gain_bank']['dataset'],config,None if augmented is not None else manifest['queries'])
         if provenance!=manifest['frozen_gain_bank']:raise ValueError('Frozen label gain-bank provenance changed')
         if augmented is not None:
-            bank,expected=augment_gain_bank(bank,manifest['queries'],augmented['seed'])
+            bank,expected=augment_gain_bank(bank,manifest['queries'],augmented['seed'],augmented.get('upper',8.))
             if augmented!=expected:raise ValueError('Augmented label gain-bank provenance changed')
+            if manifest['gain_domain']!=dict(lower=.5,upper=augmented.get('upper',8.)):
+                raise ValueError('Label gain domain differs from explicit augmentation')
         frozen_gains=np.repeat(bank,manifest['replicas'],axis=0)
     source_rows={r['group_id']:r for r in json.loads((source/'scenes.json').read_text())} if guided else {}
     if relabeled:

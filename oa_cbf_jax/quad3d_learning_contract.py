@@ -89,10 +89,13 @@ def validate_model(metadata,manifest=None):
     graph,features,ticks,observer=registered(metadata.get('dataset_schema'))
     if metadata.get('gain_dimension')!=4 or metadata.get('graph_features')!=features:raise ValueError('Full-state four-gain Quad3D model required')
     arch=metadata['architecture'];contract=metadata.get('quad3d_contract',{})
+    if arch.get('encoder') == 'nearest_fc':
+        from .nearest_fc import validate_metadata
+        validate_metadata(metadata)
     variants=arch.get('quad3d_history_invariant',False) or arch.get('paired_gain_quadratic',False) or arch.get('continuous_log_variance_min',-10.)!=-10. or arch.get('quad3d_obstacle_pooling',False)
     if variants and (metadata['dataset_schema']!=WIDE_SCHEMA or arch.get('encoder') not in ('gat','matched_fc')):
         raise ValueError('Quad3D feature/variance variants require the registered wide-gain GAT')
-    if arch.get('encoder') not in ('gat','full_fc','matched_fc') or arch.get('flight_history_invariant') or arch.get('scalar_gain_quadratic'):raise ValueError('Incompatible Quad3D encoder/feature transform')
+    if arch.get('encoder') not in ('gat','full_fc','matched_fc','nearest_fc') or arch.get('flight_history_invariant') or arch.get('scalar_gain_quadratic'):raise ValueError('Incompatible Quad3D encoder/feature transform')
     if contract.get('config',{}).get('nominal_bias_observer','none')!=observer:raise ValueError('Wrong Quad3D observer contract')
     if contract.get('snapshot_ticks')!=list(ticks):raise ValueError('Wrong Quad3D history contract')
     if contract.get('graph_schema')!=graph or contract.get('sensor_schema')!=SENSOR_SCHEMA:raise ValueError('Wrong Quad3D observation/graph schema')

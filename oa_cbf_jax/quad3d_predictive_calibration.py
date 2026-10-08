@@ -18,9 +18,12 @@ from .io import write_json
 SCHEMA='oa_cbf_quad3d_reserved_predictive_v95'
 
 
-def calibrate(bundle,dataset,output,batch=32):
+def calibrate(bundle,dataset,output,batch=32,runtime_qualification=None):
     root=Path(output);root.mkdir(parents=True,exist_ok=False);dataset=Path(dataset)
     m=validate_training_dataset(dataset);model=ResearchPredictor(bundle,allow_uncalibrated=True)
+    if model.model.config.encoder=='nearest_fc':
+        from .nearest_fc_qualification import validate_qualification
+        validate_qualification(runtime_qualification,bundle,dataset)
     validate_model(model.metadata,m)
     if model.model.config.compute_dtype!='float32':raise ValueError('This contract uses original trained FP32 neural inference')
     if sha256(dataset/'manifest.json')!=model.metadata['dataset_manifest_sha256']:raise ValueError('Wrong weight-training lineage')
@@ -60,6 +63,9 @@ def calibrate(bundle,dataset,output,batch=32):
         limitation='Development conditional prediction adjustment on declared acquired histories, not an adaptive-trajectory, OOD, rare-collision, posterior or physical CVaR guarantee. Fresh frozen-policy trajectory gating and closed-loop audits remain required.')
     # The dataset validator checks integrity of every split. No audit outcome
     # enters fitting; freeze fit before audit prediction/diagnostic evaluation.
+    if model.model.config.encoder=='nearest_fc':
+        fit.update(nearest_fc_contract=model.metadata['nearest_fc_contract'],
+            runtime_qualification=str(Path(runtime_qualification).resolve()),runtime_qualification_sha256=sha256(runtime_qualification))
     write_json(root/'prediction_fit.json',fit);fit_sha=sha256(root/'prediction_fit.json')
     audit_data=subset('prediction_audit');audit_prediction=predict(audit_data)
     validation=subset('validation');validation_prediction=predict(validation)
@@ -86,4 +92,4 @@ def calibrate(bundle,dataset,output,batch=32):
 if __name__=='__main__':
     p=argparse.ArgumentParser()
     for key in ('bundle','dataset','output'):p.add_argument('--'+key,required=True)
-    p.add_argument('--batch',type=int,default=32);calibrate(**vars(p.parse_args()))
+    p.add_argument('--batch',type=int,default=32);p.add_argument('--runtime-qualification');calibrate(**vars(p.parse_args()))

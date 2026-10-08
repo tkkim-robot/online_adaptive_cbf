@@ -19,7 +19,7 @@ from .io import write_json
 from .cli import sanitize
 
 
-def run(source,dataset,output,bundle=None,calibration=None,mode='learned',gain=4.,steps=1600,batch=8,guidance_horizon=0,noise_clearance_weight=0.,terminal_transition_distance=0.,clearance_guard='none',motion_window=0,motion_application='forecast',record_query_statistics=False,fallback_mode='fixed_set',progress_admission=False,query_trigger='periodic',incumbent_progress=False):
+def run(source,dataset,output,bundle=None,calibration=None,mode='learned',gain=4.,steps=1600,batch=8,guidance_horizon=0,noise_clearance_weight=0.,terminal_transition_distance=0.,clearance_guard='none',motion_window=0,motion_application='forecast',record_query_statistics=False,fallback_mode='fixed_set',progress_admission=False,query_trigger='periodic',incumbent_progress=False,clipped_mixture_pilot=False,diagnostic_nearest_obstacles=None,diagnostic_cruise_speed=None,ensemble_mixture_risk=False):
     if incumbent_progress and (progress_admission or query_trigger!='periodic'):
         raise ValueError('Incumbent comparison is a separate policy experiment')
     if query_trigger not in ('periodic','previous_gain_infeasible_v1') or (query_trigger!='periodic' and progress_admission):
@@ -79,7 +79,20 @@ def run(source,dataset,output,bundle=None,calibration=None,mode='learned',gain=4
         if type(guidance) is not TerminalGuidanceConfig:
             raise ValueError('Incumbent comparison requires raw terminal guidance')
         policy_config=IncumbentProgressPolicyConfig(**asdict(policy_config))
-    policy=FlightPolicy(bundle,calibration,config,policy_config,guidance,record_query_statistics)
+    if clipped_mixture_pilot and mode!='learned':raise ValueError('Explicit learned mixture pilot required')
+    if ensemble_mixture_risk:
+        from .quad2d_policy import EnsembleRiskPolicyConfig
+        if not incumbent_progress or mode!='learned':raise ValueError('Mixture risk requires guided learned incumbent comparison')
+        policy_config=EnsembleRiskPolicyConfig(**asdict(policy_config))
+    policy=FlightPolicy(bundle,calibration,config,policy_config,guidance,record_query_statistics,clipped_mixture_pilot,diagnostic_nearest_obstacles,diagnostic_cruise_speed)
+    config=policy.config
+    if clipped_mixture_pilot:
+        cal=json.loads(Path(calibration).read_text())
+        for path in cal['datasets']:
+            groups=json.loads((Path(path)/'manifest.json').read_text())['groups']
+            for field in ('group_id','seed'):
+                if {r[field] for r in rows}&{r[field] for r in groups}:
+                    raise ValueError('Physical mixture pilot overlaps original/additional reserved data')
     if mode=='learned' and policy.metadata['dataset_manifest_sha256']!=sha256(dataset/'manifest.json'):raise ValueError('Candidate source does not match trained model')
     manifest=dict(schema='oa_cbf_quad2d_episode_development_v1',source=str(source.resolve()),source_manifest_sha256=sha256(source/'manifest.json'),
         source_fingerprint=source_fingerprint(),config=asdict(config),policy=asdict(policy_config),steps=steps,batch=batch,device=str(jax.devices()[0]),
@@ -87,8 +100,17 @@ def run(source,dataset,output,bundle=None,calibration=None,mode='learned',gain=4
         model_weights_sha256=policy.metadata.get('weights_sha256'),calibration_sha256=sha256(calibration) if calibration else None,
         initial_conditions='Fresh actual six-state flight, same raw prior and innovation keys across policies',
         scope='Development learned flight / matched OA component ablations. Not authentic baseline comparison or trajectory-calibrated final evaluation.',final_test=False)
+    if diagnostic_nearest_obstacles is not None:
+        manifest.update(observation_neighborhood=policy.neighborhood_contract,calibration_coverage_valid=False,
+            scope='Frozen-model neighborhood diagnosis only. Old calibration is a reference gate, with no coverage claim under changed observations/QP. Not a final benchmark.')
+    if diagnostic_cruise_speed is not None:
+        manifest.update(diagnostic_nominal_speed=policy.nominal_speed_contract,calibration_coverage_valid=False,
+            scope='Frozen-model speed-only diagnosis. Existing calibration is a reference gate with no coverage claim at the changed speed. Not a final benchmark.')
     if record_query_statistics:
         manifest['query_statistics_schema']='quad2d_live_query_statistics_v1'
+        if clipped_mixture_pilot:
+            manifest.update(query_statistics_schema='quad2d_clipped_mixture_live_query_statistics_v1',
+                risk_distribution_contract=policy.metadata['risk_distribution_contract'])
     if guidance is not None:
         manifest['predictive_guidance']=asdict(guidance)
         manifest['validation']=f'One{guidance.horizon}tickheld-gain/profile witness from each shortlisted observed-state guidance prediction; returned currentQP reused, requery every4ticks or failed held-profile prediction.' if mode!='fixed' else 'Fixed-gain predictive guidance component ablation'
@@ -130,7 +152,8 @@ def run(source,dataset,output,bundle=None,calibration=None,mode='learned',gain=4
 def audit(directory):
     root=Path(directory);manifest=json.loads((root/'manifest.json').read_text());config=flight_config_from_contract(manifest['config'])
     source=Path(manifest['source']);sm=json.loads((source/'manifest.json').read_text())
-    if flight_config_from_contract(sm['config'])!=config:raise ValueError('Wrong flight physical audit config')
+    from .quad2d_nominal_speed import reference_from_manifest
+    if flight_config_from_contract(sm['config'])!=reference_from_manifest(manifest):raise ValueError('Wrong flight physical audit config')
     if sha256(source/'manifest.json')!=manifest['source_manifest_sha256'] or sm['scenes_sha256']!=sha256(source/'scenes.json'):raise ValueError('Scene source changed')
     parents=json.loads((source/'scenes.json').read_text());index=json.loads((root/'index.json').read_text());reports=[]
     trigger_audit=None
@@ -158,8 +181,20 @@ def audit(directory):
             if guidance['motion_application']!='current_and_future_v1' or not forecast_audit:
                 raise ValueError('Unaudited/unknown controller-observation contract')
             command_obstacles=data['forecast_obstacles']
-        result=check_trace(data,summary,data['initial_observation'],data['observed_obstacles_initial'],data['obstacle_mask'],data['noise'],data['gain'],config,command_obstacles=command_obstacles)
+        from .quad2d_audit import independent_residual
+        residual=independent_residual
+        neighborhood_audit={}
+        if 'observation_neighborhood' in manifest:
+            from .quad2d_neighborhood import neighborhood_contract, audit_neighborhood, numpy_neighborhood_mask
+            count=manifest['observation_neighborhood']['capacity']
+            if manifest['observation_neighborhood']!=neighborhood_contract(count) or manifest.get('calibration_coverage_valid') is not False:
+                raise ValueError('Neighborhood diagnosis must explicitly disclaim calibration coverage')
+            neighborhood_audit=audit_neighborhood(data,count)
+            def residual(x,u,obs,mask,gains,config):
+                return independent_residual(x,u,obs,numpy_neighborhood_mask(x,obs,mask,count),gains,config)
+        result=check_trace(data,summary,data['initial_observation'],data['observed_obstacles_initial'],data['obstacle_mask'],data['noise'],data['gain'],config,command_obstacles=command_obstacles,command_residual=residual)
         result.update(forecast_audit)
+        result.update(neighborhood_audit)
         final=data['state'][-1];np.testing.assert_allclose(final,row['final_state'],atol=1e-7)
         if row['status_code']==GOAL:
             assert np.linalg.norm(final[:2]-data['goal'])<=config.goal_tolerance+1e-6
@@ -212,6 +247,8 @@ if __name__=='__main__':
     r.add_argument('--motion-application',choices=['forecast','current_and_future'],default='forecast',help='Explicit current-and-future measurement ablation; raw physical sensors always retained')
     r.add_argument('--record-query-statistics',action='store_true',help='Save the actual neural statistics used by each queried policy decision for trajectory calibration')
     r.add_argument('--incumbent-progress',action='store_true')
+    r.add_argument('--clipped-mixture-pilot',action='store_true')
+    r.add_argument('--ensemble-mixture-risk',action='store_true')
     r.add_argument('--fallback-mode',choices=['fixed_set','hold_previous'],default='fixed_set',help='Matched policy candidate: validate only the previous accepted gain when learned proposals fail; no alternative fallback gain search')
     r.add_argument('--progress-admission',action='store_true')
     r.add_argument('--query-trigger',choices=['periodic','previous_gain_infeasible_v1'],default='periodic')

@@ -33,6 +33,10 @@ def check_statistics(q,previous_gain,m,fit):
     threshold=np.float32(np.inf if m['phase']=='gate_calibration' else m['cs_threshold'])
     screened=finite&(q['cs_score']<=threshold)&(q['finite_member_cvar']<=np.float32(p['conditional_risk_limit']))&(q['adverse_probability']<=np.float32(p['adverse_probability_limit']))
     admissible=(q['candidate_psi']>=-m['config']['qp_tolerance'])&(q['candidate_domain'][:,None]>=-m['config']['qp_tolerance'])
+    if m.get('input_box_admission',False):
+        support=np.isfinite(q['candidate_input_margin'])&(q['candidate_input_margin']>=-m['config']['qp_tolerance'])
+        np.testing.assert_array_equal(q['input_admissible'],support)
+        admissible&=support
     accepted=screened&admissible
     for key,value in [('screened',screened),('admissible',admissible),('accepted',accepted)]:np.testing.assert_array_equal(q[key],value)
     any_=accepted.any(-1);index=np.argmax(np.where(accepted,q['ranking_score'],-np.inf),axis=-1)
@@ -68,10 +72,22 @@ def audit_one(task):
             handoff=running and leg<parent['waypoint_count']-1 and numpy_arrived(seen,goals[leg],noise,c)
             leg+=int(handoff);goal=goals[leg];points=routes[leg];rm=route_masks[leg]
             assert d['waypoint_index'][k]==leg and d['waypoint_handoff'][k]==handoff
-        assert d['requery'][k]==(running and (k%m['policy_config']['query_every_ticks']==0 or handoff))
+        scheduled=running and (k%m['policy_config']['query_every_ticks']==0 or handoff)
+        extra=False
+        if m.get('failure_requery',False):
+            extra=running and not scheduled and not numpy_arrived(seen,goal,noise,c) and not bool(d['held_feasible'][k])
+            assert bool(d['failure_requery'][k])==extra
+        assert d['requery'][k]==(scheduled or extra)
         if estimating:
             if k>0:bias_estimate=numpy_update_bias(bias_estimate,previous_seen,seen,previous_u,noise,c)
             np.testing.assert_allclose(d['nominal_bias_estimate'][k],bias_estimate,atol=2e-10,rtol=1e-10)
+        if m.get('failure_requery',False):
+            if extra or (running and d['qp_switch_fallback'][k]):
+                from .quad3d_failure_requery import verify_held
+                verify_held(seen,goal,so,mask,previous_gain,points,rm,d['route_cursor_before'][k],noise,bias_estimate,c,d,k)
+            if not d['requery'][k] or d['qp_switch_fallback'][k]:
+                for held,actual in (('held_proposed','proposed'),('held_feasible','feasible'),('held_psi','psi'),('held_domain','domain'),('held_residual','residual')):
+                    np.testing.assert_allclose(d[held][k],d[actual][k],atol=1e-10,rtol=1e-10,equal_nan=True)
         if d['requery'][k]:
             feature,nm=numpy_history_graph(seen,goal,so,mask,points,rm,d['route_cursor_before'][k],previous_u,previous_gain,noise,
                 config=c,nominal_bias=bias_estimate if estimating else None)
@@ -81,6 +97,11 @@ def audit_one(task):
             domain=independent_envelope_values(seen,np.zeros(4),c)[0]
             np.testing.assert_allclose(q['candidate_psi'][j],psi,atol=1e-8,rtol=1e-10)
             np.testing.assert_allclose(q['candidate_domain'][j],domain,atol=1e-8,rtol=1e-10)
+            if m.get('input_box_admission',False):
+                from .quad3d_input_support import audit_margin
+                margin=audit_margin(seen,goal,so,mask,points,rm,d['route_cursor_before'][k],noise,
+                    bias_estimate,bank,c)
+                np.testing.assert_allclose(q['candidate_input_margin'][j],margin,atol=1e-8,rtol=1e-10)
             np.testing.assert_array_equal(d['network_gain'][k],q['network_gain'][j]);j+=1
         else:np.testing.assert_array_equal(d['network_gain'][k],previous_gain)
         psi=independent_obstacle_values(seen,np.zeros(4),numpy_obstacles(so,mask,noise),mask,d['network_gain'][k],c)[0]
@@ -99,5 +120,6 @@ def audit_one(task):
         learned_queries=int(np.sum(q['selected_index']>=0)),uncertainty_fallback_queries=int(q['uncertainty_fallback'].sum()),
         admission_fallback_queries=int(q['admission_fallback'].sum()),qp_switch_fallbacks=int(d['qp_switch_fallback'].sum()),
         applied_gain_changes=int(np.sum(d['active']&np.any(d['controller_gain']!=d['previous_gain'],axis=-1))))
+    if m.get('failure_requery',False):expected['failure_requeries']=int(d['failure_requery'].sum())
     for k,v in expected.items():assert row[k]==v
     return sanitize(dict(physical,policy_features_decisions_memories_verified=True))

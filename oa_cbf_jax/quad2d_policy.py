@@ -68,6 +68,33 @@ class IncumbentProgressPolicyConfig(FlightPolicyConfig):
 
 
 @dataclass(frozen=True)
+class EnsembleRiskPolicyConfig(IncumbentProgressPolicyConfig):
+    """Explicit predictive-mixture risk ablation, not finite-member ambiguity."""
+    risk_aggregation: str = 'equal_gaussian_ensemble_mixture_v1'
+
+    def __post_init__(self):
+        super().__post_init__()
+        if (self.risk_aggregation!='equal_gaussian_ensemble_mixture_v1' or self.mode!='learned'
+                or self.tail_mass!=.01 or self.risk_threshold!=0.):
+            raise ValueError('Explicit learned Gaussian ensemble risk contract required')
+
+
+def ensemble_risk_contract():
+    return dict(schema='equal_gaussian_ensemble_mixture_v1',weights='uniform_four_members',
+        risk='upper_tail_CVaR_of_predictive_mixture',tail_mass=.01,threshold=0.,
+        disagreement='original_member_Gaussian_CS',
+        interpretation='Alternative predictive risk statistic; neither it nor maximum-member CVaR universally bounds the other. No physical safety guarantee.')
+
+
+def flight_risk(means,variances,policy):
+    if isinstance(policy,EnsembleRiskPolicyConfig):
+        if means.shape[-1]!=4:raise ValueError('Exactly four predictive members required')
+        from .mixture_tail import gaussian_mixture_cvar
+        return gaussian_mixture_cvar(means,variances,policy.tail_mass)['cvar']
+    return worst_member_cvar(means,variances,policy.tail_mass)
+
+
+@dataclass(frozen=True)
 class FeasibilityTriggeredPolicyConfig(FlightPolicyConfig):
     query_trigger: str = 'previous_gain_infeasible_v1'
 
@@ -78,6 +105,8 @@ class FeasibilityTriggeredPolicyConfig(FlightPolicyConfig):
 
 
 def flight_policy_from_contract(contract):
+    if 'risk_aggregation' in contract:
+        return EnsembleRiskPolicyConfig(**contract)
     if 'incumbent_progress' in contract:
         return IncumbentProgressPolicyConfig(**contract)
     if 'query_trigger' in contract:
@@ -97,8 +126,14 @@ def make_selector(model, norm, config, policy):
         out=predict_ensemble(model,params,features[None],node_mask[None],pool[None])
         mu=out['mean'][:,0]*scale+mean
         variance=jnp.exp(out['log_variance'][:,0])*scale**2*calibration['variance_scale']
-        cs=cs_disagreement(mu[:,:,0].T[...,None],variance[:,:,0].T[...,None])
-        risk=worst_member_cvar(mu[:,:,0].T,variance[:,:,0].T,policy.tail_mass)
+        if getattr(model,'risk_components',1)==2:
+            from .clipped_inference import statistics
+            mixture=statistics(out,norm,calibration['variance_scale'],calibration['temperature'],calibration['bias'],policy.tail_mass)
+            mu,variance=mixture['mean'][:,0],mixture['variance'][:,0]
+            cs,risk=mixture['disagreement'][0],mixture['finite_member_cvar'][0]
+        else:
+            cs=cs_disagreement(mu[:,:,0].T[...,None],variance[:,:,0].T[...,None])
+            risk=flight_risk(mu[:,:,0].T,variance[:,:,0].T,policy)
         event=jnp.max(jax.nn.sigmoid(out['event_logits'][:,0]/calibration['temperature']+calibration['bias']),axis=0)
         finite=jnp.all(jnp.isfinite(mu)&jnp.isfinite(variance),axis=(0,2))&jnp.all(jnp.isfinite(event),axis=-1)&jnp.isfinite(cs)&jnp.isfinite(risk)
         epistemic=finite&(cs<=calibration['cs_threshold'])
@@ -131,13 +166,17 @@ def make_selector(model, norm, config, policy):
     return select
 
 
-def empty_query_statistics(params, candidates):
+def empty_query_statistics(params, candidates, risk_components=1):
     """Static placeholders for held ticks; only actual query records are scored."""
     members=jax.tree.leaves(params)[0].shape[0]; count=candidates.shape[0]+1
-    return dict(query_mean=jnp.zeros((members,count,2),jnp.float32),
+    result=dict(query_mean=jnp.zeros((members,count,2),jnp.float32),
         query_variance=jnp.zeros((members,count,2),jnp.float32),
         query_cs=jnp.zeros(count,jnp.float32),query_risk=jnp.zeros(count,jnp.float32),
         query_event=jnp.zeros((count,2),jnp.float32))
+    if risk_components==2:
+        for key in ('mean','variance','probability'):
+            result['query_risk_component_'+key]=jnp.zeros((members,count,2),jnp.float32)
+    return result
 
 
 def make_guided_selector(model,norm,config,policy,guidance,record_query_statistics=False):
@@ -185,8 +224,14 @@ def make_guided_selector(model,norm,config,policy,guidance,record_query_statisti
         out=predict_ensemble(model,params,features[None],node_mask[None],pool[None])
         mu=out['mean'][:,0]*scale+mean
         variance=jnp.exp(out['log_variance'][:,0])*scale**2*calibration['variance_scale']
-        cs=cs_disagreement(mu[:,:,0].T[...,None],variance[:,:,0].T[...,None])
-        risk=worst_member_cvar(mu[:,:,0].T,variance[:,:,0].T,policy.tail_mass)
+        if getattr(model,'risk_components',1)==2:
+            from .clipped_inference import statistics
+            mixture=statistics(out,norm,calibration['variance_scale'],calibration['temperature'],calibration['bias'],policy.tail_mass)
+            mu,variance=mixture['mean'][:,0],mixture['variance'][:,0]
+            cs,risk=mixture['disagreement'][0],mixture['finite_member_cvar'][0]
+        else:
+            cs=cs_disagreement(mu[:,:,0].T[...,None],variance[:,:,0].T[...,None])
+            risk=flight_risk(mu[:,:,0].T,variance[:,:,0].T,policy)
         event=jnp.max(jax.nn.sigmoid(out['event_logits'][:,0]/calibration['temperature']+calibration['bias']),axis=0)
         finite=jnp.all(jnp.isfinite(mu)&jnp.isfinite(variance),axis=(0,2))&jnp.all(jnp.isfinite(event),axis=-1)&jnp.isfinite(cs)&jnp.isfinite(risk)
         epistemic=finite&(cs<=calibration['cs_threshold']);risk_ok=epistemic&(risk<=policy.risk_threshold)
@@ -215,6 +260,9 @@ def make_guided_selector(model,norm,config,policy,guidance,record_query_statisti
         stages=jnp.stack((jnp.sum(finite),jnp.sum(epistemic),jnp.sum(risk_ok),jnp.sum(admitted),bcount)).astype(jnp.int32)
         if record_query_statistics:
             info=dict(info,query_mean=mu,query_variance=variance,query_cs=cs,query_risk=risk,query_event=event)
+            if getattr(model,'risk_components',1)==2:
+                for key in ('risk_component_mean','risk_component_variance','risk_component_probability'):
+                    info['query_'+key]=mixture[key][:,0]
         return gain,accepted,source,stages,result,info
     return select
 
@@ -254,7 +302,13 @@ def observed_waypoint_arrival(x,goal,noise,config=FlightConfig()):
         &(jnp.abs(x[5])+1.15*noise[3]<=config.terminal_pitch_rate))
 
 
-def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=False,record_query_statistics=False):
+def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=False,record_query_statistics=False,diagnostic_nearest_obstacles=None):
+    if diagnostic_nearest_obstacles is not None:
+        from .quad2d_neighborhood import neighborhood_contract, neighborhood_mask
+        neighborhood_contract(diagnostic_nearest_obstacles)
+        from .quad2d_guidance import TerminalGuidanceConfig
+        if type(guidance) is not TerminalGuidanceConfig or ordered_waypoints:
+            raise ValueError("Neighborhood diagnostic requires unchanged single-goal terminal guidance")
     if isinstance(policy,IncumbentProgressPolicyConfig):
         from .quad2d_guidance import TerminalGuidanceConfig
         if type(guidance) is not TerminalGuidanceConfig or ordered_waypoints:
@@ -282,6 +336,7 @@ def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=
             x,status,count,minimum,cursor,worst,previous_u,gain=carry[:8];k,innovation=inputs;active=status==RUNNING
             sensed=x-xb+.15*xs*innovation[:6]
             seen=truth_obs.at[:,:2].set(truth_obs[:,:2]+k*c.dt*truth_obs[:,3:5])-ob+.15*os*innovation[6:].reshape(obstacles.shape)
+            controller_mask=mask if diagnostic_nearest_obstacles is None else neighborhood_mask(sensed[:2],seen,mask,diagnostic_nearest_obstacles)
             forecast=None;forecast_info={}
             if tracked:
                 memory,forecast,velocity_bound,lag,inconsistent=quad2d_motion.update(carry[-1],seen,mask,noise,c.dt,guidance.motion_window)
@@ -297,14 +352,14 @@ def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=
             else:task_goal=goal;task_points=points;task_mask=route_mask;handoff=jnp.asarray(False)
             if guided_select is not None:
                 def query(_):
-                    return (*guided_select(params,calibration,sensed,task_goal,seen,mask,task_points,task_mask,cursor,previous_u,gain,noise,candidates,forecast,carry[-1] if tracked else None),jnp.asarray(True))
+                    return (*guided_select(params,calibration,sensed,task_goal,seen,controller_mask,task_points,task_mask,cursor,previous_u,gain,noise,candidates,forecast,carry[-1] if tracked else None),jnp.asarray(True))
                 def hold(_):
-                    result,info=predictive_flight_control(sensed,task_goal,seen,mask,gain,task_points,task_mask,cursor,config,guidance,noise,forecast)
+                    result,info=predictive_flight_control(sensed,task_goal,seen,controller_mask,gain,task_points,task_mask,cursor,config,guidance,noise,forecast)
                     if isinstance(policy,IncumbentProgressPolicyConfig) and policy.mode=='learned':
                         info=dict(info,incumbent_previous_feasible=jnp.asarray(False),
                             incumbent_previous_score=jnp.float32(0),incumbent_selected_score=jnp.float32(0))
                     if record_query_statistics:
-                        info=dict(info,**empty_query_statistics(params,candidates))
+                        info=dict(info,**empty_query_statistics(params,candidates,getattr(model,'risk_components',1)))
                     qp,h,psi,domain,_,_,_=result
                     ok=info['approved']&qp.feasible&(h>=-c.qp_tolerance)&(psi>=-c.qp_tolerance)&(domain>=-c.qp_tolerance)
                     chosen=jax.lax.cond(ok,lambda _:(gain,jnp.asarray(True),jnp.int32(HELD),jnp.zeros(5,jnp.int32),result,info,jnp.asarray(False)),query,None)
@@ -319,16 +374,16 @@ def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=
                 qp,h,psi,domain,proposed,remaining,target=result
                 guidance_info={'guidance_'+key:value for key,value in info.items()}
             else:
-                held,h,psi,domain,_,_,_=flight_control(sensed,task_goal,seen,mask,gain,task_points,task_mask,cursor,config)
+                held,h,psi,domain,_,_,_=flight_control(sensed,task_goal,seen,controller_mask,gain,task_points,task_mask,cursor,config)
                 due=active&((k%policy.interval==0)|handoff|~held.feasible|(h<-c.qp_tolerance)|(psi<-c.qp_tolerance)|(domain<-c.qp_tolerance))
                 selected,selection_ok,source,stages=jax.lax.cond(due,
-                    lambda _:select(params,calibration,sensed,task_goal,seen,mask,task_points,task_mask,cursor,previous_u,gain,noise,candidates),
+                    lambda _:select(params,calibration,sensed,task_goal,seen,controller_mask,task_points,task_mask,cursor,previous_u,gain,noise,candidates),
                     lambda _:(gain,jnp.asarray(True),jnp.int32(HELD),jnp.zeros(5,jnp.int32)),None)
                 if guidance is None:
-                    qp,h,psi,domain,proposed,remaining,target=flight_control(sensed,task_goal,seen,mask,selected,task_points,task_mask,cursor,config)
+                    qp,h,psi,domain,proposed,remaining,target=flight_control(sensed,task_goal,seen,controller_mask,selected,task_points,task_mask,cursor,config)
                     guidance_info={}
                 else:
-                    (qp,h,psi,domain,proposed,remaining,target),info=predictive_flight_control(sensed,task_goal,seen,mask,selected,task_points,task_mask,cursor,config,guidance,noise,forecast)
+                    (qp,h,psi,domain,proposed,remaining,target),info=predictive_flight_control(sensed,task_goal,seen,controller_mask,selected,task_points,task_mask,cursor,config,guidance,noise,forecast)
                     selection_ok &= info['approved']
                     source=jnp.where(active&~info['approved'],REJECTED,source)
                     due |= active&~info['approved']
@@ -355,6 +410,8 @@ def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=
                 clearance=jnp.where(accepted,clear,jnp.nan),state_bound_violation=jnp.where(accepted,bound,jnp.nan),
                 qp_violation=jnp.where(accepted,qp.max_violation,jnp.nan),h=h,psi1=psi,envelope_domain=domain,
                 route_progress=cursor,route_target=target,route_remaining=remaining,gain=selected,source=source,requery=due,stages=stages,**guidance_info,**forecast_info)
+            if diagnostic_nearest_obstacles is not None:
+                trace["controller_obstacle_mask"]=controller_mask
             next_carry=(x,status,count,minimum,cursor,worst,previous_u,gain)
             if ordered_waypoints:
                 trace.update(**mission_info,waypoints_visited=leg+(status==GOAL).astype(jnp.int32))
@@ -395,7 +452,14 @@ def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=
 
 class FlightPolicy:
     """Strict model/calibration/config identity, explicit AOT batch signatures."""
-    def __init__(self,bundle=None,calibration=None,config=FlightConfig(),policy=FlightPolicyConfig(),guidance=None,record_query_statistics=False):
+    def __init__(self,bundle=None,calibration=None,config=FlightConfig(),policy=FlightPolicyConfig(),guidance=None,record_query_statistics=False,clipped_mixture_pilot=False,diagnostic_nearest_obstacles=None,diagnostic_cruise_speed=None):
+        if diagnostic_cruise_speed is not None and (diagnostic_nearest_obstacles is not None or clipped_mixture_pilot):
+            raise ValueError('Speed diagnosis cannot combine another diagnostic treatment')
+        self.diagnostic_nearest_obstacles=diagnostic_nearest_obstacles
+        self.calibration_coverage_valid=diagnostic_nearest_obstacles is None and diagnostic_cruise_speed is None
+        if diagnostic_nearest_obstacles is not None:
+            from .quad2d_neighborhood import neighborhood_contract
+            self.neighborhood_contract=neighborhood_contract(diagnostic_nearest_obstacles)
         self.config=config;self.policy=policy;self.metadata={};self.params={};self.calibration={};self.model=None;self.norm=None;self.compiled={}
         self.guidance=guidance;self.fresh_calibration_candidates=None
         self.record_query_statistics=record_query_statistics
@@ -412,8 +476,32 @@ class FlightPolicy:
         if guidance is not None and policy.mode=='learned' and (bundle is None or calibration is None):
             raise ValueError('Predictive guidance requires matched new labels and calibration before learned use')
         if policy.mode=='learned':
-            predictor=ResearchPredictor(bundle,allow_uncalibrated=True)
-            info=json.loads(Path(calibration).read_text());metadata=predictor.metadata
+            info=json.loads(Path(calibration).read_text())
+            if isinstance(policy,EnsembleRiskPolicyConfig):
+                if (clipped_mixture_pilot or diagnostic_nearest_obstacles is not None or diagnostic_cruise_speed is not None
+                        or guidance is None or not record_query_statistics
+                        or info.get('ensemble_risk_contract')!=ensemble_risk_contract()
+                        or policy.tail_mass!=.01 or policy.risk_threshold!=0.):
+                    raise ValueError('Matched explicit mixture-risk calibration and unchanged thresholds required')
+            elif 'ensemble_risk_contract' in info:
+                raise ValueError('Predictive mixture calibration requires its explicit policy')
+            if clipped_mixture_pilot:
+                from .clipped_inference import ClippedRiskPredictor
+                from .clipped_calibration import validate_calibration
+                if not record_query_statistics or guidance is None:
+                    raise ValueError('Clipped-mixture pilot requires guided live component statistics')
+                predictor=ClippedRiskPredictor(bundle,allow_uncalibrated=True)
+                validate_calibration(info,predictor.metadata,bundle)
+            else:
+                predictor=ResearchPredictor(bundle,allow_uncalibrated=True)
+            metadata=predictor.metadata
+            if info.get('bundle_manifest_sha256') and info['bundle_manifest_sha256']!=sha256(Path(bundle)/'manifest.json'):
+                raise ValueError('Flight predictive calibration belongs to a different numerical bundle')
+            if isinstance(policy,EnsembleRiskPolicyConfig) and getattr(predictor.model,'risk_components',1)!=1:
+                raise ValueError('Ordinary Gaussian members required for ensemble mixture risk')
+            if predictor.model.config.encoder=='nearest_fc':
+                from .nearest_fc_qualification import validate_fit
+                validate_fit(info,bundle)
             features=50 if isinstance(guidance,ObservedMotionGuidanceConfig) else 40
             if info.get('dynamics')!='Quad2D' or metadata.get('graph_features')!=features or info['weights_sha256']!=metadata['weights_sha256']:
                 raise ValueError('Matched flight calibration/bundle required')
@@ -444,6 +532,14 @@ class FlightPolicy:
                 switch = validate(info)
                 self.calibration['progress_delta_quantile'] = jnp.asarray(switch['threshold'],jnp.float32)
             self.calibration_sha256=sha256(calibration)
+        if diagnostic_cruise_speed is not None:
+            from .quad2d_guidance import TerminalGuidanceConfig
+            from .quad2d_nominal_speed import speed_contract
+            if type(guidance) is not TerminalGuidanceConfig or not isinstance(policy,IncumbentProgressPolicyConfig):
+                raise ValueError('Speed diagnosis requires the original guided incumbent policy')
+            # All model/calibration identity checks above use the original
+            # contract. The opt-in runtime change carries no coverage claim.
+            self.config,self.nominal_speed_contract=speed_contract(config,diagnostic_cruise_speed)
     def warm(self,candidates,batch=16,capacity=64,route_capacity=64,steps=1600,waypoint_capacity=None):
         candidates=np.asarray(candidates,np.float32)
         if self.fresh_calibration_candidates is not None and not np.array_equal(candidates,self.fresh_calibration_candidates):
@@ -459,7 +555,7 @@ class FlightPolicy:
                 raise ValueError('Trajectory gate horizon, mission or candidate pool changed')
         if ordered and (isinstance(waypoint_capacity,bool) or not isinstance(waypoint_capacity,int) or waypoint_capacity<1):raise ValueError('Invalid waypoint capacity')
         prefix=(batch,waypoint_capacity) if ordered else (batch,)
-        fn=jax.jit(jax.vmap(make_episode(self.model,self.norm,self.config,self.policy,steps,self.guidance,ordered,self.record_query_statistics),in_axes=(None,None,None,0,0,0,0,0,0,0,0,0)+((0,) if ordered else ())))
+        fn=jax.jit(jax.vmap(make_episode(self.model,self.norm,self.config,self.policy,steps,self.guidance,ordered,self.record_query_statistics,self.diagnostic_nearest_obstacles),in_axes=(None,None,None,0,0,0,0,0,0,0,0,0)+((0,) if ordered else ())))
         args=(self.params,self.calibration,jnp.asarray(candidates),jnp.zeros((batch,6),jnp.float32),jnp.ones((*prefix,2),jnp.float32),
             jnp.zeros((batch,capacity,5),jnp.float32),jnp.zeros((batch,capacity),bool),jnp.zeros((*prefix,route_capacity,2),jnp.float32),
             jnp.ones((*prefix,route_capacity),bool),jnp.zeros((batch,7),jnp.float32),jax.random.split(jax.random.PRNGKey(0),batch),jnp.zeros(prefix,bool))

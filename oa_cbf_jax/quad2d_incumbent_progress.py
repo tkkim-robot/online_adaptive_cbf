@@ -32,7 +32,7 @@ def make_auditor(config,guidance,batch,candidates):
             chosen=indices[start:start+batch];padded=np.pad(chosen,(0,batch-len(chosen)),mode='edge')
             repeat=lambda a:np.broadcast_to(a,(batch,*a.shape))
             args=tuple(map(jnp.asarray,(data['observed_state'][padded],repeat(data['goal']),data['observed_obstacles'][padded],
-                repeat(data['obstacle_mask']),before[padded],repeat(data['points']),repeat(data['route_mask']),cursor[padded],repeat(data['noise']))))
+                (data['controller_obstacle_mask'][padded] if 'controller_obstacle_mask' in data else repeat(data['obstacle_mask'])),before[padded],repeat(data['points']),repeat(data['route_mask']),cursor[padded],repeat(data['noise']))))
             if executable is None:executable=evaluate.lower(*args).compile()
             actual=np.asarray(executable(*args))[:len(chosen)]
             if not np.array_equal(actual,feasible[chosen]):raise ValueError('Changed previous-gain witness')

@@ -7,17 +7,22 @@ from .quad3d_observation import observe,observed_arrived
 from .quad3d_observed_rollout import observed_control
 
 
-def checked_control(x,goal,o,mask,proposed,previous,points,rm,cursor,noise,c,nominal_bias=None):
+def checked_control(x,goal,o,mask,proposed,previous,points,rm,cursor,noise,c,nominal_bias=None,previous_result=None):
     primary=observed_control(x,goal,o,mask,proposed,points,rm,cursor,noise,c,True,nominal_bias)
     valid=primary[1]&(primary[2]>=-c.qp_tolerance)&(primary[3]>=-c.qp_tolerance)
     retry=~valid&jnp.any(proposed!=previous)
-    result=jax.lax.cond(retry,lambda _:observed_control(x,goal,o,mask,previous,points,rm,cursor,noise,c,True,nominal_bias),lambda _:primary,operand=None)
+    result=jax.lax.cond(retry,lambda _:observed_control(x,goal,o,mask,previous,points,rm,cursor,noise,c,True,nominal_bias) if previous_result is None else previous_result,lambda _:primary,operand=None)
     proof=dict(attempted_control=primary[0],attempted_feasible=primary[1],attempted_psi=primary[2],attempted_domain=primary[3],
         attempted_residual=primary[4],attempted_iterations=primary[5])
     return result,jnp.where(retry,previous,proposed),retry,proof
 
 
-def make_policy_rollout(selector,steps=1600,ordered=False):
+def failure_query_trigger(running,scheduled,arrived,held_feasible):
+    """One extra learned query only when the held QP has actually failed."""
+    return running&~scheduled&~arrived&~held_feasible
+
+
+def make_policy_rollout(selector,steps=1600,ordered=False,failure_requery=False):
     c=selector.robot;p=selector.config
     estimating=c.nominal_bias_observer=='innovation_ema_v97'
     def rollout(params,x,goal,obs,mask,initial_gain,points,rm,noise,bx,bo,ix,io,waypoint_count=None):
@@ -47,10 +52,25 @@ def make_policy_rollout(selector,steps=1600,ordered=False):
                 from .quad3d_observer import update_bias
                 updated=update_bias(bias_estimate,previous_seen,seen,previous_u,noise,c)
                 bias_estimate=jnp.where(k>0,updated,bias_estimate)
+            if failure_requery:
+                # Same observation, same past observer memory, original QP.
+                # The cached held solve also supplies the previous-gain retry.
+                held=observed_control(seen,goal,so,mask,previous_gain,points,rm,cursor,noise,c,True,
+                    nominal_bias=bias_estimate if estimating else None)
+                extra_query=failure_query_trigger(status==0,requery,held[-1],held[1])
+                requery=requery|extra_query
             prediction=jax.lax.cond(requery,lambda _:predict(seen,so,goal,points,rm,cursor,previous_u,previous_gain,bias_estimate),lambda _:zero,None)
             proposed_gain=jnp.where(requery,prediction['network_gain'],previous_gain)
-            result,gain,retry,attempt=checked_control(seen,goal,so,mask,proposed_gain,previous_gain,points,rm,cursor,noise,c,
-                nominal_bias=bias_estimate if estimating else None)
+            if failure_requery:
+                held_attempt=dict(attempted_control=held[0],attempted_feasible=held[1],attempted_psi=held[2],
+                    attempted_domain=held[3],attempted_residual=held[4],attempted_iterations=held[5])
+                result,gain,retry,attempt=jax.lax.cond(requery,
+                    lambda _:checked_control(seen,goal,so,mask,proposed_gain,previous_gain,points,rm,cursor,noise,c,
+                        nominal_bias=bias_estimate if estimating else None,previous_result=held),
+                    lambda _:(held,previous_gain,jnp.bool_(False),held_attempt),None)
+            else:
+                result,gain,retry,attempt=checked_control(seen,goal,so,mask,proposed_gain,previous_gain,points,rm,cursor,noise,c,
+                    nominal_bias=bias_estimate if estimating else None)
             u,feasible,psi,domain,residual,iterations,target,next_progress,remaining,visible,done=result
             final_leg=(leg==waypoint_count-1) if ordered else jnp.bool_(True)
             status=jnp.where((status==0)&done&final_leg,1,status)
@@ -70,6 +90,9 @@ def make_policy_rollout(selector,steps=1600,ordered=False):
                 route_cursor_before=cursor,route_progress=next_cursor,route_remaining=remaining,route_visible=visible,
                 requery=requery,controller_gain=gain,network_gain=proposed_gain,previous_gain=previous_gain,previous_control=previous_u,qp_switch_fallback=retry)
             data.update(attempt)
+            if failure_requery:
+                data.update(failure_requery=extra_query,held_proposed=held[0],held_feasible=held[1],
+                    held_psi=held[2],held_domain=held[3],held_residual=held[4],held_iterations=held[5])
             if estimating:data.update(nominal_bias_estimate=bias_estimate,nominal_observation=seen-bias_estimate)
             if ordered:data.update(waypoint_index=leg,waypoint_handoff=handoff,mission_goal=goal)
             return (next_state,status,count+active.astype(jnp.int32),next_cursor,jnp.where(active,applied,previous_u),jnp.where(active,gain,previous_gain),bias_estimate,seen,leg),(data,prediction)

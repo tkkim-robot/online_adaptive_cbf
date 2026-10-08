@@ -69,6 +69,9 @@ class Quad3DSelector:
         self.predictor=ResearchPredictor(bundle,allow_uncalibrated=True);self.metadata=self.predictor.metadata;validate_model(self.metadata)
         self.fit=read(prediction_fit);self.config=config;self.reference=reference
         fit=self.fit
+        if self.predictor.model.config.encoder=='nearest_fc':
+            from .nearest_fc_qualification import validate_fit
+            validate_fit(fit,bundle)
         if fit['schema']!=FIT_SCHEMA or fit['weights_sha256']!=self.metadata['weights_sha256'] or fit['bundle_manifest_sha256']!=sha256(Path(bundle)/'manifest.json'):raise ValueError('Quad3D prediction lineage mismatch')
         for field in ('quad3d_contract','controller','targets','events','gain_domain'):
             if fit[field]!=self.metadata[field]:raise ValueError('Quad3D prediction semantics mismatch: '+field)

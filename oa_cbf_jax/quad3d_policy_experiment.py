@@ -35,6 +35,16 @@ RUNTIME=tuple(dict.fromkeys((*DATA_RUNTIME,'quad3d_policy.py','quad3d_policy_rol
     'quad3d_learning_contract.py','quad3d_predictive_calibration.py','models.py','inference.py','uncertainty.py','quad2d_trajectory_gate.py',
     'comparison_contracts.py','metrics.py','io.py')))
 MATCHED_SCHEMA='quad3d_matched_static_policy'
+PAPER_SCHEMA='paper_nearest_fc_quad3d_inputs'
+DENSITY_SCHEMA='quad3d_frozen_random_density_policy_v1'
+INPUT_SUPPORT_SCHEMA='quad3d_frozen_input_support_policy'
+
+
+def runtime_names(schema):
+    extra=('nearest_fc.py','nearest_fc_qualification.py','paper_quad3d_fc_job.py') if schema==PAPER_SCHEMA else ()
+    if schema==DENSITY_SCHEMA:extra=('nearest_fc.py','nearest_fc_qualification.py','quad3d_density_study.py')
+    if schema==INPUT_SUPPORT_SCHEMA:extra=('nearest_fc.py','nearest_fc_qualification.py','quad3d_density_study.py','quad3d_input_support.py','quad3d_input_support_study.py','quad3d_failure_requery.py','quad3d_frozen_confirmation.py','quad2d_random_density.py')
+    return tuple(dict.fromkeys((*RUNTIME,*extra)))
 
 
 def model_paths(encoder,version=96):
@@ -136,11 +146,38 @@ def prepare(output,version=96):
 
 def inputs(source,encoder,phase,slot,gate):
     root=Path(source);m=read(root/'manifest.json');assert m['parents_sha256']==sha256(root/'parents.json')
-    assert m['source_files']=={n:sha256(Path(__file__).parent/n) for n in RUNTIME}
+    assert m['source_files']=={n:sha256(Path(__file__).parent/n) for n in runtime_names(m['schema'])}
     mp=m['models'][encoder];assert mp['prediction_fit_sha256']==sha256(mp['prediction_fit']) and mp['bundle_manifest_sha256']==sha256(Path(mp['bundle'])/'manifest.json')
     selector=Quad3DSelector(mp['bundle'],mp['prediction_fit'],gate=gate,reference=phase=='gate_calibration',config=Quad3DPolicyConfig(**policy_configuration(m,encoder)))
     expected=m['configs'][encoder] if 'configs' in m else m['config']
     assert asdict(selector.robot)==expected
+    if m['schema']==INPUT_SUPPORT_SCHEMA:
+        from .quad3d_input_support_study import verify_source
+        from .quad3d_input_support import InputSupportSelector
+        parents=verify_source(root)
+        saved=m['gates'][encoder]
+        if phase!='policy_audit' or gate is None or Path(gate).resolve()!=Path(saved['path']).resolve() or sha256(gate)!=saved['sha256']:
+            raise ValueError('Input support requires the original frozen adaptive gate')
+        chosen=[p for p in parents if p['study_slot']==slot]
+        if slot not in range(4) or len(chosen)!=m['slot_counts'][slot] or not chosen:
+            raise ValueError('Wrong complete input-support partition')
+        return m,chosen,InputSupportSelector(selector)
+    if m['schema']==DENSITY_SCHEMA:
+        from .quad3d_density_study import verify_source
+        parents=verify_source(root,m)
+        if phase!='policy_audit' or gate is None or encoder not in ('gat','nearest_fc'):
+            raise ValueError('Frozen density study is deployment only')
+        saved=m['gates'][encoder]
+        if Path(gate).resolve()!=Path(saved['path']).resolve() or sha256(gate)!=saved['sha256']:
+            raise ValueError('Density study cannot refit or change gates')
+        chosen=[p for p in parents if p['study_slot']==slot]
+        if slot not in range(4) or len(chosen)!=m['slot_counts'][slot] or not chosen:
+            raise ValueError('Wrong complete density partition')
+        return m,chosen,selector
+    if m['schema']==PAPER_SCHEMA:
+        from .paper_quad3d_fc_job import verify
+        verify(root, m, selector.metadata)
+        assert encoder=='nearest_fc'
     if m['schema']==MATCHED_SCHEMA:
         from .comparison_contracts import matched_controller_settings,physical_obstacle_scope
         matched_controller_settings(m['comparison_contracts']['gat'],m['comparison_contracts']['matched_fc'])
@@ -196,13 +233,20 @@ def replay_predictions(out,rows,selector):
     return dict(all_saved_query_predictions_recomputed=True,queries=queries,maximum_absolute_errors=maxima,implicit_jit_cache_entries=0)
 
 
+def padded_density_batch(parents):
+    if not 1<=len(parents)<=12:raise ValueError('Expected one nonempty batch of at most12 parents')
+    return parents+[parents[-1]]*(12-len(parents))
+
+
 def collect(source,encoder,phase,slot,gate,output):
     out=Path(output);out.mkdir(parents=True,exist_ok=False);m,parents,selector=inputs(source,encoder,phase,slot,gate)
     fn=exe=None;rows=[];duration=0.;start=time.perf_counter()
     for first in range(0,len(parents),12):
         if shutil.disk_usage(out).free/2**30<m.get('storage_floor_gib',125.):raise ValueError('Learning storage reserve reached')
-        pp=parents[first:first+12];args=(selector.predictor.params,*to_device(observation_arrays(pp,m['steps'])))
-        if exe is None:fn,exe,cold=compile_fn(jax.vmap(make_policy_rollout(selector,m['steps']),in_axes=(None,)+(0,)*12),args)
+        pp=parents[first:first+12]
+        executed=padded_density_batch(pp) if m['schema'] in (DENSITY_SCHEMA,INPUT_SUPPORT_SCHEMA) else pp
+        args=(selector.predictor.params,*to_device(observation_arrays(executed,m['steps'])))
+        if exe is None:fn,exe,cold=compile_fn(jax.vmap(make_policy_rollout(selector,m['steps'],failure_requery=m.get('failure_requery',False)),in_axes=(None,)+(0,)*12),args)
         tick=time.perf_counter();summary,(trace,prediction)=jax.device_get(exe(*args));duration+=time.perf_counter()-tick
         for i,p in enumerate(pp):
             count=int(summary['steps'][i]);length=min(m['steps'],count+1);d={k:v[i,:length] for k,v in trace.items()};qt=np.flatnonzero(d['requery'])
@@ -213,6 +257,7 @@ def collect(source,encoder,phase,slot,gate,output):
                 learned_queries=int(np.sum(q['selected_index']>=0)),uncertainty_fallback_queries=int(q['uncertainty_fallback'].sum()),admission_fallback_queries=int(q['admission_fallback'].sum()),
                 qp_switch_fallbacks=int(d['qp_switch_fallback'].sum()),applied_gain_changes=int(np.sum(d['active']&np.any(d['controller_gain']!=d['previous_gain'],axis=-1)))))
             if m['schema']=='quad3d_fresh_learned_policy_v108':rows[-1].update(initial_gains=p['gains'],motion_stratum=p['motion_stratum'])
+            if m.get('failure_requery',False):rows[-1]['failure_requeries']=int(d['failure_requery'].sum())
         progress=dict(parents_complete=len(rows),parents_total=len(parents),physical_steps=sum(r['steps'] for r in rows),queries=sum(r['queries'] for r in rows),execute_seconds=duration,elapsed_seconds=time.perf_counter()-start)
         write_json(out/'progress.json',progress);print(json.dumps(progress),flush=True)
     assert fn._cache_size()==0
@@ -222,12 +267,15 @@ def collect(source,encoder,phase,slot,gate,output):
         prediction_fit=m['models'][encoder]['prediction_fit'],prediction_fit_sha256=m['models'][encoder]['prediction_fit_sha256'],weights_sha256=selector.metadata['weights_sha256'],
         gate=None if gate is None else str(Path(gate).resolve()),gate_sha256=None if gate is None else sha256(gate),cs_threshold=None if gate is None else float(selector.threshold),
         index_sha256=sha256(out/'index.json'),prediction_replay_sha256=sha256(out/'prediction_replay.json'),compile_seconds=cold,execute_seconds=duration,
-        implicit_jit_cache_entries=0,device=str(jax.devices()[0])))
+        implicit_jit_cache_entries=0,device=str(jax.devices()[0]),
+        **(dict(input_box_admission=True,failure_requery=m.get('failure_requery',False)) if m['schema']==INPUT_SUPPORT_SCHEMA else {})))
 
 
 def audit(output,workers=12):
     out=Path(output);m=read(out/'manifest.json');sm=read(Path(m['source'])/'manifest.json');parents=read(Path(m['source'])/'parents.json');by={p['id']:policy_parent(p,sm,m['encoder']) for p in parents}
-    assert m['source_sha256']==sha256(Path(m['source'])/'manifest.json') and m['source_files']==sm['source_files']=={n:sha256(Path(__file__).parent/n) for n in RUNTIME}
+    assert m.get('input_box_admission',False)==(sm['schema']==INPUT_SUPPORT_SCHEMA)
+    assert m.get('failure_requery',False)==sm.get('failure_requery',False)
+    assert m['source_sha256']==sha256(Path(m['source'])/'manifest.json') and m['source_files']==sm['source_files']=={n:sha256(Path(__file__).parent/n) for n in runtime_names(sm['schema'])}
     assert m['config']==(sm['configs'][m['encoder']] if 'configs' in sm else sm['config'])
     assert m['policy_config']==policy_configuration(sm,m['encoder'])
     assert m['index_sha256']==sha256(out/'index.json') and m['prediction_replay_sha256']==sha256(out/'prediction_replay.json')
@@ -261,7 +309,7 @@ def gate(source,encoder,directories,output):
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('action',choices=['prepare','benchmark','collect','audit','gate']);p.add_argument('--source');p.add_argument('--output',required=True)
-    p.add_argument('--encoder',choices=['gat','full_fc','matched_fc']);p.add_argument('--phase',choices=['gate_calibration','policy_audit']);p.add_argument('--slot',type=int,default=0)
+    p.add_argument('--encoder',choices=['gat','full_fc','matched_fc','nearest_fc']);p.add_argument('--phase',choices=['gate_calibration','policy_audit']);p.add_argument('--slot',type=int,default=0)
     p.add_argument('--gate');p.add_argument('--workers',type=int,default=12);p.add_argument('--directories',nargs='+');p.add_argument('--version',type=int,choices=[96,100,108],default=96);a=p.parse_args()
     if a.action=='prepare':prepare(a.output,a.version)
     elif a.action=='audit':audit(a.output,a.workers)
