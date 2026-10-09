@@ -1,27 +1,25 @@
-"""Observed cylinder routes and full-state flight targets; no gain search.
+"""Shared quad3d routing implementation."""
 
-A route is guidance only. The unchanged QP enforces every observed cylinder and
-all full-state envelopes. Route memory commits only on applied actions.
-"""
 from dataclasses import dataclass
-import numpy as np
-import jax.numpy as jnp
-from .routing import plan_route, route_geometry, route_target_from_position
-from .quad3d_control import Quad3DControlConfig
 
+import numpy as np
+
+import jax.numpy as jnp
+
+from .routing import plan_route, route_geometry, route_target_from_position
+
+from .quad3d_control import Quad3DControlConfig
 
 @dataclass(frozen=True)
 class RouteBody:
     radius: float
     clearance_buffer: float
 
-
 def observed_route(x, goal, obstacles, mask, config=Quad3DControlConfig()):
     # Explicit adapter: never interpret pitch as speed or altitude as heading.
     return plan_route(np.asarray(x)[:2], np.asarray(goal)[:2], obstacles, mask,
         RouteBody(config.robot.radius, config.clearance_buffer), capacity=64,
         vertices=16, margin=.25, visibility_batch_nodes=32)
-
 
 def flight_target(x, goal, obstacles, mask, points, route_mask, cursor, config=Quad3DControlConfig()):
     _, proposed, remaining = route_target_from_position(x[:2], jnp.linalg.norm(x[6:8]), points, route_mask, cursor)
@@ -47,7 +45,6 @@ def flight_target(x, goal, obstacles, mask, points, route_mask, cursor, config=Q
     # hard CBF reject/modify it. Never invent a successful route or move state.
     target = jnp.concatenate((targets[chosen], goal[2:3]))
     return target, proposed, remaining, jnp.any(visible)
-
 
 def numpy_flight_target(x, goal, obstacles, mask, points, route_mask, cursor, config):
     """Independent scalar NumPy reconstruction for trace auditing."""

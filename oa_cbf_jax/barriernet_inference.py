@@ -1,16 +1,26 @@
-"""Native BarrierNet deployment with explicit status and complete-policy timing."""
-import argparse
-import json
-from pathlib import Path
-import time
-import jax
-import jax.numpy as jnp
-import numpy as np
-from flax import serialization
-from .barriernet import BarrierNet,features,nominal,constraints,hard_deployment_qp,require_x64
-from .dataset import sha256
-from .io import write_json
+"""Barriernet inference functions and shared contracts."""
 
+import argparse
+
+import json
+
+from pathlib import Path
+
+import time
+
+import jax
+
+import jax.numpy as jnp
+
+import numpy as np
+
+from flax import serialization
+
+from .barriernet import BarrierNet, features, nominal, constraints, hard_deployment_qp, require_x64
+
+from .io import sha256
+
+from .io import write_json
 
 def load_bundle(bundle):
     require_x64();root=Path(bundle);manifest=json.loads((root/'manifest.json').read_text())
@@ -22,7 +32,6 @@ def load_bundle(bundle):
     with np.load(root/'normalization.npz') as f:mean,std=f['mean'],f['std']
     if mean.shape!=(25,) or std.shape!=(25,) or not np.isfinite(mean).all() or not np.isfinite(std).all() or not np.all(std>0):raise ValueError('Invalid normalization')
     return manifest,model,params,jnp.asarray(mean),jnp.asarray(std)
-
 
 def make_policy(bundle,radius=None):
     manifest,model,params,mean,std=load_bundle(bundle)
@@ -36,9 +45,8 @@ def make_policy(bundle,radius=None):
         return control,valid,violation,p,u_nom
     return jax.jit(policy),manifest
 
-
 def audit(bundle,samples=512):
-    from .barriernet_audit import numpy_features,numpy_nominal,numpy_constraints,check_optimality
+    from .barriernet_inference import numpy_features, numpy_nominal, numpy_constraints, check_optimality
     from scipy.optimize import linprog
     manifest,_,params,mean,std=load_bundle(bundle);weights=jax.device_get(params)
     dataset=Path(manifest['dataset']);dm=json.loads((dataset/'manifest.json').read_text())
@@ -94,7 +102,6 @@ def audit(bundle,samples=512):
     write_json(Path(bundle)/'independent_inference_audit.json',report)
     print(json.dumps({k:v for k,v in report.items() if k!='samples_detail'}),flush=True)
 
-
 def benchmark(bundle,output,samples=256):
     fn,_=make_policy(bundle)
     # Fixed-capacity whole policy: feature selection, MLP, CBF and bounded QP.
@@ -108,6 +115,144 @@ def benchmark(bundle,output,samples=256):
         runtime_compilations=0,deadline50ms_misses=int(np.sum(np.asarray(times)>.05)),weights_sha256=sha256(Path(bundle)/'weights.msgpack'),
         scope='Synchronized native FP64 complete policy from64 raw obstacle slots to returned command/status/per-obstacle gains; excludes physical simulator, observation transfer and real compute delay.')
     write_json(output,report);print(json.dumps(report),flush=True)
+
+
+
+from scipy.optimize import nnls
+
+def numpy_features(x,goal,obs,mask,radius):
+    valid=obs[np.asarray(mask,bool)]
+    order=np.argsort(np.linalg.norm(valid[:,:2]-x[:2],axis=1)-valid[:,2]-radius,kind='stable')[:5]
+    selected=np.pad(valid[order],((0,0),(0,7-obs.shape[-1])))
+    selected=np.vstack((selected,np.tile([100.,100.,0.,0.,0.,0.,0.],(5-len(selected),1))))
+    delta=selected[:,:2]-x[:2]
+    angle=(np.arctan2(delta[:,1],delta[:,0])-x[2]+np.pi)%(2*np.pi)-np.pi
+    z=np.column_stack((delta,angle,np.linalg.norm(delta,axis=1)-selected[:,2]-radius,np.full(5,x[3]))).reshape(25)
+    return z,np.r_[x,goal,selected.ravel()]
+
+def numpy_constraints(ctx,p,radius):
+    x=ctx[:4];obs=ctx[6:].reshape(5,7);rows=[];rhs=[]
+    for obstacle,gain in zip(obs,p):
+        dx,dy=x[:2]-obstacle[:2];c=np.cos(x[2]);s=np.sin(x[2]);v=x[3]
+        barrier=dx*dx+dy*dy-1.01*(obstacle[2]+radius)**2
+        along=dx*c+dy*s
+        rows.append([-2*along,-2*v*(-dx*s+dy*c)])
+        rhs.append(2*v*v+(gain[0]+gain[1])*2*v*along+gain[0]*gain[1]*barrier)
+    return np.vstack((rows,np.eye(2),-np.eye(2))),np.r_[rhs,[.5]*4]
+
+def numpy_nominal(x,goal):
+    dx,dy=goal-x[:2];distance=max(np.hypot(dx,dy)-.05,0.)
+    angle=(np.arctan2(dy,dx)-x[2]+np.pi)%(2*np.pi)-np.pi
+    speed=0. if abs(angle)>np.pi/2 else min(distance*np.cos(angle),1.)
+    return np.array([speed-x[3],2*angle])
+
+def check_optimality(u,reference,A,b,diagonal=1.):
+    residual=A@u-b
+    active=residual>=-1e-6
+    gradient=diagonal*u-reference
+    if active.any():
+        multipliers,_=nnls(A[active].T,-gradient,maxiter=1000)
+        stationarity=np.linalg.norm(gradient+A[active].T@multipliers,ord=np.inf)
+    else:stationarity=np.linalg.norm(gradient,ord=np.inf)
+    return float(np.max(residual)),float(stationarity)
+
+
+import hashlib
+
+
+from .config import UnicycleConfig
+
+from .simulation import RUNNING, GOAL, COLLISION, INFEASIBLE, TIMEOUT, STATUS_NAMES
+
+from .stochastic import STATE_BOUND_VIOLATION
+
+PLANNER_FAILURE=7
+
+NAMES={**STATUS_NAMES,PLANNER_FAILURE:'planner_failure',STATE_BOUND_VIOLATION:'state_bound_violation'}
+
+NAMES[INFEASIBLE]='solver_rejected'
+
+class Controller:
+    def __init__(self,bundle,capacity,robot=UnicycleConfig()):
+        self.robot=robot;fn,self.manifest=make_policy(bundle,robot.radius)
+        begin=time.perf_counter()
+        self.execute=fn.lower(jnp.zeros(4,jnp.float64),jnp.zeros(2,jnp.float64),jnp.zeros((capacity,5),jnp.float64),jnp.zeros(capacity,bool)).compile()
+        self.compile_seconds=time.perf_counter()-begin
+
+    def solve(self,state,goal,obstacles,mask):
+        begin=time.perf_counter()
+        u,feasible,violation,p,reference=jax.device_get(self.execute(
+            jnp.asarray(state,jnp.float64),jnp.asarray(goal,jnp.float64),jnp.asarray(obstacles,jnp.float64),jnp.asarray(mask)))
+        # Shared plant command storage is FP32. Independently recheck that exact
+        # command; never change the QP, tolerance, or gains to make it pass.
+        applied=np.asarray(u,np.float32)
+        _,ctx=numpy_features(np.asarray(state,float),np.asarray(goal,float),np.asarray(obstacles,float),mask,self.robot.radius)
+        A,b=numpy_constraints(ctx,p,self.robot.radius)
+        applied_violation=float(np.max(A@applied-b))
+        accepted=bool(feasible and np.isfinite(applied).all() and applied_violation<=self.robot.qp_tolerance)
+        return dict(control=applied,feasible=accepted,solver_feasible=bool(feasible),gains=p,objective_reference=reference,
+            violation=applied_violation,solver_violation=float(violation),seconds=time.perf_counter()-begin,
+            solver_status='solved' if accepted else 'post_command_rejected' if feasible else 'solver_rejected')
+
+def episode(record,controller,kernels,steps,noise_scale,ordered=False):
+    robot=controller.robot;scene=record['scene'];f=lambda a:np.asarray(a,np.float32)
+    mask=np.asarray(scene['obstacle_mask'],bool);observed=f(scene['initial_state']);obstacles=f(scene['obstacles'])
+    if ordered:
+        count=record['waypoint_count'];goals=f(record['waypoint_goals']);routes=record['waypoint_routes']
+        points=f(routes['points']);rmask=np.asarray(routes['mask'],bool);ready=np.asarray(routes['ready'],bool)
+    else:
+        count=1;goals=f([scene['goal']]);points=f([record['route']['points']]);rmask=np.asarray([record['route']['mask']],bool)
+        ready=np.asarray([record['route']['status']=='ready'])
+    noise=noise_scale*np.array([.02,.03,.02,.03,.025,.01]);fn=f(noise)
+    seed=int.from_bytes(hashlib.sha256(scene['scene_id'].encode()).digest()[:4],'little');key=np.asarray(jax.random.PRNGKey(seed))
+    x,truth_obs,xb,ob,xs,os,innovations=kernels.prepare(observed,obstacles,mask,fn,key)
+    initial=np.asarray(x);truth=np.asarray(truth_obs);minimum=float(kernels.clearance(x,truth_obs,mask))
+    status=PLANNER_FAILURE if not ready[0] else COLLISION if minimum<=0 else GOAL if count==1 and bool(kernels.arrived(x,goals[0],np.zeros(6,np.float32))) else RUNNING
+    leg=0;cursor=np.float32(0);traces=[];applied=0;solve_times=[];step_times=[];solver_statuses={};start=time.perf_counter()
+    for k in range(steps):
+        tick=time.perf_counter();sx,so=kernels.sense(x,truth_obs,xb,ob,xs,os,innovations[k],np.int32(k));sx,so=np.asarray(sx),np.asarray(so)
+        handoff=status==RUNNING and leg<count-1 and bool(kernels.arrived(sx,goals[leg],fn))
+        if handoff:leg+=1;cursor=np.float32(0)
+        if status==RUNNING and not ready[leg]:status=PLANNER_FAILURE
+        attempt=status==RUNNING;result=None;u=np.zeros(2,np.float32);clear=bound=violation=np.nan
+        target,proposal,remaining=kernels.target(sx,points[leg],rmask[leg],cursor)
+        if attempt:
+            result=controller.solve(sx,goals[leg],so,mask);solve_times.append(result['seconds'])
+            label=result['solver_status'];solver_statuses[label]=solver_statuses.get(label,0)+1
+            accepted=result['feasible'];violation=result['violation']
+            if accepted:
+                u=result['control'];x,clear,bound=kernels.advance(x,u,truth_obs,mask,np.int32(k))
+                clear,bound=float(clear),float(bound);minimum=min(minimum,clear);cursor=np.float32(proposal);applied+=1
+                if leg==count-1 and bool(kernels.arrived(x,goals[leg],np.zeros(6,np.float32))):status=GOAL
+                if bound>robot.qp_tolerance:status=STATE_BOUND_VIOLATION
+                if clear<=0:status=COLLISION
+            else:status=INFEASIBLE
+        else:accepted=False
+        traces.append(dict(state=np.asarray(x),control=u,active=accepted,status=status,
+            gains=np.full((5,2),np.nan) if result is None else result['gains'],
+            objective_reference=np.full(2,np.nan) if result is None else result['objective_reference'],
+            observed_state=sx,observed_obstacles=so,clearance=clear,state_bound_violation=bound,qp_violation=violation,
+            route_target=np.asarray(target),route_remaining=float(remaining),route_progress=cursor,
+            selection_tick=attempt,selection_accepted=accepted,solver_status='' if result is None else result['solver_status'],
+            solver_success=False if result is None else result['solver_feasible'],solver_seconds=np.nan if result is None else result['seconds'],
+            waypoint_index=leg,waypoint_handoff=handoff,waypoints_visited=leg+int(status==GOAL),mission_goal=goals[leg],
+            collision_event=accepted and clear<=0,state_bound_event=accepted and bound>robot.qp_tolerance))
+        step_times.append(time.perf_counter()-tick)
+        if status!=RUNNING:break
+    if status==RUNNING:status=TIMEOUT
+    trace={k:np.stack([t[k] for t in traces]) for k in traces[0]}
+    row=dict(scene_id=scene['scene_id'],family=scene['family'],mode='barriernet',status=NAMES[status],steps=applied,min_clearance=minimum,
+        goal_progress=float(np.linalg.norm(initial[:2]-goals[count-1])-np.linalg.norm(np.asarray(x)[:2]-goals[count-1])),
+        final_route_coordinate=float(kernels.coordinate(x[:2],points[leg],rmask[leg],cursor)),
+        applied_source_counts={'native_barriernet':applied},selection_attempts=len(solve_times),selection_rejections=int(status==INFEASIBLE),
+        reactive_reselections=0,gate_stage_totals=[],gain_total_variation=float(np.abs(np.diff(trace['gains'][trace['selection_tick']],axis=0)).sum()),
+        max_physical_bound_violation=float(np.max(trace['state_bound_violation'][trace['active']])) if applied else None,
+        solver_status_counts=solver_statuses,elapsed_seconds=time.perf_counter()-start,solver_seconds=sum(solve_times),
+        tick_seconds_p50_p99_max=np.quantile(step_times,[.5,.99,1]).tolist(),
+        collision_event=bool(np.any(trace['collision_event'])) or minimum<=0,state_bound_event=bool(np.any(trace['state_bound_event'])))
+    if status==INFEASIBLE:row['termination_reason']=result['solver_status']
+    if ordered:row.update(waypoint_index=leg,waypoints_visited=leg+int(status==GOAL),required_waypoints=count,waypoint_handoffs=int(trace['waypoint_handoff'].sum()))
+    return row,trace,dict(true_initial_state=initial,true_obstacles=truth,scene_id=scene['scene_id'],noise=noise,key=key)
 
 
 if __name__=='__main__':

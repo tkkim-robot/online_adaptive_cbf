@@ -1,25 +1,24 @@
-"""Observation-conditioned branch generator with explicit bounded sensor error.
-
-At the branch point every replica has exactly the same controller observation.
-Latent physical state/obstacle errors and subsequent observation innovations are
-sampled independently of the queried gain. The controller sees neither errors
-nor future noise. This is a specified synthetic sensor model, not a claim about
-the posterior distribution of a real sensor.
-"""
+"""Shared stochastic implementation."""
 
 from functools import partial
+
 import jax
+
 import jax.numpy as jnp
 
 from .config import UnicycleConfig
+
 from .dynamics import integrate_unicycle, signed_clearance, swept_disk_clearance
+
 from .route_control import route_control, INADMISSIBLE
+
 from .routing import physical_route_coordinate
+
 from .simulation import Summary, RUNNING, GOAL, COLLISION, INFEASIBLE, TIMEOUT
-from .sensor_margin import clearance_inflation
+
+from .guidance import clearance_inflation
 
 STATE_BOUND_VIOLATION=8
-
 
 def conditioned_sensor_model(observed_x,observed_obstacles,mask,noise,key,config,steps):
     """Shared physical prior and future sensor stream, independent of policy."""
@@ -40,7 +39,6 @@ def conditioned_sensor_model(observed_x,observed_obstacles,mask,noise,key,config
     obs_bias=physical_obs-observed_obstacles
     innovations=jax.random.uniform(innovation_key,(steps,4+observed_obstacles.size),minval=-1.,maxval=1.).at[0].set(0.)
     return physical_x,physical_obs,x_bias,obs_bias,x_scale,obs_scale,innovations
-
 
 @partial(jax.jit, static_argnames=('config','steps','sensor_margin_scale','margin_guidance','shared_clearance_budget'))
 def stochastic_branch(observed_x, goal, observed_obstacles, mask, alpha, points, route_mask,

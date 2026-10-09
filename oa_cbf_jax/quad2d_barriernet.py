@@ -1,15 +1,12 @@
-"""Native Quad2D BarrierNet in JAX; pinned architecture and untuned settings.
+"""Shared quad2d barriernet implementation."""
 
-The shared physical task changes robot radius/actuator bounds explicitly. The
-native model's *inner* inference bounds remain 1..10 before wrapper clipping.
-No OA guidance, obstacle observer, envelope rows or gain search is added.
-"""
-import jax
 import jax.numpy as jnp
-from .barriernet import BarrierNet, require_x64, features as unicycle_features
-from .controllers import solve_qp2
-from .quad2d_control import FlightConfig
 
+from .barriernet import BarrierNet, require_x64, features as unicycle_features
+
+from .controllers import solve_qp2
+
+from .quad2d_control import FlightConfig
 
 def contract(config=FlightConfig()):
     c=config.robot
@@ -24,14 +21,12 @@ def contract(config=FlightConfig()):
         solver='default exact-JAX QP; native1e-6 diagonal, post-clip and actual FP32 residual check',
         deployment_slack=False,oa_guidance=False)
 
-
 def features(state,goal,obstacles,mask,radius=.3):
     # The selection, dummy and bearing conventions are identical across native
     # 2D robots. Only the six-state context and speed feature differ.
     surrogate=jnp.concatenate((state[:3],jnp.linalg.norm(state[3:5],keepdims=True)))
     z,ctx=unicycle_features(surrogate,goal,obstacles,mask,radius)
     return z,jnp.concatenate((state,goal,ctx[6:]))
-
 
 def nominal(state,goal,config=FlightConfig()):
     """Original Quad2D.nominal_input gains and actuator clipping."""
@@ -44,7 +39,6 @@ def nominal(state,goal,config=FlightConfig()):
     torque=jnp.clip(.05*error-.05*state[5],-1.,1.)
     return jnp.clip(.5*jnp.stack((thrust+torque/c.radius,thrust-torque/c.radius)),c.force_min,c.force_max)
 
-
 def constraints(state,obstacles,parameters,radius=.3):
     """Exact native static-center relative-degree-two flight rows."""
     require_x64()
@@ -56,7 +50,6 @@ def constraints(state,obstacles,parameters,radius=.3):
     G=-jnp.repeat(coefficient[:,None],2,axis=1)
     rhs=drift+jnp.sum(parameters,axis=-1)*derivative+jnp.prod(parameters,axis=-1)*barrier
     return G,rhs
-
 
 def soft_training_qp(u_nom,G,h):
     """Native slack objective, solved in collective/differential coordinates.
@@ -77,12 +70,10 @@ def soft_training_qp(u_nom,G,h):
     cost=.5*diagonal*jnp.sum(points**2,axis=-1)-jnp.sum(points*u_nom,axis=-1)+.5*rho*jnp.sum(violation**2,axis=-1)
     return points[jnp.argmin(cost)]
 
-
 def bounded_qp(u_nom,G,h,lower,upper,diagonal=1.):
     A=jnp.concatenate((G,jnp.eye(2),-jnp.eye(2)))
     b=jnp.concatenate((h,jnp.full(2,upper),jnp.full(2,-lower)))
     return solve_qp2(u_nom/diagonal,A,b,jnp.full(2,diagonal,G.dtype))
-
 
 def deployment_qp(u_nom,G,h,config=FlightConfig()):
     c=config.robot;solved=bounded_qp(u_nom,G,h,1.,10.,1+1e-6)
@@ -91,7 +82,6 @@ def deployment_qp(u_nom,G,h,config=FlightConfig()):
                           jnp.max(jnp.concatenate((c.force_min-clipped,clipped-c.force_max))))
     valid=solved.feasible&jnp.all(jnp.isfinite(clipped))&(violation<=c.qp_tolerance)
     return clipped,valid,violation,solved.control,solved.feasible,solved.max_violation
-
 
 def train_prediction(model,params,z,ctx,u_ref,mean,std,radius=.3):
     u_nom,p=model.apply({'params':params},(z-mean)/std,ctx[:6],ctx[6:8],u_ref)

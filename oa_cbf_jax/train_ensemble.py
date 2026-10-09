@@ -5,13 +5,16 @@ Each worker sees exactly one GPU, avoiding this host's broken peer-copy path.
 """
 
 import argparse
+
 import os
+
 from pathlib import Path
+
 import subprocess
+
 import time
 
 from .io import write_json
-
 
 def run(dataset,output,width=96,layers=3,epochs=300,encoder='gat',seed_base=101,flight_history_invariant=False):
     if isinstance(seed_base,bool) or not isinstance(seed_base,int) or not 0<=seed_base<=2**32-4:

@@ -1,20 +1,30 @@
 """Strict research bundles and inference with explicitly precompiled signatures."""
 
 import argparse
+
 from dataclasses import asdict
+
 import json
+
 from pathlib import Path
+
 import time
+
 import numpy as np
+
 import jax
+
 import jax.numpy as jnp
+
 from flax import serialization
 
-from .dataset import sha256,load_dataset
-from .io import write_json
-from .models import make_model,GATConfig,unicycle_graph,predict_ensemble
-from .uncertainty import cs_disagreement,worst_member_cvar
+from .io import sha256, load_dataset
 
+from .io import write_json
+
+from .models import make_model, GATConfig, unicycle_graph, predict_ensemble
+
+from .uncertainty import cs_disagreement, worst_member_cvar
 
 def export_pilot(members,output):
     if len(members)!=4:raise ValueError('This initial ensemble contract requires four complete members')
@@ -37,7 +47,7 @@ def export_pilot(members,output):
         if any(s.get(key)!=settings[0].get(key) for s in settings):
             raise ValueError(f'Incompatible member {key}')
     if 'ensemble_sampling' in settings[0]:
-        from .ensemble_sampling import validate_contract
+        from .training_extensions import validate_contract
         for setting in settings:validate_contract(setting)
     domain=settings[0].get('gain_domain',dict(lower=.3,upper=4.))
     gain_dimension=settings[0].get('gain_dimension',2)
@@ -80,10 +90,9 @@ def export_pilot(members,output):
         info['clipped_risk_components']=settings[0]['clipped_risk_components']
     write_json(root/'manifest.json',info)
     if 'local_unicycle_reflection' in settings[0]:
-        from .local_unicycle_reflection_training import bind_export
+        from .unicycle_training import bind_export
         bind_export(members,root)
     return root
-
 
 class ResearchPredictor:
     def __init__(self,bundle,allow_uncalibrated=False,device=None):
@@ -105,11 +114,11 @@ class ResearchPredictor:
         self.device=device or jax.devices()[0]
         self.model=make_model(GATConfig(**self.metadata['architecture']))
         if self.model.config.flight_gain_attention:
-            from .quad2d_gain_attention import contract as gain_attention_contract
+            from .quad2d_features import gain_attention_contract
             if self.metadata.get('flight_gain_attention_contract')!=gain_attention_contract() or self.metadata.get('graph_features')!=40:
                 raise ValueError('Missing candidate-obstacle attention provenance')
         if self.model.config.flight_constraint_features:
-            from .quad2d_constraint_features import contract
+            from .quad2d_features import contract
             if (self.metadata.get('flight_constraint_features_contract') != contract()
                     or self.metadata.get('graph_features') != 40):
                 raise ValueError('Missing observed flight coefficient provenance')
@@ -179,7 +188,6 @@ class ResearchPredictor:
         if mask.shape!=features.shape[:2] or gains.shape!=(features.shape[0],gains.shape[1],self.gain_dimension):raise ValueError('Invalid feature inference shape')
         args=tuple(jax.device_put(np.asarray(a,dtype=bool if i==1 else np.float32),self.device) for i,a in enumerate((features,mask,gains)))
         return self._compiled_features[key](self.params,*args)
-
 
 def evaluate_pilot(bundle,dataset,output):
     predictor=ResearchPredictor(bundle,allow_uncalibrated=True)

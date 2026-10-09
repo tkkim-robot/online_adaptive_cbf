@@ -1,24 +1,24 @@
-"""Lossless shared-prefix storage for NEW bicycle branch traces.
+"""Shared bicycle trace storage implementation."""
 
-No simulation is regenerated. Only byte-identical recorded exogenous arrays
-are shared across gains within a replica. Legacy NPZ traces remain readable.
-Collection integration and realistic capacity qualification are separate gates.
-"""
 from contextlib import contextmanager
+
 import hashlib
+
 import io
+
 import json
+
 from pathlib import Path
 
 import numpy as np
 
 MARKER='__oa_cbf_shared_prefix_v1__'
+
 FIELDS=('observed_obstacles','raw_observed_obstacles','innovation_o','innovation_x')
+
 STORAGE_SCHEMA='byte_exact_shared_prefix_v1'
 
-
 def _digest(data):return hashlib.sha256(data).hexdigest()
-
 
 def _neighbor(root,name):
     if not isinstance(name,str) or Path(name).name!=name or not name.endswith('.npz'):
@@ -27,11 +27,9 @@ def _neighbor(root,name):
     if path.resolve().parent!=root.resolve():raise ValueError('Shared trace dependency leaves its directory')
     return path
 
-
 def _arrays(data):
     with np.load(io.BytesIO(data),allow_pickle=False) as archive:
         return {k:archive[k] for k in archive.files}
-
 
 def verify_index_dependencies(directory,entries):
     """Recheck audited records and every shared file before consuming labels.
@@ -58,7 +56,6 @@ def verify_index_dependencies(directory,entries):
             if neighbor not in checked:checked[neighbor]=_digest(neighbor.read_bytes())
             if checked[neighbor]!=digest:raise ValueError('Changed shared trace dependency')
     return dict(records=len(entries),shared_files=len(checked),all_shared_dependencies_verified=True)
-
 
 @contextmanager
 def open_trace(path,expected_sha256=None):
@@ -90,7 +87,6 @@ def open_trace(path,expected_sha256=None):
                 raise ValueError('Shared trace dtype/shape/length mismatch')
             values[key]=array[:shape[0]]
     yield values
-
 
 def write_query_traces(directory,names,payloads,replicas,stem):
     """Write one complete gain/replica query without overwriting old evidence.

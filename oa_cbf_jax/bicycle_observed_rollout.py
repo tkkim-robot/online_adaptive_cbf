@@ -1,14 +1,22 @@
-"""Actual acquired-history bicycle branches with censored physical futures."""
-import jax
-import jax.numpy as jnp
-from .bicycle import integrate_bicycle,bicycle_state_violation
-from .bicycle_control import BicycleControlConfig,bicycle_control,bicycle_arrived,constant,observed32
-from .bicycle_guidance import guided_bicycle_control,BicycleGuidanceConfig
-from .bicycle_observation import unit_errors,observe,speed_error_bound
-from .bicycle_rollout import RUNNING,GOAL,COLLISION,INFEASIBLE,TIMEOUT,INADMISSIBLE,PLANNER_FAILURE,STATE_BOUND
-from .dynamics import signed_clearance,swept_disk_clearance
-from .routing import physical_route_coordinate
+"""Shared bicycle observed rollout implementation."""
 
+import jax
+
+import jax.numpy as jnp
+
+from .bicycle import integrate_bicycle, bicycle_state_violation
+
+from .bicycle_control import BicycleControlConfig, bicycle_control, bicycle_arrived, constant, observed32
+
+from .bicycle_guidance import guided_bicycle_control, BicycleGuidanceConfig
+
+from .bicycle_observation import unit_errors, observe, speed_error_bound
+
+from .bicycle_rollout import RUNNING, GOAL, COLLISION, INFEASIBLE, TIMEOUT, INADMISSIBLE, PLANNER_FAILURE, STATE_BOUND
+
+from .dynamics import signed_clearance, swept_disk_clearance
+
+from .routing import physical_route_coordinate
 
 def make_observed_episode(config=BicycleControlConfig(),steps=80,guidance=BicycleGuidanceConfig(),stop_at_goal=True,pulse_steps=None,bounded_motion=False):
     if pulse_steps is not None and (type(pulse_steps) is not int or not 1<=pulse_steps<=steps):

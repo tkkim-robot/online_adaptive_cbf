@@ -1,9 +1,12 @@
-"""NumPy audit of one-step observation margins; never an online policy input."""
-import numpy as np
-from fractions import Fraction
-from .bicycle_control import BicycleControlConfig
-from .bicycle_audit import reference_barrier
+"""Shared bicycle margin audit implementation."""
 
+import numpy as np
+
+from fractions import Fraction
+
+from .bicycle_control import BicycleControlConfig
+
+from .bicycle_audit import reference_barrier
 
 def fused_linear_observation(position,velocity,duration):
     """Independently reproduce FP64 fused motion followed by FP32 sensing.
@@ -24,7 +27,6 @@ def fused_linear_observation(position,velocity,duration):
         result[index]=np.float32(float(exact))
     return result.astype(float)
 
-
 def predicted_observation(state, control, obstacles, config=BicycleControlConfig(), *, linear_fused=True):
     """Independent complex-plane held-input displacement, then sensor rounding."""
     x=np.asarray(state,float);u=np.asarray(control,float);o=np.asarray(obstacles,float);dt=config.robot.dt
@@ -37,7 +39,6 @@ def predicted_observation(state, control, obstacles, config=BicycleControlConfig
     future[...,:2]=(fused_linear_observation(o[...,:2],o[...,3:5],dt) if linear_fused
                     else (o[...,:2]+dt*o[...,3:5]).astype(np.float32).astype(float))
     return y.astype(np.float32).astype(float),future.astype(np.float32).astype(float)
-
 
 def reference_margin(state,control,obstacles,mask,noise,config=BicycleControlConfig(), *, linear_fused=True):
     x=np.asarray(state,float);u=np.asarray(control,float);o=np.asarray(obstacles,float);n=np.asarray(noise,float)
@@ -62,7 +63,6 @@ def reference_margin(state,control,obstacles,mask,noise,config=BicycleControlCon
     return dict(lower=np.min(lower,axis=-1),per_obstacle=lower,predicted_state=y,predicted_obstacles=future,
         ego_position_error=ep_ego,ego_heading_error=et_ego,ego_speed_error=ev_ego,obstacle_position_error=ep_obs,
         obstacle_velocity_error=ev_obs,position_error=ep,velocity_error=relative_ev,radius_error=er,rounding_allowance=rounding)
-
 
 def audit_margin_trace(d,config=BicycleControlConfig()):
     indices=np.flatnonzero(d['active']);mask=np.asarray(d['mask'],bool)

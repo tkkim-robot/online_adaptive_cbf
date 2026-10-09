@@ -1,27 +1,46 @@
-"""Grouped flight data from genuine nonlinear branches; initial-state pilot."""
+"""Quad2d data functions and shared contracts."""
+
 import argparse
+
 from concurrent.futures import ThreadPoolExecutor
+
 from dataclasses import asdict
+
 import json
+
 from pathlib import Path
+
 import time
+
 import jax
+
 import jax.numpy as jnp
+
 import numpy as np
+
 from scipy.stats import qmc
-from .quad2d_control import FlightConfig,flight_config_from_contract,normalize_flight_contract
-from .quad2d_features import flight_graph,SCHEMA as GRAPH_SCHEMA
-from .quad2d_rollout import flight_branch,NAMES,GOAL,TIMEOUT,COLLISION
-from .multiscale_scenes import scene as geometry
+
+from .quad2d_control import FlightConfig, flight_config_from_contract, normalize_flight_contract
+
+from .quad2d_features import flight_graph, SCHEMA as GRAPH_SCHEMA
+from .quad2d_rollout import flight_branch, NAMES
+from .simulation import GOAL, TIMEOUT, COLLISION
+
+from .scenes import multiscale_scenes_scene as geometry
+
 from .scenes import DIVERSE_FAMILIES
+
 from .routing import plan_route
-from .dataset import sha256,source_fingerprint,load_dataset
+
+from .io import sha256, source_fingerprint, load_dataset
+
 from .io import write_json
 
 SCHEMA='oa_cbf_quad2d_initial_flight_v1'
-TARGETS=['failure_capped_clearance_cost','observed_prefix_route_progress_div_horizon_cruise_distance']
-EVENTS=['collision_first','any_adverse_termination']
 
+TARGETS=['failure_capped_clearance_cost','observed_prefix_route_progress_div_horizon_cruise_distance']
+
+EVENTS=['collision_first','any_adverse_termination']
 
 def augment_gain_bank(base,queries,seed,upper=8.):
     """Preserve the audited bank, cover its upper boundary, then add Sobol pairs.
@@ -55,7 +74,6 @@ def augment_gain_bank(base,queries,seed,upper=8.):
     if upper==16.:contract.update(schema='preserved_bank_single_ceiling_expansion_v1',lower=.5,upper=16.,original_upper=8.,additional_pairs='Only outside original[.5,8]^2; original bank preserved exactly')
     return bank,contract
 
-
 def load_gain_bank(dataset,config=None,queries=None):
     """Read a frozen, audited physical candidate bank with its provenance."""
     root=Path(dataset);m=json.loads((root/'manifest.json').read_text())
@@ -72,7 +90,6 @@ def load_gain_bank(dataset,config=None,queries=None):
         raise ValueError('Invalid frozen candidate bank')
     return bank,dict(dataset=str(root.resolve()),manifest_sha256=sha256(root/'manifest.json'),index_sha256=sha256(root/'index.json'),
         shard_file=entry['file'],shard_sha256=entry['sha256'],candidates=bank.tolist())
-
 
 def prepare(output,groups=1024,seed=6301,workers=28,stationary_obstacles=False):
     if groups<64 or groups%8:raise ValueError('At least64 groups balanced over8families')
@@ -100,7 +117,6 @@ def prepare(output,groups=1024,seed=6301,workers=28,stationary_obstacles=False):
         limitations='Initial-observation pilot, not visited-state coverage, generalization proof, ground-contact model or final dataset. Static route is not a dynamically feasible witness.')
     write_json(root/'manifest.json',manifest);print(json.dumps(manifest),flush=True)
 
-
 def collection_kernels(config,gains,queries,replicas,horizon,guidance):
     """The actual label, graph and trace kernels, shared by collection/timing."""
     if np.asarray(gains).shape != (queries*replicas,2):
@@ -113,7 +129,6 @@ def collection_kernels(config,gains,queries,replicas,horizon,guidance):
     trace=jax.jit(lambda *args:flight_branch(*args,config=config,steps=horizon,guidance=guidance))
     return summaries,graph,trace
 
-
 def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shard_index=0,shards=1,guidance_horizon=0,gain_dataset=None,noise_clearance_weight=0.,gain_augmentation_seed=None,terminal_transition_distance=0.,performance_target='route',gain_upper=8.):
     if (isinstance(gain_upper,bool) or gain_upper not in (8.,16.)
             or (gain_upper==16. and (gain_dataset is None or gain_augmentation_seed is None or queries!=64))):
@@ -122,8 +137,8 @@ def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shar
     sm=json.loads((source/'manifest.json').read_text());records=json.loads((source/'scenes.json').read_text())
     config=flight_config_from_contract(sm['config'])
     if sm['scenes_sha256']!=sha256(source/'scenes.json'):raise ValueError('Source contract changed')
-    from .quad2d_guidance import GuidanceConfig,NoiseClearanceGuidanceConfig,TerminalGuidanceConfig
-    from .quad2d_relabel import conditional_labels,TARGETS as CONDITIONAL_TARGETS
+    from .quad2d_guidance import GuidanceConfig, NoiseClearanceGuidanceConfig, TerminalGuidanceConfig
+    from .quad2d_data import conditional_labels, RELABEL_TARGETS as CONDITIONAL_TARGETS
     guidance=GuidanceConfig(horizon=guidance_horizon) if guidance_horizon else None
     if noise_clearance_weight:
         if guidance is None:raise ValueError('Noise-aware score requires predictive guidance')
@@ -181,7 +196,7 @@ def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shar
         manifest['controller'].update(nominal='receding observed-route velocity/pitch guidance',predictive_guidance=asdict(guidance),
             initial_gain=[4.,4.],graph_schema=GRAPH_SCHEMA,observation_context='initial_or_visited_40')
     if terminal_transition_distance:
-        from .quad2d_task_targets import contract
+        from .quad2d_control import contract
         manifest['controller']['performance_target']=contract(performance_target);manifest['targets']=list(manifest['targets']);manifest['targets'][1]=contract(performance_target)['target']
     executable=None;graph_executable=None;trace_executable=None;compile_seconds=0.
     write_json(root/'manifest.json',manifest);index=[]
@@ -215,7 +230,7 @@ def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shar
             initial_state=x,goal=g,obstacles=o,obstacle_mask=m,points=points,route_mask=rm,noise=n,ready=ready,seeds=seeds,**summary)
         if guidance is not None:payload.update(cursor=cursor,previous_control=previous_control,previous_gain=previous_gain)
         if terminal_transition_distance:
-            from .quad2d_task_targets import values
+            from .quad2d_control import values
             payload['target'][...,1]=values(payload,manifest)
         if not np.isfinite(target).all():raise ValueError('Nonfinite physical target')
         path=root/f'shard_{number:05d}.npz';np.savez_compressed(path,**payload)
@@ -241,7 +256,6 @@ def collect(source,output,queries=16,replicas=4,horizon=160,shard_groups=16,shar
             branches=int(status.size),steps=int(summary['steps'].sum()),outcomes={NAMES[int(k)]:int(v) for k,v in zip(*np.unique(status,return_counts=True))},seconds=time.perf_counter()-tick,execution_seconds=execution_seconds)
         index.append(entry);write_json(root/'index.json',index);print(json.dumps(entry),flush=True)
     write_json(root/'worker_complete.json',dict(completed=True,seconds=time.perf_counter()-start,summary_signatures=1,graph_signatures=1,ahead_of_time=True,compile_seconds=compile_seconds))
-
 
 def merge(parts,output):
     root=Path(output);root.mkdir(parents=True,exist_ok=False);parts=list(map(Path,parts))
@@ -277,7 +291,17 @@ def merge(parts,output):
     report=dict(partitions=partitions,groups=len(ids),workers=workers,contract_valid=all(p['groups']>0 and p['steps']>0 and min(p['target_std'])>1e-6 for p in partitions.values()))
     write_json(root/'contract_audit.json',report);print(json.dumps(report),flush=True)
     if not report['contract_valid']:raise ValueError('Flight labels lack required integrity/variation; do not train')
-    # independent physical audit writes complete.json only after its own gate.
+
+
+
+RELABEL_TARGETS=['conditional_negative_min_clearance_div_0.3_capped_below_minus_2','observed_prefix_route_progress_div_horizon_cruise_distance']
+
+def conditional_labels(status,clearance,progress):
+    observed=np.isin(status,[GOAL,TIMEOUT,COLLISION])
+    risk=-np.minimum(clearance,.6)/.3
+    targets=np.stack((np.where(observed,risk,0.),progress),axis=-1).astype(np.float32)
+    masks=np.stack((observed,np.ones_like(observed)),axis=-1)
+    return targets,masks
 
 
 if __name__=='__main__':

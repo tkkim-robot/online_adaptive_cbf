@@ -1,19 +1,30 @@
-"""Observation-only learned scalar-gain selection with explicit research gates."""
-from dataclasses import dataclass,asdict
-from pathlib import Path
-import math
-import time
-import jax
-import jax.numpy as jnp
-import numpy as np
-from .bicycle_experiment import read,control_config
-from .bicycle_features import bicycle_graph,bicycle_inference_graph
-from .bicycle_predictive_calibration import SCHEMA as FIT_SCHEMA
-from .inference import ResearchPredictor
-from .models import predict_ensemble
-from .uncertainty import cs_disagreement
-from .dataset import sha256
+"""Bicycle policy functions and shared contracts."""
 
+from dataclasses import dataclass, asdict
+
+from pathlib import Path
+
+import math
+
+import time
+
+import jax
+
+import jax.numpy as jnp
+
+import numpy as np
+
+from .bicycle_control import read, control_config
+
+from .bicycle_features import bicycle_graph, bicycle_inference_graph
+
+from .inference import ResearchPredictor
+
+from .models import predict_ensemble
+
+from .uncertainty import cs_disagreement
+
+from .io import sha256
 
 @dataclass(frozen=True)
 class BicyclePolicyConfig:
@@ -35,7 +46,6 @@ class BicyclePolicyConfig:
         if self.adverse_progress_penalty < 0:
             raise ValueError('Adverse-progress penalty must be nonnegative')
 
-
 def select_gain(means,variances,logits,previous,bank,temperature,bias,cs_limit,config=BicyclePolicyConfig()):
     # E,B,K,D -> B,K,E,1 for risk disagreement. Variances already calibrated.
     risk_means=jnp.transpose(means[...,:1],(1,2,0,3));risk_variances=jnp.transpose(variances[...,:1],(1,2,0,3))
@@ -55,34 +65,34 @@ def select_gain(means,variances,logits,previous,bank,temperature,bias,cs_limit,c
     return dict(controller_gain=gain,selected_index=jnp.where(any_,index,-1),uncertainty_fallback=~any_,accepted=accepted,
         cs_score=cs,finite_member_cvar=risk,adverse_probability=adverse,predicted_progress=progress,ranking_score=score)
 
-
 class BicycleSelector:
     def __init__(self,bundle,prediction_fit,trajectory_gate=None,reference_recording=False,config=BicyclePolicyConfig(),numerical_test=False):
+        from .bicycle_predictive_calibration import SCHEMA as FIT_SCHEMA
         self.predictor=ResearchPredictor(bundle,allow_uncalibrated=True);self.metadata=self.predictor.metadata
         from .bicycle_gain_contract import model_bank
         self.bank=model_bank(self.metadata)
         self.motion_history=self.predictor.model.config.bicycle_motion_history
         if self.motion_history:
-            from .bicycle_motion_runtime import validate_metadata
+            from .bicycle_policy import validate_metadata
             validate_metadata(self.metadata)
         self.fit_path=Path(prediction_fit);self.fit=read(self.fit_path);self.config=config;self.reference_recording=reference_recording
         readout_refit=bool(self.metadata.get('event_readout_refit'))
         if readout_refit:
-            from .bicycle_event_policy import validate_fit
+            from .bicycle_event_bundle import validate_fit
             validate_fit(self.fit,bundle)
             if jax.default_backend()!='cpu':raise ValueError('Readout policy is CPU-qualified only')
         elif self.predictor.model.config.encoder=='nearest_fc':
-            from .nearest_fc_qualification import validate_fit
+            from .nearest_fc import validate_fit
             validate_fit(self.fit,bundle)
         if self.metadata.get('offline_wide_gain_pilot') and self.fit.get('bicycle_gain_contract')!=self.metadata['bicycle_gain_contract']:
             raise ValueError('Wide-gain fit requires the exact qualified candidate contract')
         if self.predictor.model.config.bicycle_candidate_encoding:
-            from .bicycle_candidate_features import validate_metadata,validate_numerical_mode
+            from .bicycle_features import validate_metadata, validate_numerical_mode
             validate_metadata(self.metadata)
             if self.fit.get('diagnostic_identity_only'):
                 validate_numerical_mode(self.fit,reference_recording,numerical_test)
             elif not readout_refit:
-                from .bicycle_candidate_calibration import validate_fitted_model
+                from .bicycle_predictive_calibration import validate_fitted_model
                 validate_fitted_model(self.fit,bundle)
         if self.fit.get('diagnostic_identity_only') and not (numerical_test and reference_recording):
             raise ValueError('Identity test transformation is not a calibrated policy fit')
@@ -104,7 +114,7 @@ class BicycleSelector:
         else:
             gate=read(trajectory_gate)
             if readout_refit:
-                from .bicycle_event_policy import validate_gate
+                from .bicycle_event_bundle import validate_gate
                 validate_gate(trajectory_gate,self.fit,bundle)
             if (gate['schema']!='oa_cbf_bicycle_trajectory_gate_v70' or gate['prediction_fit_sha256']!=sha256(self.fit_path)
                     or gate['weights_sha256']!=self.metadata['weights_sha256'] or asdict(BicyclePolicyConfig(**gate['policy_config']))!=asdict(config)
@@ -124,13 +134,13 @@ class BicycleSelector:
             features,node_mask=jax.vmap(lambda *a:graph(*a,config=self.robot))(x,goal,obstacles,mask,points,route_mask,cursor,previous_control,previous_gain,noise)
             if self.motion_history:
                 if past_positions is None or history_elapsed is None:raise ValueError('Observed motion history is required')
-                from .bicycle_motion_features import append_history
+                from .bicycle_features import append_history
                 features=jax.vmap(append_history)(features,node_mask,x,obstacles,past_positions,noise,history_elapsed)
             gains=jnp.broadcast_to(bank,(len(x),len(self.bank),1));raw=predict_ensemble(self.predictor.model,params,features,node_mask,gains)
             means=raw['mean']*scale+mean;variances=jnp.exp(raw['log_variance'])*scale**2*variance_scale
             result=select_gain(means,variances,raw['event_logits'],previous_gain,bank,temperature,bias,threshold,config)
             if config.incumbent_progress and not reference_recording:
-                from .bicycle_incumbent import filter_proposal
+                from .bicycle_policy import filter_proposal
                 result=filter_proposal(result,x,goal,obstacles,mask,points,route_mask,cursor,
                     previous_gain,noise,bank,self.robot,self.guidance)
             if reference_recording:
@@ -159,7 +169,7 @@ class BicycleSelector:
         args=tuple(jax.device_put(np.asarray(a,dtype=bool if i in (3,5) else np.float32),self.predictor.device) for i,a in enumerate(raw))
         args+=(jnp.asarray(self.threshold),)
         if self.motion_history:
-            from .bicycle_motion_observer import WINDOW_TICKS
+            from .bicycle_observation import WINDOW_TICKS
             if past_positions is None or history_elapsed is None:raise ValueError('Observed motion history is required')
             past=np.asarray(past_positions,np.float32);elapsed=np.asarray(history_elapsed,np.float64)
             if (past.shape!=(key[0],64,2) or elapsed.shape!=(key[0],) or not np.isfinite(elapsed).all()
@@ -169,3 +179,99 @@ class BicycleSelector:
         elif past_positions is not None or history_elapsed is not None:
             raise ValueError('History inputs supplied to a model without history')
         return self._compiled[key](self.predictor.params,*args)
+
+
+SCHEMA='bicycle_observed_constraint_runtime_qualification'
+
+def check_files(files):
+    for path,digest in files.items():
+        if sha256(path)!=digest:raise ValueError('Changed runtime input: '+path)
+
+def validate_qualification(path,bundle,dataset):
+    if path is None:raise ValueError('Reviewed constraint runtime qualification is required')
+    report=read(path);meta=read(Path(bundle)/'manifest.json');encoder=meta['architecture']['encoder']
+    if (report.get('schema')!=SCHEMA or report.get('status')!='passed'
+            or report['dataset_manifest_sha256']!=sha256(Path(dataset)/'manifest.json')
+            or report['dataset_index_sha256']!=sha256(Path(dataset)/'index.json')
+            or report['models'][encoder]['bundle_manifest_sha256']!=sha256(Path(bundle)/'manifest.json')
+            or report['models'][encoder]['weights_sha256']!=sha256(Path(bundle)/'weights.msgpack')
+            or not report['models'][encoder]['parity_passed']
+            or report['benchmark_parents_used'] or report['reserved_calibration_parents_used']):
+        raise ValueError('Changed or incomplete constraint runtime qualification')
+    return report
+
+
+def comparison(selection, previous, bank):
+    matches = bank[None, :, 0] == previous[:, None]
+    index = jnp.argmax(matches, axis=1)
+    rows = jnp.arange(len(previous))
+    current = selection['ranking_score'][rows, index]
+    proposed = selection['ranking_score'][rows, jnp.maximum(selection['selected_index'], 0)]
+    needed = ((matches.sum(axis=1) == 1) & jnp.isfinite(current) & jnp.isfinite(proposed)
+              & (selection['selected_index'] >= 0)
+              & (selection['controller_gain'] != previous) & (proposed <= current))
+    return needed, current, proposed
+
+def retain(selection, previous, bank, checked, feasible):
+    needed, current, proposed = comparison(selection, previous, bank)
+    held = needed & checked & feasible
+    result = dict(selection)
+    result.update(controller_gain=jnp.where(held, previous, selection['controller_gain']),
+        selected_index=jnp.where(held, -3, selection['selected_index']),
+        # A progress-based hold is distinct from an uncertainty fallback.
+        uncertainty_fallback=jnp.where(held, False, selection['uncertainty_fallback']),
+        incumbent_comparison_needed=needed, incumbent_progress_hold=held,
+        incumbent_previous_score=current, incumbent_proposed_score=proposed,
+        incumbent_witness_checked=checked, incumbent_witness_feasible=feasible,
+        selection_eligible=selection['accepted'] & ~held[:, None])
+    return result
+
+def filter_proposal(selection, x, goal, obstacles, mask, points, route_mask, cursor,
+                    previous, noise, bank, config, guidance):
+    """Check only the current gain when a learned proposal would score worse.
+
+    The current gain uses the unchanged predictive controller and original QP.
+    No alternative gain is solved here, and no physical future is consulted.
+    The ordinary final QP still checks whichever gain is actually applied.
+    """
+    from .bicycle_guidance import guided_bicycle_control
+    from .bicycle_observation import speed_error_bound
+    needed, _, _ = comparison(selection, previous, bank)
+
+    def witness(a, g, o, m, p, rm, c, gain, n):
+        qp, h, domain, *_ = guided_bicycle_control(a, g, o, m, gain, p, rm, c,
+            config, guidance, speed_error_bound(n), noise=n)
+        feasible = qp.feasible & (h >= -config.qp_tolerance) & (domain > 0)
+        return feasible, qp.control, h, domain
+
+    batch = len(previous)
+    empty = (jnp.zeros(batch, bool), jnp.zeros((batch, 2), jnp.float32),
+             jnp.zeros(batch, jnp.float32), jnp.zeros(batch, jnp.float32))
+    feasible, control, h, domain = jax.lax.cond(jnp.any(needed),
+        lambda _: jax.vmap(witness)(x, goal, obstacles, mask, points, route_mask, cursor, previous, noise),
+        lambda _: empty, operand=None)
+    result = retain(selection, previous, bank, needed, needed & feasible)
+    result.update(incumbent_witness_control=jnp.where(needed[:, None], control, 0.),
+                  incumbent_witness_h=jnp.where(needed, h, 0.),
+                  incumbent_witness_domain=jnp.where(needed, domain, 0.))
+    return result
+
+
+from .bicycle_features import append_history, motion_features_contract as contract, MOTION_FEATURES_SCHEMA as MOTION_RUNTIME_SCHEMA
+
+def validate_metadata(metadata):
+    if (metadata.get('graph_features')!=39
+            or metadata.get('architecture',{}).get('bicycle_motion_history') is not True
+            or metadata.get('bicycle_motion_history_contract')!=contract()
+            or metadata.get('bicycle_contract',{}).get('graph_schema')!=MOTION_RUNTIME_SCHEMA):
+        raise ValueError('Changed observed motion-history model contract')
+    from .bicycle_features import SCHEMA as ORIGINAL_SCHEMA
+    if metadata['bicycle_contract'].get('source_graph_schema')!=ORIGINAL_SCHEMA:
+        raise ValueError('Changed original graph source schema')
+
+def graph(x,goal,obstacles,mask,points,route_mask,cursor,previous_control,previous_gain,noise,
+          past_positions,elapsed,*,config,compute_dtype):
+    from .bicycle_features import bicycle_inference_graph
+    features,node_mask=bicycle_inference_graph(x,goal,obstacles,mask,points,route_mask,cursor,
+        previous_control,previous_gain,noise,config=config,compute_dtype=compute_dtype)
+    return append_history(features,node_mask,x,obstacles,past_positions,noise,elapsed),node_mask

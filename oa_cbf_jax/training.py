@@ -5,37 +5,49 @@ msgpack (no Python-object pickle); inference calibration is a separate artifact.
 """
 
 import argparse
+
 from dataclasses import asdict
+
 import hashlib
+
 import json
+
 import math
+
 from pathlib import Path
+
 import time
+
 import numpy as np
+
 import jax
+
 import jax.numpy as jnp
+
 import optax
+
 from flax import serialization
+
 from flax.training import train_state
 
-from .dataset import load_dataset,sha256,source_fingerprint
+from .io import load_dataset, sha256, source_fingerprint
+
 from .io import write_json
-from .models import make_model,GATConfig
+
+from .models import make_model, GATConfig
 
 DATA_KEYS=['features','node_mask','gains','target','target_mask','events','event_mask']
-
 
 def parent_bootstrap(group_ids,rng,eligible=None):
     ids,inverse,frequencies=np.unique(group_ids,return_inverse=True,return_counts=True)
     draws=rng.integers(0,len(ids),size=len(ids));multiplicity=np.bincount(draws,minlength=len(ids))
     weights=(multiplicity[inverse]/frequencies[inverse]).astype(np.float32)
     if eligible is not None:
-        from .local_unicycle_supervision import parent_live_weights
+        from .unicycle_training import parent_live_weights
         weights=parent_live_weights(group_ids,eligible,multiplicity)
     return weights,dict(ids=ids.tolist(),multiplicity=multiplicity.tolist(),row_weights=weights.tolist(),
         interpretation=('Parent bootstrap with total weight shared across LIVE acquired observations; absorbing observations have zero weight.'
             if eligible is not None else 'Parent bootstrap with total weight shared across its acquired visits; validation parents equal total weight.'))
-
 
 def normalization(data,parent_weighted=False):
     means=[];scales=[]
@@ -55,7 +67,6 @@ def normalization(data,parent_weighted=False):
         means.append(float(mean));scales.append(max(float(scale),.05))
     return dict(target_mean=means,target_scale=scales,features='fixed physical units from the dataset graph schema')
 
-
 def prepare(data,norm):
     result={k:np.asarray(data[k]) for k in DATA_KEYS}
     result['target']=((result['target']-np.asarray(norm['target_mean']))/np.asarray(norm['target_scale'])).astype(np.float32)
@@ -65,7 +76,6 @@ def prepare(data,norm):
         result['reserve_target']=np.where(result['reserve_mask'],
             (data['reserve_target']-norm['reserve_mean'])/norm['reserve_scale'],0.).astype(np.float32)
     return result
-
 
 def progress_contrast_loss(prediction,target,valid,group_weight,replicas,normalization='none'):
     """Learn within-query progress differences, averaging paired replicas first.
@@ -90,7 +100,6 @@ def progress_contrast_loss(prediction,target,valid,group_weight,replicas,normali
     weight=group_weight*jnp.all(valid,axis=1)
     return jnp.sum(jnp.mean(difference**2,axis=1)*weight)/jnp.maximum(jnp.sum(weight),1.)
 
-
 def progress_contrast_supported(manifest, encoder):
     if encoder not in ('gat', 'matched_fc', 'nearest_fc'):
         return False
@@ -102,13 +111,12 @@ def progress_contrast_supported(manifest, encoder):
                               'oa_cbf_quad3d_wide_gain_history_hurdle_v104'):
         return True
     if manifest['schema'] == 'oa_cbf_quad2d_guided_hurdle_v1':
-        from .quad2d_task_targets import contract
+        from .quad2d_control import contract
         target = contract('terminal_task')
         return (manifest.get('weight_fit_authorized') is True
                 and manifest.get('controller', {}).get('performance_target') == target
                 and manifest.get('targets', [None, None])[1] == target['target'])
     return False
-
 
 def validate_contrast_layout(data, replicas):
     """Consecutive replicas must represent the same queried gain, not neighbors."""
@@ -119,13 +127,12 @@ def validate_contrast_layout(data, replicas):
     if not np.array_equal(shaped, np.broadcast_to(shaped[:, :, :1], shaped.shape)):
         raise ValueError('Progress contrast requires consecutive same-gain replicas')
 
-
 def loss_and_metrics(model,params,batch,group_weight,progress_contrast_weight=0.,replicas=1,progress_contrast_normalization='none',reserve_auxiliary_weight=0.,variance_beta=0.,prediction=None,risk_censor_floor=None,risk_tail_objective=False,local_stop_contrast_weight=0.,flight_viable_progress_weight=0.):
     out=model.apply({'params':params},batch['features'],batch['node_mask'],batch['gains']) if prediction is None else prediction
     error=out['mean']-batch['target']
     nll=.5*(jnp.exp(-out['log_variance'])*error**2+out['log_variance']+jnp.log(2*jnp.pi))
     if risk_censor_floor is not None:
-        from .censored_risk import nll as clipped_nll, mixture_nll
+        from .clipped_inference import nll as clipped_nll, mixture_nll
         if 'risk_component_mean' in out:
             risk_nll=mixture_nll(batch['target'][...,0],out['risk_component_mean'],
                 out['risk_component_log_variance'],out['risk_component_logits'],risk_censor_floor)
@@ -150,7 +157,7 @@ def loss_and_metrics(model,params,batch,group_weight,progress_contrast_weight=0.
         extra=dict(base_loss=loss,progress_contrast_mse=contrast)
         loss=loss+progress_contrast_weight*contrast
     if local_stop_contrast_weight:
-        from .local_unicycle_stop_contrast import loss as stop_contrast_loss
+        from .unicycle_training import loss as stop_contrast_loss
         stop_contrast=stop_contrast_loss(jax.nn.sigmoid(out['event_logits'][...,1]),
             batch['events'][...,1],batch['event_mask'][...,1],group_weight,replicas)
         extra.update(base_loss=loss,stop_contrast_mse=stop_contrast)
@@ -165,21 +172,21 @@ def loss_and_metrics(model,params,batch,group_weight,progress_contrast_weight=0.
     if risk_tail_objective:
         if risk_censor_floor is None or variance_beta or reserve_auxiliary_weight:
             raise ValueError('Tail objective requires clipped-risk likelihood without other auxiliary objectives')
-        from .censored_risk import tail_loss
+        from .clipped_inference import tail_loss
         tail=tail_loss(batch['target'][...,0],out['mean'][...,0],out['log_variance'][...,0],risk_censor_floor)
         # Use exactly the existing parent/mask reduction, not branch weighting.
         tail_mean=grouped(tail[...,None],batch['target_mask'][...,:1])[0]
         objective=objective+tail_mean
         extra.update(primary_selection_loss=loss,optimization_loss=objective,upper_tail_pinball=tail_mean)
     if variance_beta:
-        from .probability_losses import variance_weighted_nll
+        from .uncertainty import variance_weighted_nll
         weighted=grouped(variance_weighted_nll(nll,out['log_variance'],variance_beta),batch['target_mask'])
         objective=jnp.mean(weighted)+jnp.mean(event_heads)
         if progress_contrast_weight:objective+=progress_contrast_weight*contrast
         if reserve_auxiliary_weight:raise ValueError('Variance weighting cannot be combined with a reserve auxiliary')
         extra.update(primary_selection_loss=loss,optimization_loss=objective,variance_weighted_nll=weighted)
     if flight_viable_progress_weight:
-        from .viable_progress import loss as viable_progress_loss
+        from .training_extensions import loss as viable_progress_loss
         viable=viable_progress_loss(out['mean'][...,1],batch['target'][...,1],
             batch['target_mask'][...,1],batch['events'],batch['event_mask'],group_weight,replicas)
         objective=objective+flight_viable_progress_weight*viable
@@ -188,7 +195,6 @@ def loss_and_metrics(model,params,batch,group_weight,progress_contrast_weight=0.
                      normalized_mae=grouped(jnp.abs(error),batch['target_mask']),
                      brier=grouped((jax.nn.sigmoid(out['event_logits'])-batch['events'])**2,batch['event_mask']),
                      variance_mean=jnp.mean(jnp.exp(out['log_variance']),axis=(0,1)))
-
 
 def make_updates(model,progress_contrast_weight=0.,replicas=1,quad3d_augmentation_seed=None,progress_contrast_normalization='none',reserve_auxiliary_weight=0.,reserve_gradient_guard=False,variance_beta=0.,flight_reflection_seed=None,risk_censor_floor=None,risk_tail_objective=False,local_stop_contrast_weight=0.,local_reflection_seed=None,flight_viable_progress_weight=0.):
     if flight_viable_progress_weight and (reserve_auxiliary_weight or reserve_gradient_guard or variance_beta or risk_tail_objective or local_stop_contrast_weight):
@@ -200,16 +206,16 @@ def make_updates(model,progress_contrast_weight=0.,replicas=1,quad3d_augmentatio
     if reserve_gradient_guard and not reserve_auxiliary_weight:raise ValueError('Gradient guard requires the reserve auxiliary')
     def batch_update(state,batch,weight):
         if local_reflection_seed is not None:
-            from .local_unicycle_reflection_training import select_orientation
+            from .unicycle_training import select_orientation
             batch=select_orientation(batch,local_reflection_seed,state.step)
         if flight_reflection_seed is not None:
-            from .quad2d_reflection_training import select_orientation
+            from .quad2d_training import select_orientation
             batch=select_orientation(batch,flight_reflection_seed,state.step)
         if quad3d_augmentation_seed is not None:
-            from .quad3d_symmetry import augment_batch
+            from .quad3d_features import augment_batch
             batch=augment_batch(batch,quad3d_augmentation_seed,state.step)
         if reserve_gradient_guard:
-            from .auxiliary_gradients import combine
+            from .training_extensions import combine
             def objectives(params):
                 _,m=loss_and_metrics(model,params,batch,weight,progress_contrast_weight,replicas,progress_contrast_normalization,reserve_auxiliary_weight,variance_beta,risk_censor_floor=risk_censor_floor,risk_tail_objective=risk_tail_objective,local_stop_contrast_weight=local_stop_contrast_weight,flight_viable_progress_weight=flight_viable_progress_weight)
                 return jnp.stack((m['primary_selection_loss'],m['event_bce'][1],m['reserve_auxiliary_mse'])),m
@@ -243,7 +249,6 @@ def make_updates(model,progress_contrast_weight=0.,replicas=1,quad3d_augmentatio
         return loss_and_metrics(model,params,data,jnp.ones(data['features'].shape[0]) if weights is None else weights,progress_contrast_weight,replicas,progress_contrast_normalization,reserve_auxiliary_weight,variance_beta,prediction,risk_censor_floor,risk_tail_objective,local_stop_contrast_weight,flight_viable_progress_weight)[1]
     return epoch_update,evaluate
 
-
 def initial_state(model,data,seed,learning_rate,total_steps,params=None,trainable_mask=None):
     template=model.init(jax.random.key(seed),data['features'][:1],data['node_mask'][:1],data['gains'][:1])['params']
     if params is None:params=template
@@ -253,12 +258,11 @@ def initial_state(model,data,seed,learning_rate,total_steps,params=None,trainabl
     schedule=optax.warmup_cosine_decay_schedule(learning_rate*.1,learning_rate,max(1,total_steps//20),total_steps,learning_rate*.05)
     optimizer=optax.chain(optax.clip_by_global_norm(1.),optax.adamw(schedule,weight_decay=1e-4))
     if trainable_mask is not None:
-        from .bicycle_motion_adapter import mask_transform
+        from .bicycle_training import mask_transform
         optimizer=optax.chain(mask_transform(trainable_mask),optimizer,mask_transform(trainable_mask))
     # A Python integer step becomes an array after the first update and would
     # otherwise create a second runtime JIT signature immediately after warmup.
     return train_state.TrainState.create(apply_fn=model.apply,params=params,tx=optimizer).replace(step=jnp.int32(0))
-
 
 def checkpoint(directory,state,metadata):
     """Atomic immutable generation; pointer changes only after both files exist."""
@@ -270,7 +274,6 @@ def checkpoint(directory,state,metadata):
     write_json(root/(stem+'.json'),info);write_json(root/'latest.json',info)
     return info
 
-
 def restore(directory,template):
     root=Path(directory);info=json.loads((root/'latest.json').read_text())
     path=root/info['state_file']
@@ -279,7 +282,6 @@ def restore(directory,template):
     # leaves do not create a second dispatch signature on checkpoint reload.
     restored=serialization.from_bytes(template,path.read_bytes())
     return jax.tree.map(jnp.asarray,restored),info
-
 
 def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs=300,learning_rate=3e-4,
           validate_every=5,patience=12,benchmark_only=False,encoder='gat',flight_history_invariant=False,risk_log_variance_min=-10.,scalar_gain_quadratic=False,progress_contrast_weight=0.,quad3d_history_invariant=False,paired_gain_quadratic=False,continuous_log_variance_min=-10.,quad3d_obstacle_pooling=False,quad3d_quarter_turns=False,progress_contrast_normalization='none',flight_obstacle_pooling=False,flight_gain_basis=False,flight_gain_balanced_sampling=False,bicycle_history_invariant=False,bicycle_safety_balanced_sampling=False,bicycle_obstacle_pooling=False,bicycle_route_context=False,bicycle_reserve_labels=None,bicycle_reserve_gradient_guard=False,bicycle_constraint_features=False,variance_beta=0.,bicycle_affine_gain=False,bicycle_motion_history=None,bicycle_motion_adapter_source=None,bicycle_candidate_encoding=False,benchmark_epochs=10,benchmark_validations=5,flight_local_residual_source=None,flight_reflection_labels=None,variance_refit_source=None,variance_refit_mode='variance_only',clipped_risk_likelihood=False,risk_tail_objective=False,clipped_risk_components=1,flight_additional_dataset=None,flight_additional_reflection=None,local_additional_dataset=None,unicycle_ego_frame=False,unicycle_constraint_features=False,local_stop_contrast_weight=0.,local_prediction_selection=False,local_reflection_base_job=None,local_reflection_shared_job=None,flight_warmstart_source=None,flight_constraint_features=False,flight_gain_attention=False,flight_freeze_original=False,flight_full_parent_ensemble=False,flight_action_dataset=None,flight_action_reflection=None,flight_viable_progress_weight=0.):
@@ -336,9 +338,9 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
         raise ValueError('Full-parent ensemble requires the original expanded Gaussian flight treatment')
     local_unicycle=dataset_manifest['schema']=='unicycle_local_observation_learning_v1'
     if local_unicycle:
-        from .local_unicycle_dataset import validate as validate_local_unicycle
+        from .unicycle_data import dataset_validate as validate_local_unicycle
         validate_local_unicycle(dataset)
-        from .local_unicycle_candidates import validate_bank
+        from .unicycle_policy import validate_bank
         validate_bank(dataset,dataset_manifest)
         if encoder not in ('gat','nearest_fc'):
             raise ValueError('Local unicycle comparison requires GAT or paper nearest-only FC')
@@ -353,7 +355,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
             or bicycle_motion_adapter_source or flight_local_residual_source):
         raise ValueError('Clipped risk pilot requires original paired flight data/encoders and its own likelihood')
     if variance_beta:
-        from .probability_losses import validate_variance_treatment
+        from .uncertainty import validate_variance_treatment
         validate_variance_treatment(dataset_manifest,encoder,bicycle_constraint_features,
                                     bicycle_reserve_labels,flight_reflection_labels)
     from .bicycle_gain_contract import TRAIN_SCHEMA, LEGACY_SCHEMA
@@ -376,13 +378,13 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
             or (progress_contrast_normalization!='none' and not progress_contrast_weight)):
         raise ValueError('Progress contrast normalization requires an active contrast loss')
     if local_stop_contrast_weight:
-        from .local_unicycle_stop_contrast import contract as stop_contrast_contract
+        from .unicycle_training import stop_contrast_contract
         stop_contrast_contract(local_stop_contrast_weight)
         if (not local_unicycle or encoder not in ('gat','nearest_fc') or unicycle_constraint_features
                 or progress_contrast_weight or bicycle_reserve_labels or variance_beta or risk_tail_objective):
             raise ValueError('Stop contrast requires the original local-unicycle encoders and primary losses')
     if local_prediction_selection:
-        from .local_unicycle_prediction_selection import contract as prediction_selection_contract, score as prediction_score
+        from .unicycle_training import contract as prediction_selection_contract, score as prediction_score
         if (not local_unicycle or encoder not in ('gat','nearest_fc') or unicycle_constraint_features
                 or local_stop_contrast_weight or progress_contrast_weight or bicycle_reserve_labels
                 or variance_beta or risk_tail_objective or variance_refit_source or bicycle_motion_adapter_source):
@@ -390,7 +392,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
     wide_quad3d=dataset_manifest['schema']=='oa_cbf_quad3d_wide_gain_history_hurdle_v104'
     if quad3d_quarter_turns:
         if not wide_quad3d or encoder not in ('gat','matched_fc','nearest_fc'):raise ValueError('Quarter turns require registered wide-gain Quad3D models')
-        from .quad3d_symmetry import validate as validate_symmetry
+        from .quad3d_features import validate as validate_symmetry
         from .quad3d_control import control_config
         validate_symmetry(control_config(dataset_manifest['config']))
     if scalar_gain_quadratic and (not bicycle or encoder not in ('gat','matched_fc')):
@@ -415,7 +417,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
     if risk_log_variance_min!=-10. and (encoder not in ('gat','matched_fc') or dataset_manifest['schema']!='oa_cbf_quad2d_motion_history_hurdle_v1'):
         raise ValueError('Variance-floor pilot is restricted to audited OA flight history data')
     if dataset_manifest['schema']=='oa_cbf_quad2d_motion_history_hurdle_v1':
-        from .quad2d_history_contract import validate_dataset
+        from .quad2d_history_data import validate_dataset
         validate_dataset(dataset)
     if flight_history_invariant and dataset_manifest['schema'] not in ('oa_cbf_quad2d_guided_hurdle_v1','oa_cbf_quad2d_motion_history_hurdle_v1'):
         raise ValueError('History-invariant variant requires the audited fixed-gain guided flight labels')
@@ -436,7 +438,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
     if local_additional_dataset:
         if not local_unicycle or encoder not in ('gat','nearest_fc'):
             raise ValueError('Shared local coverage requires the registered GAT or nearest-FC unicycle models')
-        from .local_unicycle_expansion import extend
+        from .unicycle_data import extend
         raw,validation,local_expansion_proof=extend(dataset,local_additional_dataset,raw,validation)
         write_json(root/'local_training_expansion.json',local_expansion_proof)
     local_reflection_proof=None
@@ -447,7 +449,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
                 or local_prediction_selection or progress_contrast_weight or variance_beta
                 or (encoder=='gat' and not unicycle_ego_frame)):
             raise ValueError('Local reflection requires both complete paired corpora and original ego-frame/nearest-FC treatment')
-        from .local_unicycle_reflection_training import load_pairs
+        from .unicycle_training import load_pairs
         local_reflected,local_reflected_validation,local_reflection_proof=load_pairs(
             dataset,local_additional_dataset,local_reflection_base_job,local_reflection_shared_job,raw,validation)
         # Only original validation selects checkpoints. The paired validation
@@ -455,7 +457,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
         del local_reflected_validation
     live_query_proof=None
     if local_unicycle:
-        from .local_unicycle_supervision import live_query_view,parent_live_weights,CONTRACT as LIVE_QUERY_CONTRACT
+        from .unicycle_training import live_query_view, parent_live_weights, CONTRACT as LIVE_QUERY_CONTRACT
         raw,train_query_proof=live_query_view(raw)
         validation,validation_query_proof=live_query_view(validation)
         live_query_proof=dict(train=train_query_proof,validation=validation_query_proof)
@@ -465,7 +467,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
                 raise ValueError('Reflection changed live-parent supervision')
         write_json(root/'live_query_supervision.json',live_query_proof)
         if local_stop_contrast_weight:
-            from .local_unicycle_stop_contrast import validate_population
+            from .unicycle_training import validate_population
             for population in (raw,validation):validate_population(population,dataset_manifest['replicas'])
     if flight_gain_balanced_sampling and (dataset_manifest['schema']!='oa_cbf_quad2d_guided_hurdle_v1'
             or not progress_contrast_supported(dataset_manifest,encoder)):
@@ -475,7 +477,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
     if bicycle_route_context:
         if not bicycle or encoder not in ('gat', 'matched_fc'):
             raise ValueError('Route-context pilot requires matched bicycle development data')
-        from .bicycle_route_context import augment_development
+        from .bicycle_features import route_context_augment_development as augment_development
         raw, train_proof = augment_development(raw, 'train')
         validation, val_proof = augment_development(validation, 'validation')
         route_proofs = dict(train=train_proof, validation=val_proof)
@@ -484,7 +486,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
     if bicycle_motion_history:
         if not bicycle or not bicycle_constraint_features or bicycle_affine_gain or variance_beta or bicycle_route_context or bicycle_reserve_labels:
             raise ValueError('Motion features require the original matched constraint-model treatment')
-        from .bicycle_motion_features import augment_development
+        from .bicycle_features import augment_development
         raw,train_motion=augment_development(raw,'train',bicycle_motion_history)
         validation,val_motion=augment_development(validation,'validation',bicycle_motion_history)
         motion_proofs=dict(train=train_motion,validation=val_motion)
@@ -497,7 +499,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
     if bicycle_reserve_labels:
         if not bicycle or encoder not in ('gat','matched_fc') or bicycle_route_context:
             raise ValueError('Reserve auxiliary requires original matched graph35 bicycle development data')
-        from .bicycle_auxiliary_targets import attach_labels, reserve_normalization, contract as reserve_contract
+        from .bicycle_training import attach_labels, reserve_normalization, contract as reserve_contract
         raw, reserve_proof = attach_labels(raw, bicycle_reserve_labels, dataset, 'train')
         validation, val_reserve_proof = attach_labels(validation, bicycle_reserve_labels, dataset, 'validation')
         if reserve_proof != val_reserve_proof: raise ValueError('Different auxiliary label sources')
@@ -506,20 +508,20 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
     reflection_proof=None;expansion_proof=None
     prepared=prepare(raw,norm)
     if local_reflection_proof is not None:
-        from .local_unicycle_reflection_training import pack
+        from .unicycle_training import pack
         prepared=pack(prepared,prepare(local_reflected,norm))
     if flight_reflection_labels:
         if (encoder not in ('gat','nearest_fc') or bicycle or quad3d or flight_local_residual_source
                 or reserve_proof is not None or quad3d_quarter_turns):
             raise ValueError('Paired flight orientations require original GAT or nearest FC heads')
-        from .quad2d_reflection_training import load_pair,pack
+        from .quad2d_training import load_pair, pack
         reflected,reflection_proof=load_pair(dataset,flight_reflection_labels,raw)
         if flight_additional_dataset:
-            from .quad2d_training_expansion import extend
+            from .quad2d_training import extend
             raw,reflected,expansion_proof=extend(dataset,flight_additional_dataset,
                 flight_additional_reflection,raw,reflected)
             if flight_action_dataset:
-                from .quad2d_action_training import append_contexts
+                from .quad2d_training import append_contexts
                 raw,reflected,expansion_proof=append_contexts(flight_action_dataset,
                     flight_action_reflection,raw,reflected,expansion_proof)
             # Keep the normalization computed from the PRIMARY TRAIN above.
@@ -536,34 +538,34 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
         quad3d_history_invariant=quad3d_history_invariant,paired_gain_quadratic=paired_gain_quadratic,continuous_log_variance_min=continuous_log_variance_min,quad3d_obstacle_pooling=quad3d_obstacle_pooling,flight_obstacle_pooling=flight_obstacle_pooling,flight_gain_basis=flight_gain_basis,bicycle_history_invariant=bicycle_history_invariant,bicycle_obstacle_pooling=bicycle_obstacle_pooling,bicycle_route_context=bicycle_route_context,bicycle_reserve_auxiliary=reserve_proof is not None,bicycle_constraint_features=bicycle_constraint_features,bicycle_affine_gain=bicycle_affine_gain,bicycle_motion_history=bool(bicycle_motion_history),bicycle_candidate_encoding=bicycle_candidate_encoding,flight_local_residual=bool(flight_local_residual_source),unicycle_ego_frame=unicycle_ego_frame,unicycle_constraint_features=unicycle_constraint_features,flight_constraint_features=flight_constraint_features,flight_gain_attention=flight_gain_attention)
     model=make_model(cfg,risk_components=clipped_risk_components);adapter_proof=None;adapter_mask=None;adapter_params=None
     if bicycle_motion_adapter_source:
-        from .bicycle_motion_adapter import initialize as initialize_adapter
+        from .bicycle_training import initialize as initialize_adapter
         adapter_params,adapter_mask,adapter_proof=initialize_adapter(model,seed,norm,bicycle_motion_adapter_source)
         write_json(root/'adapter_initialization.json',adapter_proof)
     if flight_local_residual_source:
-        from .flight_local_residual import initialize as initialize_residual
+        from .training_extensions import initialize as initialize_residual
         adapter_params,adapter_mask,adapter_proof=initialize_residual(model,data,seed,norm,flight_local_residual_source,sha256(Path(dataset)/'manifest.json'))
         write_json(root/'adapter_initialization.json',adapter_proof)
     if variance_refit_source:
-        from .variance_refit import initialize as initialize_variance
+        from .training_extensions import variance_refit_initialize as initialize_variance
         adapter_params,adapter_mask,adapter_proof=initialize_variance(model,seed,norm,variance_refit_source,sha256(Path(dataset)/'manifest.json'),variance_refit_mode)
         write_json(root/'adapter_initialization.json',adapter_proof)
     if flight_warmstart_source:
-        from .quad2d_constraint_features import initialize as initialize_flight
+        from .quad2d_features import initialize as initialize_flight
         adapter_params,adapter_mask,adapter_proof=initialize_flight(model,data,seed,norm,flight_warmstart_source,sha256(Path(dataset)/'manifest.json'),flight_freeze_original)
         write_json(root/'adapter_initialization.json',adapter_proof)
     state=initial_state(model,data,seed,learning_rate,epochs*batches,adapter_params,adapter_mask)
     censor_floor=None
     if clipped_risk_likelihood:
-        from .censored_risk import FLOOR
+        from .clipped_inference import FLOOR
         censor_floor=float(np.float32((FLOOR-norm['target_mean'][0])/norm['target_scale'][0]))
     update,evaluate=make_updates(model,progress_contrast_weight,dataset_manifest.get('replicas',1),seed+27001 if quad3d_quarter_turns else None,progress_contrast_normalization,.25 if reserve_proof is not None else 0.,bicycle_reserve_gradient_guard,variance_beta,seed+37001 if reflection_proof is not None else None,censor_floor,risk_tail_objective,local_stop_contrast_weight,seed+47001 if local_reflection_proof is not None else None,flight_viable_progress_weight)
     rng=np.random.default_rng(seed+8191)
-    from .ensemble_sampling import parent_indices, full_parent_contract
+    from .training_extensions import parent_indices, full_parent_contract
     bootstrap=np.arange(count,dtype=np.int32) if parent_weighted else parent_indices(count,rng,flight_full_parent_ensemble)
     row_weights=np.ones(count,np.float32);validation_weights=None;parent_sampling=None
     opportunity_sampling=None
     if flight_gain_balanced_sampling:
-        from .quad2d_training_weights import gain_opportunity_weights
+        from .quad2d_training import gain_opportunity_weights
         row_weights,opportunity_sampling=gain_opportunity_weights(raw,dataset_manifest['replicas'])
     if parent_weighted:
         # All visits of one scene share a bootstrap draw; visits are not
@@ -574,7 +576,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
             validation_weights=jnp.asarray(parent_live_weights(validation['group_id'],validation['prior_status']==0))
     safety_sampling=None
     if bicycle_safety_balanced_sampling:
-        from .bicycle_training_weights import safety_opportunity_weights
+        from .bicycle_training import safety_opportunity_weights
         multiplier,safety_sampling=safety_opportunity_weights(raw,dataset_manifest['replicas'])
         row_weights*=multiplier
         safety_sampling['effective_row_weights_sha256']=hashlib.sha256(row_weights.tobytes()).hexdigest()
@@ -600,19 +602,19 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
         settings['parent_sampling']=parent_sampling
         settings['normalization_sampling']='Each physical parent has equal total weight over observed values; training partition only.'
     if flight_gain_attention:
-        from .quad2d_gain_attention import contract as gain_attention_contract
+        from .quad2d_features import gain_attention_contract
         settings['flight_gain_attention_contract']=gain_attention_contract()
     if flight_freeze_original:
-        from .quad2d_gain_attention import frozen_predictor_contract
+        from .quad2d_features import frozen_predictor_contract
         settings['flight_frozen_predictor_contract']=frozen_predictor_contract()
     if encoder == 'nearest_fc':
         settings['nearest_fc_contract'] = nearest_contract(dynamics, yaw_scale,unicycle_constraint_features)
     if unicycle_constraint_features:
-        from .unicycle_constraint_features import contract as coefficient_contract
+        from .unicycle_features import contract as coefficient_contract
         settings['unicycle_constraint_features_contract']=coefficient_contract()
     if local_unicycle:
-        from .local_unicycle_calibration import training_contract
-        from .local_unicycle_candidates import validate_bank
+        from .unicycle_calibration import training_contract
+        from .unicycle_policy import validate_bank
         validate_bank(dataset,dataset_manifest)
         settings['local_unicycle_contract']=training_contract(dataset_manifest)
         settings['local_unicycle_supervision']=LIVE_QUERY_CONTRACT
@@ -633,15 +635,15 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
             settings['bicycle_task_progress_contract']=dataset_manifest['bicycle_task_progress_contract']
         settings['offline_wide_gain_pilot']=True
     if bicycle_constraint_features:
-        from .bicycle_constraint_features import contract as constraint_contract
+        from .bicycle_features import constraint_features_contract as constraint_contract
         settings['bicycle_constraint_features_contract']=constraint_contract()
         settings['offline_constraint_features_pilot']=True
     if bicycle_candidate_encoding:
-        from .bicycle_candidate_features import contract as candidate_contract
+        from .bicycle_features import contract as candidate_contract
         settings['bicycle_candidate_encoding_contract']=candidate_contract(settings['gain_domain'])
         settings['offline_candidate_encoding_pilot']=True
     if motion_proofs is not None:
-        from .bicycle_motion_features import SCHEMA as MOTION_SCHEMA,contract as motion_contract
+        from .bicycle_features import MOTION_FEATURES_SCHEMA as MOTION_SCHEMA, motion_features_contract as motion_contract
         settings['bicycle_contract']['source_graph_schema']=settings['bicycle_contract']['graph_schema']
         settings['bicycle_contract']['graph_schema']=MOTION_SCHEMA
         settings['bicycle_motion_history_contract']=motion_contract()
@@ -650,22 +652,22 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
         settings['motion_features_sha256']=sha256(root/'motion_features.json')
         settings['offline_motion_history_pilot']=True
     if bicycle_motion_adapter_source:
-        from .bicycle_motion_adapter import contract as adapter_contract
+        from .bicycle_training import motion_adapter_contract as adapter_contract
         settings.update(bicycle_motion_adapter_contract=adapter_contract(),
             bicycle_motion_adapter_source=str(Path(bicycle_motion_adapter_source).resolve()),
             bicycle_motion_adapter_source_sha256=sha256(bicycle_motion_adapter_source),initial_checkpoint_eligible=True)
     if flight_local_residual_source:
-        from .flight_local_residual import contract as residual_contract
+        from .training_extensions import flight_local_residual_contract as residual_contract
         settings.update(flight_local_residual_contract=residual_contract(),
             flight_local_residual_source=str(Path(flight_local_residual_source).resolve()),
             flight_local_residual_source_manifest_sha256=sha256(Path(flight_local_residual_source)/'manifest.json'),
             initial_checkpoint_eligible=True)
     if bicycle_affine_gain:
-        from .bicycle_gain_features import contract as gain_contract
+        from .bicycle_control import contract as gain_contract
         settings['bicycle_affine_gain_contract']=gain_contract()
         settings['offline_affine_gain_pilot']=True
     if route_proofs is not None:
-        from .bicycle_route_context import SCHEMA as ROUTE_SCHEMA, contract as route_contract
+        from .bicycle_features import ROUTE_CONTEXT_SCHEMA as ROUTE_SCHEMA, route_context_contract as route_contract
         settings['bicycle_contract']['source_graph_schema'] = settings['bicycle_contract']['graph_schema']
         settings['bicycle_contract']['graph_schema'] = ROUTE_SCHEMA
         settings['bicycle_route_context'] = route_contract()
@@ -675,7 +677,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
         settings['bicycle_reserve_auxiliary']=dict(contract=reserve_contract(),labels=reserve_proof)
         settings['offline_reserve_auxiliary_pilot']=True
         if bicycle_reserve_gradient_guard:
-            from .auxiliary_gradients import contract as gradient_contract
+            from .training_extensions import contract as gradient_contract
             settings['bicycle_reserve_gradient_guard']=gradient_contract()
     if quad3d:
         from .quad3d_learning_contract import CONTRACT_FIELDS
@@ -695,7 +697,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
     if expansion_proof is not None:
         settings['flight_training_expansion']=expansion_proof
     if flight_viable_progress_weight:
-        from .viable_progress import contract as viable_progress_contract
+        from .training_extensions import viable_progress_contract
         settings['flight_viable_progress_contract']=viable_progress_contract()
     if quad3d_quarter_turns:
         settings['quad3d_quarter_turns']=True
@@ -707,11 +709,11 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
             training_scene_distribution=dataset_manifest['scene_distribution'],
             training_obstacle_count_histogram={str(int(n)):int(v) for n,v in zip(counts,frequencies)})
     if variance_beta:
-        from .probability_losses import variance_objective_contract
+        from .uncertainty import variance_objective_contract
         settings['variance_weighted_objective']=variance_objective_contract(variance_beta)
         settings['offline_variance_objective_pilot']=True
     if clipped_risk_likelihood:
-        from .censored_risk import contract as clipped_contract
+        from .clipped_inference import contract as clipped_contract
         settings['risk_distribution_contract']=clipped_contract(clipped_risk_components)
         if clipped_risk_components!=1:settings['clipped_risk_components']=clipped_risk_components
         settings['normalized_risk_censor_floor']=censor_floor
@@ -719,19 +721,19 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
         if clipped_risk_components==2:
             settings['selection']=settings['selection'].replace('clipped-risk likelihood','clipped-risk mixture likelihood')
         if risk_tail_objective:
-            from .censored_risk import tail_objective_contract
+            from .clipped_inference import tail_objective_contract
             settings['risk_tail_objective']=tail_objective_contract(clipped_tail_refit)
         if clipped_tail_refit:
             settings['selection']='minimum validation optimization_loss: clipped likelihood plus fixed upper99 pinball, progress NLL, event BCE and original progress contrast'
     if variance_refit_source:
-        from .variance_refit import contract as variance_refit_contract
+        from .training_extensions import variance_refit_contract
         settings.update(variance_refit_contract=variance_refit_contract(variance_refit_mode),
             variance_refit_source=str(Path(variance_refit_source).resolve()),
             variance_refit_source_manifest_sha256=sha256(Path(variance_refit_source)/'manifest.json'),
             initial_checkpoint_eligible=True)
         if variance_refit_mode != 'variance_only':settings['variance_refit_mode']=variance_refit_mode
     if flight_warmstart_source:
-        from .quad2d_constraint_features import contract as coefficient_contract
+        from .quad2d_features import contract as coefficient_contract
         settings.update(flight_warmstart_source=str(Path(flight_warmstart_source).resolve()),
             flight_warmstart_source_manifest_sha256=sha256(Path(flight_warmstart_source)/'manifest.json'),
             initial_checkpoint_eligible=True,flight_constraint_features_contract=coefficient_contract() if flight_constraint_features else None)
@@ -789,7 +791,7 @@ def train(dataset,output,seed=0,width=64,layers=2,heads=4,batch_groups=64,epochs
         tick=time.perf_counter();indices=sample_indices();state,metrics=update(state,data,indices,sample_weights(indices));jax.block_until_ready(metrics)
         if epoch%validate_every==0 or epoch==1 or epoch==epochs:
             if adapter_proof is not None:
-                from .bicycle_motion_adapter import frozen_digest
+                from .bicycle_training import frozen_digest
                 if frozen_digest(state.params,adapter_mask)!=adapter_proof['frozen_parameters_sha256']:
                     raise ValueError('Frozen predictor parameters changed during adapter training')
             validation_metrics=validation_evaluate(state.params);jax.block_until_ready(validation_metrics)

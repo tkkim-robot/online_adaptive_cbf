@@ -1,17 +1,14 @@
-"""Planar quadrotor numerical foundation, separate from unicycle bundles.
+"""Shared quad2d implementation."""
 
-State [x,z,pitch,vx,vz,pitch_rate], inputs [right_thrust,left_thrust]. Gravity
-remains world vertical. Matches the pinned repository's continuous equations;
-RK4 replaces Euler integration. No state clipping or hidden coordinate resets.
-This module is not yet a route controller, trained policy or evaluated robot path.
-"""
-from dataclasses import dataclass,asdict
+from dataclasses import dataclass, asdict
+
 from functools import partial
-import math
-import jax
-import jax.numpy as jnp
-from .controllers import solve_qp2
 
+import math
+
+import jax
+
+import jax.numpy as jnp
 
 @dataclass(frozen=True)
 class Quad2DConfig:
@@ -37,12 +34,10 @@ class Quad2DConfig:
         if isinstance(self.integration_substeps,bool) or not isinstance(self.integration_substeps,int) or self.integration_substeps<1:
             raise ValueError('Positive integer integration substeps required')
 
-
 def quad2d_flow(x,u,config=Quad2DConfig()):
     force=jnp.sum(u)/config.mass
     return jnp.stack((x[3],x[4],x[5],-jnp.sin(x[2])*force,
                       jnp.cos(x[2])*force-config.gravity,config.arm/config.inertia*(u[0]-u[1])))
-
 
 @partial(jax.jit,static_argnames=('config',))
 def integrate_quad2d(x,u,config=Quad2DConfig()):
@@ -70,7 +65,6 @@ def integrate_quad2d(x,u,config=Quad2DConfig()):
     states=states.at[:,2].set(angles)
     return states[-1],states
 
-
 def quad2d_cbf_rows(x,obstacles,mask,gains,config=Quad2DConfig(),clearance_uncertainty=0.):
     """Joint second-order disk CBF rows for known constant-velocity obstacles.
 
@@ -90,10 +84,3 @@ def quad2d_cbf_rows(x,obstacles,mask,gains,config=Quad2DConfig(),clearance_uncer
     bounds=jnp.asarray([[1.,0.],[-1.,0.],[0.,1.],[0.,-1.]],x.dtype)
     limits=jnp.asarray([config.force_max,-config.force_min,config.force_max,-config.force_min],x.dtype)
     return jnp.concatenate((a,bounds)),jnp.concatenate((b,limits)),h,hd+gains[0]*h
-
-
-@partial(jax.jit,static_argnames=('config',))
-def filter_quad2d(x,reference,obstacles,mask,gains,config=Quad2DConfig(),clearance_uncertainty=0.):
-    a,b,h,psi=quad2d_cbf_rows(x,obstacles,mask,gains,config,clearance_uncertainty)
-    result=solve_qp2(reference,a,b,jnp.ones(2,x.dtype),config.qp_tolerance)
-    return result,jnp.min(jnp.where(mask,h,jnp.inf)),jnp.min(jnp.where(mask,psi,jnp.inf))

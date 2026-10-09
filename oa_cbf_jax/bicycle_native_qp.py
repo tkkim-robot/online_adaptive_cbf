@@ -1,29 +1,31 @@
-"""Registered bicycle fixed/optimal-decay QPs with untouched OSQP defaults.
+"""Bicycle native qp functions and shared contracts."""
 
-The original continuous barrier is differentiated automatically: this corrects
-the independently demonstrated hand-gradient error, without changing h or gains.
-The dynamic tracker passes five nearest centers into a ten-slot fixed QP; OD
-uses only the first center. Moving-obstacle rows include the obstacle-position
-derivative, as corrected upstream in safe_control commit 27d8569.
-"""
 from dataclasses import asdict
+
 from pathlib import Path
+
 import time
+
 import numpy as np
+
 import jax
+
 import jax.numpy as jnp
 
 from .bicycle_control import BicycleControlConfig, constant
-from .dataset import sha256
+
+from .io import sha256
 
 METHODS={'fixed_low':.1,'fixed_high':70.,'optimal_decay':.1}
+
 DPCBF_DERIVATIVE_CONTRACT='total_position_drift_constant_obstacle_velocity'
+
 UPSTREAM_DRIFT_FIX='27d856980435e374534cd158f3514eceb1433199'
+
 SOURCE_FILES=('online_cbf_config.py','safe_control/dynamic_env/main.py',
     'safe_control/tracking.py','safe_control/robots/robot.py',
     'safe_control/robots/kinematic_bicycle2D.py','safe_control/robots/kinematic_bicycle2D_dpcbf.py',
     'safe_control/position_control/cbf_qp.py','safe_control/position_control/optimal_decay_cbf_qp.py')
-
 
 def barrier(x,o,c=BicycleControlConfig()):
     p=o[:2]-x[:2];v=o[3:5]-x[3]*jnp.stack((jnp.cos(x[2]),jnp.sin(x[2])))
@@ -32,7 +34,6 @@ def barrier(x,o,c=BicycleControlConfig()):
     root=jnp.sqrt(jnp.maximum(jnp.dot(p,p)-radius**2,constant(1e-6,x.dtype)))
     shape=jnp.sqrt(constant(1.05**2-1,x.dtype))/radius
     return radial+constant(.5,x.dtype)*shape*root*lateral**2/jnp.linalg.norm(v)+shape*root
-
 
 def nominal(x,goal,method,c=BicycleControlConfig()):
     # BaseRobot.nominal_input overrides the bicycle class signature defaults.
@@ -45,13 +46,11 @@ def nominal(x,goal,method,c=BicycleControlConfig()):
     speed=np.clip(kv*distance*max(0.,np.cos(error)),c.robot.speed_min,c.robot.speed_max)
     return np.array([ka*(speed-x[3]),beta])
 
-
 def nearest(x,obs,mask,method):
     eligible=np.flatnonzero(mask)
     order=np.argsort(np.linalg.norm(obs[eligible,:2]-x[:2],axis=1))
     selected=eligible[order[:1 if method=='optimal_decay' else 5]]
     return selected
-
 
 def contract(method,c=BicycleControlConfig(),acceptance='strict_rows'):
     import osqp
@@ -71,7 +70,6 @@ def contract(method,c=BicycleControlConfig(),acceptance='strict_rows'):
         acceptance=('Solved/solved-inaccurate and finite plus original QP rows on raw and FP32 actuator within common1e-5tolerance. Violations are numerical residual stops, not certified infeasibility. No retry/tolerance change/rescue.' if acceptance=='strict_rows' else 'Native tracker optimal status only (OSQP solved, status1) and finite. No additional row-residual veto, clipping, retry or solver tuning. Record actual residual and input-bound violations separately from navigation outcomes.'),
         initialization='New OSQP instance per episode, setup on first real QP; default warm start thereafter')
 
-
 class BarrierRows:
     def __init__(self,c=BicycleControlConfig()):
         self.config=c
@@ -85,7 +83,6 @@ class BarrierRows:
         safe=obs.astype(float).copy();safe[~mask]=[x[0]+10.,x[1]+10.,.3,0.,0.]
         h,grad=jax.device_get(self.execute(jnp.asarray(x,dtype=jnp.float64),jnp.asarray(safe,dtype=jnp.float64)))
         return h,grad
-
 
 def problem(x,goal,obs,mask,method,h,grad,c=BicycleControlConfig()):
     x=np.asarray(x,float);obs=np.asarray(obs,float);od=method=='optimal_decay'
@@ -103,7 +100,6 @@ def problem(x,goal,obs,mask,method,h,grad,c=BicycleControlConfig()):
     b[slots:]=[c.robot.acceleration_max,c.robot.acceleration_max,c.robot.slip_max,c.robot.slip_max]
     ref=nominal(x,np.asarray(goal,float),method,c)
     return np.r_[ref,1.] if od else ref,A,b,selected
-
 
 class NativeBicycleQP:
     def __init__(self,method,rows,c=BicycleControlConfig(),acceptance='strict_rows'):
@@ -135,3 +131,88 @@ class NativeBicycleQP:
         accepted=(result.info.status_val==1 and finite) if self.acceptance=='native_status' else (result.info.status_val in (1,2) and finite and max(raw,residual)<=self.config.qp_tolerance)
         return dict(base,solution=solution,status=result.info.status,status_value=int(result.info.status_val),iterations=int(result.info.iter),seconds=seconds,
             raw_residual=raw,stored_residual=residual,feasible=bool(accepted))
+
+
+from .bicycle import integrate_bicycle, bicycle_state_violation
+
+
+from .bicycle_observation import observe, unit_errors
+
+from .bicycle_rollout import NAMES, GOAL, COLLISION, INFEASIBLE, TIMEOUT, STATE_BOUND
+
+from .dynamics import swept_disk_clearance
+
+class PhysicalKernels:
+    def __init__(self,c=BicycleControlConfig()):
+        self.config=c;r=c.robot
+        def sense(x,original,mask,bx,bo,noise,key,k,first_x,first_o):
+            current=original.at[:,:2].add(k.astype(jnp.float64)*constant(r.dt,jnp.float64)*original[:,3:5])
+            ix,io=unit_errors(jax.random.fold_in(key,k),64)
+            ix=jnp.where(k==0,0.,ix);io=jnp.where(k==0,0.,io)
+            sx,so=observe(x,current,mask,bx,bo,noise,ix,io)
+            return jnp.where(k==0,first_x,sx),jnp.where(k==0,first_o,so),ix,io
+        def advance(x,u,original,mask,k):
+            y,sub=integrate_bicycle(x,u,r);starts=jnp.concatenate((x[None],sub[:-1]))
+            dt=constant(r.dt,jnp.float64)
+            times=k.astype(jnp.float64)*dt+jnp.arange(r.integration_substeps,dtype=jnp.float64)*dt/r.integration_substeps
+            clearance=jnp.min(jax.vmap(lambda a,b,t:swept_disk_clearance(a,b,original,mask,constant(r.radius,jnp.float64),t,t+dt/r.integration_substeps))(starts,sub,times))
+            violation=jnp.max(jax.vmap(lambda z:bicycle_state_violation(z,r))(jnp.concatenate((x[None],sub))))
+            return y,clearance,violation
+        self.sense_function=jax.jit(sense);self.advance_function=jax.jit(advance)
+        x=jnp.asarray(np.zeros(4),dtype=jnp.float64);o=jnp.asarray(np.zeros((64,5)),dtype=jnp.float64);mask=jnp.zeros(64,bool)
+        # Sensor and actuator precision is explicit even when a native neural
+        # controller enables global FP64 defaults for its own network.
+        args=(x,o,mask,jnp.zeros(4,jnp.float32),jnp.zeros((64,5),jnp.float32),
+            jnp.zeros(6,jnp.float32),jax.random.PRNGKey(1),jnp.int32(0),
+            jnp.zeros(4,jnp.float32),jnp.zeros((64,5),jnp.float32))
+        start=time.perf_counter();self.sense=self.sense_function.lower(*args).compile()
+        self.advance=self.advance_function.lower(x,jnp.zeros(2,jnp.float32),o,mask,jnp.int32(0)).compile()
+        self.rows=BarrierRows(c);self.compile_seconds=time.perf_counter()-start
+
+    def cache_sizes(self):
+        return dict(sense=self.sense_function._cache_size(),advance=self.advance_function._cache_size(),rows=self.rows.function._cache_size())
+
+def episode(parent,method,kernels,steps=1600,acceptance='strict_rows'):
+    c=kernels.config;r=c.robot;solver=NativeBicycleQP(method,kernels.rows,c,acceptance)
+    x=np.asarray(parent['initial'],float);original=np.asarray(parent['obstacles'],float);mask=np.asarray(parent['mask'],bool)
+    goal=np.asarray(parent['goal'],np.float32);noise=np.asarray(parent['noise'],np.float32)
+    bx,bo,fx,fo=[np.asarray(parent[k],np.float32) for k in ('bias_x','bias_o','first_x','first_o')]
+    key=np.asarray(jax.random.PRNGKey(parent['seed']+4));history=[];count=0
+    minimum=float(np.min(np.where(mask,np.linalg.norm(original[:,:2]-x[:2],axis=1)-r.radius-original[:,2],np.inf)))
+    arrived=lambda z:np.linalg.norm(z[:2]-goal)<=c.goal_tolerance and z[3]<=c.terminal_speed
+    status=GOAL if arrived(x) else 0
+    if max(r.speed_min-x[3],x[3]-r.speed_max)>c.qp_tolerance:status=STATE_BOUND
+    if minimum<=0:status=COLLISION
+    start=time.perf_counter();reason=NAMES[status]
+    immutable=(jnp.asarray(original,dtype=jnp.float64),jnp.asarray(mask),jnp.asarray(bx),jnp.asarray(bo),jnp.asarray(noise),jnp.asarray(key))
+    for tick in range(steps):
+        sx,so,ix,io=map(np.asarray,kernels.sense(jnp.asarray(x,dtype=jnp.float64),*immutable,np.int32(tick),fx,fo))
+        attempted=status==0;accepted=False;u=np.zeros(2,np.float32);before=x.copy();clear=violation=np.nan
+        result=dict(solution=np.full(3 if method=='optimal_decay' else 2,np.nan),reference=np.full(3 if method=='optimal_decay' else 2,np.nan),selected=np.full(10,-1,np.int32),barrier=np.full(64,np.nan),gradient=np.full((64,4),np.nan),status='not_attempted',status_value=0,iterations=0,seconds=0.,raw_residual=np.nan,stored_residual=np.nan,feasible=False)
+        if attempted:
+            result=solver.solve(sx,goal,so,mask);accepted=result['feasible']
+            if accepted:
+                u=result['solution'][:2].astype(np.float32)
+                x,clear,violation=map(np.asarray,kernels.advance(jnp.asarray(x,dtype=jnp.float64),u,immutable[0],immutable[1],np.int32(tick)))
+                clear=float(clear);violation=float(violation);count+=1;minimum=min(minimum,clear)
+                if arrived(x):status=GOAL
+                if violation>c.qp_tolerance:status=STATE_BOUND
+                if clear<=0:status=COLLISION
+                reason=NAMES[status]
+            else:
+                status=INFEASIBLE
+                reason=('stored_qp_residual_rejected' if acceptance=='strict_rows' and result['status_value'] in (1,2) else 'solver_or_nonfinite_failure:'+result['status'])
+        history.append(dict(state_before=before,state=x.copy(),control=u,active=accepted,status=np.int32(status),
+            observed_state=sx,observed_obstacles=so,innovation_x=ix,innovation_o=io,clearance=clear,state_violation=violation,
+            attempted=attempted,**{'qp_'+k:v for k,v in result.items()}))
+        if status:break
+    if status==0:status=TIMEOUT;reason=NAMES[status]
+    payload={k:np.asarray([h[k] for h in history]) for k in history[0]}
+    payload.update({k:np.asarray(parent[k]) for k in ('initial','goal','obstacles','mask','bias_x','bias_o','first_x','first_o','noise')})
+    payload.update(key=key,final_status=np.int32(status),expected_steps=np.int32(count),horizon=np.int32(steps))
+    row=dict(group_id=parent['group_id'],family=parent['family'],method=method,acceptance=acceptance,status=NAMES[status],status_code=status,steps=count,
+        termination_reason=reason,min_clearance=None if not np.isfinite(minimum) else minimum,execution_seconds=time.perf_counter()-start,
+        solver_attempts=int(payload['attempted'].sum()),solver_seconds=float(payload['qp_seconds'].sum()),
+        applied_row_violation_ticks=int(np.sum(payload['active']&(payload['qp_stored_residual']>c.qp_tolerance))),
+        applied_input_violation_ticks=int(np.sum(payload['active']&np.any(np.abs(payload['control'])>np.array([r.acceleration_max,r.slip_max])+c.qp_tolerance,axis=1))))
+    return row,payload

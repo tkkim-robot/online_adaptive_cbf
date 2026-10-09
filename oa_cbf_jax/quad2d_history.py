@@ -4,23 +4,36 @@ Simulator state belongs only to label generation. Graph construction uses raw
 observations and causal observer memory; no physical state/bias is an input.
 Future replicas resample innovations, never latent states against copied history.
 """
+
 from dataclasses import asdict
+
 import numpy as np
+
 import jax
+
 import jax.numpy as jnp
+
 from .motion_observer import MotionState
-from .quad2d_motion import update
+
+from .quad2d_guidance import update
+
 from .quad2d_features import flight_graph
-from .quad2d_control import FlightConfig,flight_arrived,physical_envelope_violation
-from .quad2d_guidance import ObservedMotionGuidanceConfig,predictive_flight_control
+
+from .quad2d_control import FlightConfig, flight_arrived, physical_envelope_violation
+
+from .quad2d_guidance import ObservedMotionGuidanceConfig, predictive_flight_control
+
 from .quad2d import integrate_quad2d
+
 from .routing import physical_route_coordinate
-from .dynamics import signed_clearance,swept_disk_clearance
-from .quad2d_rollout import GOAL,COLLISION,TIMEOUT,PLANNER_FAILURE,STATE_BOUND
+
+from .dynamics import signed_clearance, swept_disk_clearance
+from .simulation import GOAL, COLLISION, TIMEOUT
+from .quad2d_rollout import PLANNER_FAILURE, STATE_BOUND
 
 SCHEMA='oa_cbf_quad2d_motion_history_hurdle_v1'
-GRAPH_SCHEMA='quad2d_observed_motion_history_50_v1'
 
+GRAPH_SCHEMA='quad2d_observed_motion_history_50_v1'
 
 def snapshot(data,query,window=32):
     """Capture BEFORE processing query's raw reading or applying its command."""
@@ -40,7 +53,6 @@ def snapshot(data,query,window=32):
         previous_control=(data['control'][query-1] if query else np.full(2,4.905,np.float32)).copy(),
         previous_gain=(data['gain'][query-1] if query else np.array([4.,4.],np.float32)).copy(),memory=memory)
 
-
 def graph(observed,goal,obstacles,mask,points,route_mask,cursor,previous_u,previous_gain,noise,memory,config=FlightConfig(),guidance=ObservedMotionGuidanceConfig()):
     """50 observed features: legacy40 plus causal motion support, no truth."""
     _,estimate,bound,_,_=update(memory,obstacles,mask,noise,config.robot.dt,guidance.motion_window)
@@ -51,7 +63,6 @@ def graph(observed,goal,obstacles,mask,points,route_mask,cursor,previous_u,previ
     clock=jnp.stack((jnp.minimum(memory.ticks/guidance.motion_window,2.),(memory.ticks%guidance.motion_window)/guidance.motion_window))
     extra=jnp.concatenate((extra,jnp.broadcast_to(clock,(len(base),2))),axis=-1)
     return jnp.where(node_mask[:,None],jnp.concatenate((base,extra),axis=-1),0.),node_mask
-
 
 def branch(context,goal,mask,points,route_mask,noise,gains,key,ready=True,config=FlightConfig(),guidance=ObservedMotionGuidanceConfig(),steps=160,innovations=None):
     """A physical continuation with held gains and future online observer updates."""
@@ -101,7 +112,6 @@ def branch(context,goal,mask,points,route_mask,noise,gains,key,ready=True,config
     summary=dict(final_state=final,physical_initial_state=initial,status=status,steps=count,min_clearance=minimum,worst_qp_violation=residual,
         route_progress=progress,goal_progress=jnp.linalg.norm(initial[:2]-goal)-jnp.linalg.norm(final[:2]-goal),final_cursor=cursor)
     return summary,trace
-
 
 def join_trace(acquisition,continuation,query):
     """Audit from the original physical origin; no relaxed visited-state prior."""

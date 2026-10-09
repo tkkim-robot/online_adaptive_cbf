@@ -1,28 +1,38 @@
 """Portable, checksummed inference packages (no training-data dependencies)."""
+
 import argparse
+
 import hashlib
+
 import json
+
 from pathlib import Path
+
 import shutil
+
 import tempfile
+
 from types import SimpleNamespace
+
 import urllib.request
+
 import zipfile
 
 TAG = 'oa-cbf-models-2026-10'
-ASSET = 'oa-cbf-models.zip'
-URL = f'https://github.com/tkkim-robot/online_adaptive_cbf/releases/download/{TAG}/{ASSET}'
-DEFAULT = Path(__file__).resolve().parents[1] / 'models' / 'paper'
-SCHEMA = 'oa_cbf_deployment_package_v1'
 
+ASSET = 'oa-cbf-models.zip'
+
+URL = f'https://github.com/tkkim-robot/online_adaptive_cbf/releases/download/{TAG}/{ASSET}'
+
+DEFAULT = Path(__file__).resolve().parents[1] / 'models' / 'paper'
+
+SCHEMA = 'oa_cbf_deployment_package_v1'
 
 def read(path):
     return json.loads(Path(path).read_text())
 
-
 def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-
 
 def verify(root):
     root = Path(root).resolve()
@@ -57,7 +67,6 @@ def verify(root):
                         raise ValueError('Missing baseline model component')
     return manifest
 
-
 def download(destination=DEFAULT, url=URL, sha256=None):
     """Install an immutable release in a new directory, rejecting unsafe ZIPs."""
     destination = Path(destination).resolve()
@@ -85,7 +94,6 @@ def download(destination=DEFAULT, url=URL, sha256=None):
         verify(unpack)
         shutil.move(str(unpack), destination)
     print(f'Installed verified models: {destination}')
-
 
 def load(root, dynamics, method):
     """Load exported parameters, retaining the original inference arithmetic.
@@ -118,7 +126,6 @@ def load(root, dynamics, method):
     predictor = SimpleNamespace(model=model, metadata=metadata, params=params, device=jax.devices()[0])
     return predictor, contract
 
-
 def calibrated_arrays(fit):
     import jax.numpy as jnp
     return {k: jnp.asarray(v, jnp.float32) for k, v in dict(
@@ -126,7 +133,6 @@ def calibrated_arrays(fit):
         temperature=[e['temperature'] for e in fit['event_calibration']],
         bias=[e['bias'] for e in fit['event_calibration']],
         cs_threshold=fit['cs_gate']['threshold']).items()}
-
 
 def selector(root, dynamics, method):
     """Construct the same policy kernels used in the frozen comparisons."""
@@ -151,7 +157,7 @@ def selector(root, dynamics, method):
     elif dynamics == 'quad3d':
         from .quad3d_policy import Quad3DSelector, Quad3DPolicyConfig
         from .quad3d_control import control_config
-        from .quad3d_input_support import InputSupportSelector
+        from .quad3d_qp import InputSupportSelector
         policy = Quad3DSelector.__new__(Quad3DSelector)
         policy.predictor=predictor; policy.metadata=predictor.metadata
         policy.config=Quad3DPolicyConfig(**spec['policy']); policy.robot=control_config(spec['config'])
@@ -162,7 +168,7 @@ def selector(root, dynamics, method):
             policy=InputSupportSelector(policy)
     elif dynamics == 'bicycle':
         from .bicycle_policy import BicycleSelector, BicyclePolicyConfig
-        from .bicycle_experiment import control_config
+        from .bicycle_control import control_config
         from .bicycle_guidance import BicycleGuidanceConfig
         policy = BicycleSelector.__new__(BicycleSelector)
         policy.predictor=predictor; policy.metadata=predictor.metadata

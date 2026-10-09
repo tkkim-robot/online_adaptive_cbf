@@ -1,27 +1,28 @@
-"""Configured Quad3D MPC baselines, with default IPOPT and explicit task adapter.
+"""Quad3d mpc functions and shared contracts."""
 
-Euler multiple shooting and RK4 one-step distance CBF match the repository.
-The original Quad3D OD branch omits omega from its CBF. The valid OD variant
-connects its first existing decay variable to alpha; no solver or gain tuning.
-"""
 from dataclasses import asdict
+
 from functools import lru_cache
+
 import time
+
 import numpy as np
+
 from .quad3d import matrices
+
 from .quad3d_control import Quad3DControlConfig
 
 DEFAULTS={'fixed_low':.01,'fixed_high':.99,'optimal_decay':.01}
+
 Q=np.array([30.,30.,5.,20.,20.,1.,10.,10.,10.,20.,20.,1.])
+
 SOURCE_FILES=('online_cbf_config.py','safe_control/robots/quad3D.py',
     'safe_control/position_control/mpc_cbf.py','safe_control/position_control/optimal_decay_mpc_cbf.py')
-
 
 @lru_cache(maxsize=8)
 def flow(robot):
     a,b=matrices(robot);dt=robot.dt;eye=np.eye(12);aa=a@a;aaa=aa@a
     return a,b,eye+dt*a+dt**2/2*aa+dt**3/6*aaa,(dt*eye+dt**2/2*a+dt**3/6*aa+dt**4/24*aaa)@b
-
 
 def numpy_barrier(states,controls,obs,alpha,omegas,config,shared_contract=True,coupled_decay=True):
     """Vectorized independent RK4 stages, separate from the CasADi matrix form."""
@@ -34,7 +35,6 @@ def numpy_barrier(states,controls,obs,alpha,omegas,config,shared_contract=True,c
     def h(z):return np.sum((z[...,None,:2]-o[:,:2])**2,axis=-1)-1.01*(radius+o[:,2])**2
     gain=alpha*(np.asarray(omegas)[...,0] if coupled_decay else np.ones(x.shape[:-1]))
     return h(y)-h(x)+gain[...,None]*h(x)
-
 
 def prediction_residual(states,controls,omegas,x,obs,mask,alpha,c,shared_contract=True,coupled_decay=True):
     if not all(np.isfinite(v).all() for v in (states,controls,omegas,x,obs)):return np.inf,np.inf
@@ -49,7 +49,6 @@ def prediction_residual(states,controls,omegas,x,obs,mask,alpha,c,shared_contrac
         violation=max(violation,float(np.max(abs(states[1:,3:])-limits)),
             float(np.max(c.altitude_min-states[1:,2])),float(np.max(states[1:,2]-c.altitude_max)))
     return eq,violation
-
 
 class Quad3DMPC:
     def __init__(self,capacity=64,method='fixed_low',config=Quad3DControlConfig(hold_guard='bernstein_v87'),*,shared_contract=True,coupled_decay=True):
@@ -93,7 +92,7 @@ class Quad3DMPC:
         self.barrier_expression=ca.Function('quad3d_native_barrier',[sx,su,obs,sw],[barrier(sx,su,sw)])
 
     def contract(self):
-        from .dataset import sha256
+        from .io import sha256
         import casadi
         return dict(schema='quad3d_default_discrete_mpc_v101',method=self.method,alpha=self.alpha,horizon=self.horizon,Q=Q.tolist(),
             solver='CasADi/IPOPT',casadi_version=casadi.__version__,solver_options=self.solver_options,
@@ -123,3 +122,108 @@ class Quad3DMPC:
         return dict(control=U[0],omega=W[0],states=X,controls=U,omegas=W,feasible=feasible,
             solver_success=bool(stats.get('success',False)),solver_status=str(stats.get('return_status')),iterations=int(stats.get('iter_count',-1)),
             solve_seconds=elapsed,max_equality_error=eq,max_constraint_violation=violation,objective=float(answer['f']))
+
+
+import jax
+
+import jax.numpy as jnp
+
+from .quad3d import integrate_quad3d
+
+
+from .quad3d_observation import observe, observed_arrived, controller_obstacles, guidance_obstacles, unit_tape
+
+from .quad3d_routing import flight_target
+
+C=Quad3DControlConfig(hold_guard='bernstein_v87')
+
+def initial_physical(x,o,mask,c=C):
+    clearance=float(np.min(np.where(mask,np.linalg.norm(x[:2]-o[:,:2],axis=-1)-o[:,2]-c.robot.radius,np.inf)))
+    limits=np.array([c.tilt_limit,c.tilt_limit,c.yaw_limit]+[c.velocity_limit]*3+[c.rate_limit]*3)
+    envelope=max(float(np.max(abs(x[3:])-limits)),c.altitude_min-x[2],x[2]-c.altitude_max)
+    return clearance,envelope
+
+class PhysicalKernels:
+    def __init__(self,c=C,capacity=64):
+        x=jnp.asarray(np.zeros(12),jnp.float64);o=jnp.asarray(np.zeros((capacity,5)),jnp.float64)
+        mask=jnp.zeros(capacity,bool);noise=jnp.asarray(np.zeros(7),jnp.float64);goal=jnp.asarray(np.zeros(3),jnp.float64)
+        p=jnp.asarray(np.zeros((64,2)),jnp.float64);rm=jnp.zeros(64,bool);cursor=jnp.asarray(np.asarray(0.,np.float64),jnp.float64)
+        def sense(x,o,mask,bx,bo,noise,ix,io):return observe(x,o,mask,bx,bo,noise,ix,io)
+        def route(x,goal,o,mask,p,rm,cursor,noise):
+            target,progress,remaining,visible=flight_target(x,goal,guidance_obstacles(o,mask,noise),mask,p,rm,cursor,c)
+            return target,progress,remaining,visible,controller_obstacles(o,mask,noise)
+        def advance(x,u,o,mask):
+            y,sub=integrate_quad3d(x,u,c.robot)
+            t=jnp.asarray(np.arange(1,c.robot.integration_substeps+1)/c.robot.integration_substeps*c.robot.dt,x.dtype)
+            centers=o[None,:,:2]+t[:,None,None]*o[None,:,3:5]
+            clear=jnp.min(jnp.where(mask[None],jnp.linalg.norm(sub[:,None,:2]-centers,axis=-1)-c.robot.radius-o[None,:,2],jnp.inf))
+            limits=jnp.asarray(np.array([c.tilt_limit,c.tilt_limit,c.yaw_limit]+[c.velocity_limit]*3+[c.rate_limit]*3),x.dtype)
+            envelope=jnp.maximum(jnp.max(abs(sub[:,3:])-limits),jnp.maximum(jnp.max(c.altitude_min-sub[:,2]),jnp.max(sub[:,2]-c.altitude_max)))
+            return y,clear,envelope
+        self.functions={};start=time.perf_counter()
+        for name,fn,args in [('sense',sense,(x,o,mask,x,o,noise,x,o)),('route',route,(x,goal,o,mask,p,rm,cursor,noise)),
+                            ('advance',advance,(x,jnp.asarray(np.zeros(4),jnp.float64),o,mask)),
+                            ('arrived',lambda x,g,n:observed_arrived(x,g,n,c),(x,goal,noise))]:
+            f=jax.jit(fn);self.functions[name]=f;setattr(self,name,f.lower(*args).compile())
+        self.compile_seconds=time.perf_counter()-start
+
+    def cache_sizes(self):return {k:f._cache_size() for k,f in self.functions.items()}
+
+def execute64(executable,*values):
+    # NumPy float64 arguments otherwise canonicalize to FP32 on an AOT call
+    # when global x64 is disabled. Explicit device dtypes preserve the contract.
+    arrays=[np.asarray(v) for v in values]
+    return executable(*(jnp.asarray(v,dtype=jnp.bool_ if v.dtype==bool else jnp.float64) for v in arrays))
+
+def empty_result():
+    return dict(control=np.zeros(4),omega=np.zeros(2),states=np.full((11,12),np.nan),controls=np.full((10,4),np.nan),omegas=np.full((10,2),np.nan),
+        feasible=False,solver_success=False,solver_status='not_attempted',iterations=0,solve_seconds=0.,
+        max_equality_error=np.inf,max_constraint_violation=np.inf,objective=np.nan)
+
+def episode(p,solver,kernels,steps=1600,ordered=False):
+    c=solver.config;mask=np.asarray(p['mask'],bool);original=np.asarray(p['obstacles'],float);x=np.asarray(p['x'],float)
+    goal=np.asarray(p['goal'],float);noise=np.asarray(p['noise'],float);points=np.asarray(p['route']['points'],float);rm=np.asarray(p['route']['mask'],bool)
+    leg=0
+    if ordered:
+        goals=np.asarray(p['waypoint_goals'],float);total=p['waypoint_count'];goal=goals[0]
+        routes=np.asarray(p['waypoint_routes']['points'],float);route_masks=np.asarray(p['waypoint_routes']['mask'],bool);points=routes[0];rm=route_masks[0]
+    bx,bo,ix,io=unit_tape(p['sensor_seed'],steps,len(mask));cursor=0.;previous=np.zeros(4);solver.last_omega=np.zeros(2)
+    clear,bound=initial_physical(x,original,mask,c);status=4 if clear<=0 else 5 if bound>c.qp_tolerance else 0
+    count=0;records=[];start=time.perf_counter()
+    for k in range(steps):
+        truth=original.copy();truth[:,:2]+=k*c.robot.dt*original[:,3:5]
+        seen,so=map(np.asarray,execute64(kernels.sense,x,truth,mask,bx,bo,noise,ix[k],io[k]))
+        mission_info={}
+        if ordered:
+            handoff=status==0 and leg<total-1 and bool(execute64(kernels.arrived,seen,goals[leg],noise))
+            if handoff:leg+=1;cursor=0.
+            goal=goals[leg];points=routes[leg];rm=route_masks[leg]
+            mission_info=dict(waypoint_index=leg,waypoint_handoff=handoff,mission_goal=goal)
+        target,progress,remaining,visible,controlled=map(np.asarray,execute64(kernels.route,seen,goal,so,mask,points,rm,np.asarray(cursor,np.float64),noise))
+        if status==0 and (not ordered or leg==total-1) and bool(execute64(kernels.arrived,seen,goal,noise)):status=1
+        result=empty_result();attempted=status==0;active=False;before=x.copy();cursor_before=cursor;previous_before=previous.copy();omega_before=solver.last_omega.copy()
+        if attempted:
+            try:result=solver.solve(seen,target,controlled,mask,previous)
+            except RuntimeError as error:result['solver_status']='exception:'+str(error)
+            if result['feasible']:
+                active=True;previous=result['control'];solver.last_omega=result['omega'];cursor=float(progress)
+                x,clear,bound=map(np.asarray,execute64(kernels.advance,x,previous,truth,mask));count+=1
+                if clear<=0:status=4
+                elif bound>c.qp_tolerance:status=5
+            else:status=3
+        records.append(dict(state=before,next_state=x.copy(),observed=seen,control=previous.copy() if active else np.zeros(4),
+            active=active,status=status,attempted=attempted,clearance=clear,envelope=bound,route_target=target,
+            route_cursor_before=cursor_before,route_progress=cursor,route_remaining=remaining,route_visible=visible,
+            previous_control=previous_before,previous_omega=omega_before,**mission_info,**{'mpc_'+key:value for key,value in result.items()}))
+        if status:break
+    if status==0:
+        truth=original.copy();truth[:,:2]+=steps*c.robot.dt*original[:,3:5]
+        seen,_=execute64(kernels.sense,x,truth,mask,bx,bo,noise,ix[steps],io[steps]);status=1 if (not ordered or leg==total-1) and bool(execute64(kernels.arrived,seen,goal,noise)) else 6
+    assert all(v==0 for v in kernels.cache_sizes().values())
+    trace={k:np.asarray([r[k] for r in records]) for k in records[0]}
+    row=dict(id=p['id'],family=p['family'],noise_level=p['noise_level'],method=solver.method,status=status,steps=count,
+        final_state=x.tolist(),elapsed_seconds=time.perf_counter()-start,solver_attempts=int(trace['attempted'].sum()),
+        solver_seconds=float(trace['mpc_solve_seconds'].sum()),solver_iterations=int(trace['mpc_iterations'].sum()),
+        termination_solver_status=str(trace['mpc_solver_status'][-1]),implicit_jit_cache_entries=kernels.cache_sizes())
+    if ordered:row.update(waypoint_index=leg,waypoints_visited=leg+int(status==1))
+    return row,trace

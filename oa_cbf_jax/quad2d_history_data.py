@@ -1,23 +1,40 @@
-"""Audited pilot labels from authentic visited flight histories."""
-import argparse
-from dataclasses import asdict
-import json
-from pathlib import Path
-import time
-import numpy as np
-import jax
-import jax.numpy as jnp
-from . import quad2d_history as history
-from .quad2d_control import flight_config_from_contract
-from .quad2d_guidance import ObservedMotionGuidanceConfig
-from .quad2d_guided_data import observation_tick
-from .quad2d_data import load_gain_bank
-from .quad2d_relabel import conditional_labels,TARGETS
-from .quad2d_task_targets import contract,values
-from .dataset import sha256,source_fingerprint,load_dataset
-from .io import write_json
-from .cli import sanitize
+"""Quad2d history data functions and shared contracts."""
 
+import argparse
+
+from dataclasses import asdict
+
+import json
+
+from pathlib import Path
+
+import time
+
+import numpy as np
+
+import jax
+
+import jax.numpy as jnp
+
+from . import quad2d_history as history
+
+from .quad2d_control import flight_config_from_contract
+
+from .quad2d_guidance import ObservedMotionGuidanceConfig
+
+from .quad2d_guided_data import observation_tick
+
+from .quad2d_data import load_gain_bank
+
+from .quad2d_data import conditional_labels, RELABEL_TARGETS as TARGETS
+
+from .quad2d_control import contract, values
+
+from .io import sha256, source_fingerprint, load_dataset
+
+from .io import write_json
+
+from .io import sanitize
 
 def collect(source,output,replicas=4,horizon=160,shard_groups=4,gain_dataset='artifacts/datasets/quad2d_terminal_task_v42'):
     root=Path(output);root.mkdir(parents=True,exist_ok=False);source=Path(source);start=time.perf_counter()
@@ -96,6 +113,118 @@ def collect(source,output,replicas=4,horizon=160,shard_groups=4,gain_dataset='ar
         out_index.append(dict(file=path.name,sha256=sha256(path),groups=len(batch),traces=saved));write_json(root/'index.json',out_index)
         print(json.dumps(dict(stage='labels',parents=offset+len(batch),total=len(parents),seconds=time.perf_counter()-t,physical_steps=int(summaries['steps'].sum()),elapsed_seconds=time.perf_counter()-start)),flush=True)
     write_json(root/'summary.json',dict(complete=True,parents=len(parents),branches=len(parents)*Q,compile_seconds=compile_seconds,elapsed_seconds=time.perf_counter()-start,compiled_signatures=3,physical_audit_pending=True))
+
+
+
+from .quad2d_history import SCHEMA, GRAPH_SCHEMA
+
+from .quad2d_control import FlightConfig, normalize_flight_contract
+
+
+def validate_manifest(m):
+    try:
+        saved = flight_config_from_contract(m['config'])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError('Reviewed observed-history graph/controller/target contract required') from error
+    c = asdict(FlightConfig(stationary_obstacles=saved.stationary_obstacles))
+    g = json.loads(json.dumps(asdict(ObservedMotionGuidanceConfig(noise_clearance_weight=1.))))
+    controller = m.get('controller', {})
+    if (m.get('schema') != SCHEMA or m.get('graph_schema') != GRAPH_SCHEMA
+            or m.get('graph_features') != 50 or asdict(saved) != c
+            or normalize_flight_contract(controller.get('config', {})) != c or controller.get('dynamics') != 'Quad2D'
+            or controller.get('predictive_guidance') != g
+            or controller.get('graph_schema') != GRAPH_SCHEMA
+            or controller.get('initial_gain') != [4., 4.]
+            or controller.get('observation_context') != 'raw sensor plus two-anchor causal velocity history; no true state/bias in graph'
+            or controller.get('performance_target') != contract('terminal_task')
+            or m.get('targets') != [TARGETS[0], contract('terminal_task')['target']]
+            or m.get('events') != ['collision_first', 'any_adverse_termination']):
+        raise ValueError('Reviewed observed-history graph/controller/target contract required')
+    if (m.get('queries') != 32 or m.get('replicas', 0) < 1 or m.get('horizon_steps', 0) < 1
+            or m.get('observation_ticks') != [0, 40, 120, 240, 400, 640]
+            or m.get('capacity') != 64 or m.get('route_capacity') != 64
+            or m.get('gain_domain') != dict(lower=.5, upper=8.) or m.get('final_test') is not False):
+        raise ValueError('Unsupported history data shape, split or gain contract')
+
+def _bound(root, record, fields):
+    for key, name in fields:
+        if record.get(key) != sha256(root / name):
+            raise ValueError(f'Changed history provenance: {root / name}')
+
+def validate_dataset(directory, allow_merge=True):
+    """Validate existing audits and all referenced bytes, without redoing physics.
+
+    Multipart views copy no arrays and change no partition: their index points
+    to the exact independently audited part shards. Physical audit scope stays
+    that of each part (one branch/parent plus every collision/envelope branch).
+    """
+    root = Path(directory)
+    if (root / 'INVALIDATED.json').exists():
+        raise ValueError('Invalidated history dataset')
+    m = json.loads((root / 'manifest.json').read_text())
+    validate_manifest(m)
+    audit = json.loads((root / 'independent_replay.json').read_text())
+    _bound(root, audit, [('manifest_sha256', 'manifest.json'), ('index_sha256', 'index.json')])
+    required = ('audit_passed', 'all_histories_and_graphs_checked', 'all_physical_initial_states_preserved',
+                'all_collision_bound_branches_audited')
+    if not all(audit.get(key) is True for key in required):
+        raise ValueError('Complete independent observed-history audit required')
+    index = json.loads((root / 'index.json').read_text())
+    ids = [r['group_id'] for r in m['groups']]
+    if len(ids) != len(set(ids)) or audit['parents'] != len(ids):
+        raise ValueError('Duplicate or incomplete history parents')
+    if m.get('collection_parts'):
+        if not allow_merge:
+            raise ValueError('Nested history merges are not supported')
+        groups, entries = [], []
+        for part in m['collection_parts']:
+            path = Path(part['directory'])
+            _bound(path, part, [('manifest_sha256', 'manifest.json'), ('index_sha256', 'index.json'),
+                                ('audit_sha256', 'independent_replay.json')])
+            pm, _ = validate_dataset(path, allow_merge=False)
+            if shared_contract(pm) != shared_contract(m):
+                raise ValueError('Mixed history collection contracts')
+            groups.extend(pm['groups'])
+            entries.extend(absolute_index(path))
+        if m['groups'] != groups or index != entries:
+            raise ValueError('Changed merged history parent order or shard ancestry')
+    else:
+        source = Path(m['source'])
+        _bound(source, m, [('source_manifest_sha256', 'manifest.json'), ('source_index_sha256', 'index.json'),
+                           ('source_audit_sha256', 'independent_replay.json')])
+        sm = json.loads((source / 'manifest.json').read_text())
+        sa = json.loads((source / 'independent_replay.json').read_text())
+        _bound(source, sa, [('manifest_sha256', 'manifest.json'), ('index_sha256', 'index.json')])
+        if not sa.get('audit_passed'):
+            raise ValueError('Unaudited history acquisition')
+        original = Path(sm['source'])
+        _bound(original, sm, [('source_manifest_sha256', 'manifest.json')])
+        om = json.loads((original / 'manifest.json').read_text())
+        _bound(original, om, [('scenes_sha256', 'scenes.json')])
+        if om.get('training_use') is not True:
+            raise ValueError('Nontraining history acquisition')
+        parents = json.loads((original / 'scenes.json').read_text())
+        if m['groups'] != [{k: p[k] for k in ('group_id', 'family', 'seed', 'partition')} for p in parents]:
+            raise ValueError('Changed original history parent partitions')
+        for row in json.loads((source / 'index.json').read_text()):
+            _bound(source, row, [('sha256', row['file'])])
+        for entry in index:
+            _bound(root, entry, [('sha256', entry['file'])])
+            for trace in entry['traces']:
+                _bound(root, trace, [('sha256', trace['file'])])
+    return m, audit
+
+def shared_contract(m):
+    return {k: m[k] for k in ('schema', 'config', 'capacity', 'route_capacity', 'graph_schema', 'graph_features',
+            'queries', 'replicas', 'horizon_steps', 'observation_ticks', 'frozen_gain_bank', 'gain_domain',
+            'targets', 'events', 'controller', 'replica_semantics', 'censoring')}
+
+def absolute_index(directory):
+    root = Path(directory).resolve()
+    return [dict(entry, file=str(root / entry['file']),
+                 traces=[dict(t, file=str(root / t['file'])) for t in entry['traces']],
+                 collection_directory=str(root))
+            for entry in json.loads((root / 'index.json').read_text())]
 
 
 if __name__=='__main__':

@@ -1,33 +1,55 @@
-"""Small authentic acquired-history bicycle dataset; every branch is retained."""
+"""Bicycle data functions and shared contracts."""
+
 import argparse
-from concurrent.futures import ThreadPoolExecutor,ProcessPoolExecutor
+
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+
 from dataclasses import asdict
+
 import json
+
 from multiprocessing import get_context
+
 from pathlib import Path
+
 import shutil
+
 import time
+
 import jax
+
 import jax.numpy as jnp
+
 import numpy as np
+
 from .bicycle_control import BicycleControlConfig
+
 from .bicycle_guidance import BicycleGuidanceConfig
-from .bicycle_observation import sample_bias,observe,BASE_NOISE,SCHEMA as SENSOR_SCHEMA
+
+from .bicycle_observation import sample_bias, observe, BASE_NOISE, SCHEMA as SENSOR_SCHEMA
+
 from .bicycle_observed_rollout import make_observed_episode
-from .bicycle_features import bicycle_graph,SCHEMA as GRAPH_SCHEMA
-from .bicycle_experiment import read,control_config
-from .bicycle_rollout import NAMES,GOAL,COLLISION,TIMEOUT,STATE_BOUND
-from .dataset import sha256,source_fingerprint
+
+from .bicycle_features import bicycle_graph, SCHEMA as GRAPH_SCHEMA
+
+from .bicycle_control import read, control_config
+
+from .bicycle_rollout import NAMES, GOAL, COLLISION, TIMEOUT, STATE_BOUND
+
+from .io import sha256, source_fingerprint
+
 from .io import write_json
-from .cli import sanitize
-from .bicycle_trace_storage import open_trace,write_query_traces,verify_index_dependencies,STORAGE_SCHEMA
+
+from .io import sanitize
+
+from .bicycle_trace_storage import open_trace, write_query_traces, verify_index_dependencies, STORAGE_SCHEMA
 
 SCHEMA='oa_cbf_bicycle_acquired_history_hurdle_v67'
+
 FIELDS=('initial','goal','obstacles','mask','alpha','points','route_mask','ready','cursor','first_x','first_o','bias_x','bias_o','noise','key')
 
-
 def prepare(output,groups=64,seed=6671,acquisition_mode='fixed2'):
-    from .multiscale_scenes import scene
+    from .scenes import multiscale_scenes_scene as scene
     from .scenes import DIVERSE_FAMILIES
     from .routing import plan_route
     if groups<64 or groups%8:raise ValueError('At least64 family-balanced physical parents required')
@@ -79,10 +101,8 @@ def prepare(output,groups=64,seed=6671,acquisition_mode='fixed2'):
         distribution='Fresh multiscale physical geometry, initialspeed.25..1, noise0/.5/1/2 balanced within each family. No outcome filtering or reference hero coordinates.',
         limitation='One latent history per physical parent, future-innovation replicas; not an exact posterior conditioned only on a noisy query. Pilot, not final calibration/generalization evidence.'))
 
-
 def args(row):
     return tuple(jnp.asarray(row[k],dtype=(jnp.float64 if k in ('initial','obstacles') else bool if k in ('mask','route_mask','ready') else jnp.uint32 if k=='key' else jnp.float32)) for k in FIELDS)
-
 
 def trace_payload(row,summary,trace,horizon):
     status=int(summary['status']);steps=int(summary['steps']);length=max(1,min(horizon,steps+int(status not in (GOAL,COLLISION,TIMEOUT,STATE_BOUND))))
@@ -91,13 +111,11 @@ def trace_payload(row,summary,trace,horizon):
     value.update(final_status=np.int32(status),expected_steps=np.int32(steps),horizon=np.int32(horizon))
     return value
 
-
 def targets(summary,horizon,config):
     status=np.asarray(summary['status']);adverse=~np.isin(status,[GOAL,TIMEOUT]);collision=status==COLLISION;valid=~adverse|collision
     progress=np.asarray(summary['route_progress'])/(horizon*config.robot.dt*config.cruise_speed)
     y=np.stack((np.where(valid,-np.minimum(summary['min_clearance'],.6)/.3,0.),progress),axis=-1).astype(np.float32)
     return dict(target=y,target_mask=np.stack((valid,np.ones_like(valid)),axis=-1),events=np.stack((collision,adverse),axis=-1).astype(np.float32),event_mask=np.stack((valid,np.ones_like(valid)),axis=-1))
-
 
 def collection_layout(replicas,acquisition_steps,snapshot_ticks):
     ticks=tuple(snapshot_ticks)
@@ -106,7 +124,6 @@ def collection_layout(replicas,acquisition_steps,snapshot_ticks):
         raise ValueError('Acquisition ticks must start at zero, increase uniquely, and precede horizon')
     gains=np.geomspace(.5,8.,8).astype(np.float32)
     return ticks,np.repeat(gains,replicas)
-
 
 def parent_indices(total,shard,shards,layout='round_robin'):
     if shards<1 or not 0<=shard<shards:raise ValueError('Invalid worker index')
@@ -117,7 +134,6 @@ def parent_indices(total,shard,shards,layout='round_robin'):
     # then cell replicate. A1024 block gives every cell to each lane; smaller
     # complete256 blocks still balance family/noise/gain marginals per lane.
     return [i for i in range(total) if (i%8+(i//8)%4+(i//32)%8+i//256)%4==shard]
-
 
 def collect(source,output,shard=0,shards=4,horizon=80,acquisition_steps=160,replicas=2,snapshot_ticks=(0,40,120),min_free_gib=0.,shard_layout='round_robin',observation_margin=False,shared_prefix_storage=False):
     snapshot_ticks,canonical=collection_layout(replicas,acquisition_steps,snapshot_ticks)
@@ -196,7 +212,6 @@ def collect(source,output,shard=0,shards=4,horizon=80,acquisition_steps=160,repl
     if any(f._cache_size()!=0 for f in (acquisition_fn,branch_fn,graph_fn)):raise ValueError('Unexpected runtime JIT during collection')
     write_json(root/'summary.json',dict(complete=True,compiled_signatures=3,implicit_jit_cache_entries=0,compile_seconds=compile_seconds,execution_seconds=time.monotonic()-start,parents=len(parents),queries=len(index),branches=branches*len(index),physical_steps=sum(e['steps'] for e in traces)))
 
-
 def audit_one(payload):
     root,entry,config,margin=payload
     from .bicycle_observed_audit import audit_trace
@@ -207,9 +222,8 @@ def audit_one(payload):
         result['margin']=audit_margin_trace(d,c)
     return sanitize(dict(file=entry['file'],sha256=entry['sha256'],**result))
 
-
 def audit(directory,workers=12):
-    from .bicycle_observed_audit import check_graph,check_route_progress
+    from .bicycle_observed_audit import check_graph, check_route_progress
     root=Path(directory);m=read(root/'manifest.json');source=Path(m['source']);sm=read(source/'manifest.json');c=control_config(m['config'])
     if sha256(source/'manifest.json')!=m['source_manifest_sha256'] or sha256(source/'scenes.json')!=sm['scenes_sha256']:raise ValueError('Changed physical/acquisition source')
     parents={r['group_id']:r for r in read(source/'scenes.json')};entries=read(root/'index.json');traces=read(root/'trace_index.json');visits=read(root/'visitation.json')
@@ -287,7 +301,6 @@ def audit(directory,workers=12):
     if storage_proof is not None:result['trace_storage_verification']=storage_proof
     write_json(root/'independent_replay.json',result);print(json.dumps({k:v for k,v in result.items() if k!='rows'}),flush=True)
 
-
 def validate_training_dataset(directory):
     root=Path(directory);m=read(root/'manifest.json')
     from .bicycle_gain_contract import TRAIN_SCHEMA, validate_training_view
@@ -321,6 +334,112 @@ def validate_training_dataset(directory):
     for e in read(root/'index.json'):
         if sha256(root/e['file'])!=e['sha256']:raise ValueError('Changed training labels')
     return m
+
+
+
+import copy
+
+
+from .scenes import DIVERSE_FAMILIES
+
+PHASE = 'training_acquisition'
+
+def select_training_parents(parents):
+    """One lowest-seed TRAIN parent in each prespecified alternating gain cell."""
+    train = [p for p in parents if p['partition'] == 'train']
+    noises = sorted({p['noise'][0] for p in train})
+    bank = np.geomspace(.5, 8, 8).astype(np.float32)
+    if len(noises) != 4 or len({p['group_id'] for p in parents}) != len(parents):
+        raise ValueError('Unique parents and all four training noise levels required')
+    selected = []
+    for fi, family in enumerate(DIVERSE_FAMILIES):
+        for ni, noise in enumerate(noises):
+            for gi, gain in enumerate(bank):
+                if (fi+ni+gi) % 2:
+                    continue
+                cell = [p for p in train if p['family'] == family and p['noise'][0] == noise
+                        and np.float32(p['acquisition_gain']) == gain]
+                if not cell:
+                    raise ValueError('Missing prespecified training cell')
+                selected.append(copy.deepcopy(min(cell, key=lambda p: p['seed'])))
+    if len(selected) != 128 or any(p['calibration_role'] != 'none' for p in selected):
+        raise ValueError('128 train-only parents with no reserved calibration role required')
+    return selected
+
+def select_parents(parents):
+    selected = select_training_parents(parents)
+    validation = [p for p in parents if p['partition']=='validation']
+    noises = sorted({p['noise'][0] for p in validation})
+    if len(noises)!=4: raise ValueError('Four validation noise levels required')
+    for family in DIVERSE_FAMILIES:
+        for noise in noises:
+            cell=[p for p in validation if p['family']==family and p['noise'][0]==noise]
+            if not cell: raise ValueError('Missing validation family/noise cell')
+            selected.append(copy.deepcopy(min(cell,key=lambda p:p['seed'])))
+    if len(selected)!=160 or any(p['calibration_role']!='none' for p in selected):
+        raise ValueError('Use128TRAIN/32validation parents, no calibration roles')
+    return selected
+
+def validate_source(directory):
+    directory=Path(directory);m=read(directory/'manifest.json')
+    if (m.get('data_role')!='reserved_bicycle_learned_policy_acquisition'
+            or m.get('training_use') is not True or m.get('weight_fit_authorized') is not True
+            or m.get('final_test') is not False or m.get('groups')!=160
+            or sha256(directory/'scenes.json')!=m['scenes_sha256']):
+        raise ValueError('Reserved acquisition source required')
+    source=Path(m['acquisition_parent_source']);original=read(source/'manifest.json')
+    if (sha256(source/'manifest.json')!=m['acquisition_parent_manifest_sha256']
+            or sha256(source/'scenes.json')!=original['scenes_sha256']
+            or original.get('training_use') is not True or original.get('weight_fit_authorized') is not True
+            or original.get('final_test') is not False):
+        raise ValueError('Changed or unauthorized original acquisition parents')
+    parents=read(directory/'scenes.json')
+    if parents!=select_parents(read(source/'scenes.json')):
+        raise ValueError('Changed original physical parents, roles or selection')
+    if m['config']!=original['config'] or m['routing_contract']!=original['routing_contract']:
+        raise ValueError('Acquisition physics/routing changed')
+    if m['phase_order']!={PHASE:list(range(160))}:
+        raise ValueError('Missing or reordered acquisition parents')
+    return m,parents
+
+
+def source_map(dataset):
+    root=Path(dataset);m=read(root/'manifest.json');union=m['shared_observation_union'];result={};bindings={}
+    for base in [Path(union['base']),*[Path(p['directory']) for p in union['parts']]]:
+        index=base/'index.json';bindings[str(index)]=sha256(index)
+        for e in read(index):
+            file=str((base/e['file']).resolve());t=e['traces'][0]
+            path=(base/t['acquisition_file']).resolve()
+            result[file]=dict(path=str(path),sha256=t['acquisition_sha256'],query_sha256=e['sha256'],
+                group_id=e['group_id'],query_tick=e['query_tick'],query_origin=e.get('acquisition_encoder','fixed'))
+    return result,bindings
+
+
+def directory_bytes(path):
+    return sum(p.stat().st_size for p in path.rglob('*') if p.is_file())
+
+def verify_part(path):
+    from .bicycle_policy_labels import HORIZON
+    from .bicycle_policy_labels import SCHEMA as LABEL_VALIDATION_SCHEMA
+    from .bicycle_policy_labels import REPLICAS
+    p = Path(path); m = read(p/'manifest.json'); a = read(p/'independent_replay.json'); s = read(p/'summary.json')
+    flags = ('audit_passed', 'all_physical_prefixes_replayed', 'all_original_observed_rows_checked',
+             'all_graphs_independently_checked', 'all_acquired_history_bindings_checked', 'all_recorded_margin_bounds_checked')
+    if (m['schema'] != LABEL_VALIDATION_SCHEMA or m['horizon_steps'] != HORIZON or m['replicas'] != REPLICAS
+            or not all(a.get(k) is True for k in flags) or a['feasible_qp_rejections']
+            or not a['trace_storage_verification']['all_shared_dependencies_verified']
+            or not s['complete'] or s['compiled_signatures'] != 2 or s['implicit_jit_cache_entries'] != 0):
+        raise ValueError('Incomplete or failed physical/compilation audit')
+    for field, file in (('manifest_sha256','manifest.json'), ('index_sha256','index.json'),
+                        ('trace_index_sha256','trace_index.json'), ('selected_queries_sha256','selected_queries.json')):
+        if a[field] != sha256(p/file): raise ValueError('Changed audited evidence')
+    for k in ('queries','branches','physical_steps','parents'):
+        if a[k] != s[k]: raise ValueError('Different collection/audit totals')
+    from .bicycle_trace_storage import verify_index_dependencies
+    verify_index_dependencies(p, read(p/'trace_index.json'))
+    return dict(directory=str(p.resolve()), parents=a['parents'], queries=a['queries'], branches=a['branches'],
+        physical_steps=a['physical_steps'], bytes=directory_bytes(p), manifest_sha256=sha256(p/'manifest.json'),
+        index_sha256=sha256(p/'index.json'), audit_sha256=sha256(p/'independent_replay.json'))
 
 
 if __name__=='__main__':

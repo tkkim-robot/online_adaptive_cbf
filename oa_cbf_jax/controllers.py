@@ -1,25 +1,24 @@
-"""Hard CBF-QP, exact small two-input reference, and native solver adapters."""
+"""Controllers functions and shared contracts."""
 
 from functools import partial
+
 from typing import NamedTuple
+
 import jax
+
 import jax.numpy as jnp
+
 import numpy as np
 
 from .config import UnicycleConfig
 
-# JAX 0.8.2 supports explicit FP64 arrays without changing default dtypes.
-# Configure once before tracing: toggling enable_x64 inside a scan breaks nested
-# vmap transformations when their batching rules run outside that context.
 jax.config.update('jax_explicit_x64_dtypes','allow')
-
 
 class QPResult(NamedTuple):
     control: jax.Array
     feasible: jax.Array
     max_violation: jax.Array
     objective: jax.Array
-
 
 def nominal_unicycle(x, goal, config: UnicycleConfig):
     delta = goal - x[:2]
@@ -30,7 +29,6 @@ def nominal_unicycle(x, goal, config: UnicycleConfig):
     remaining = jnp.maximum(jnp.linalg.norm(delta)-.1,0.)
     desired_speed = jnp.minimum(config.v_max,jnp.minimum(1.2*remaining,jnp.sqrt(2*config.a_max*remaining))) * jnp.maximum(jnp.cos(error), 0.)
     return jnp.stack((2.0*(desired_speed - x[3]), 2.0 * error))
-
 
 def unicycle_cbf_qp(x, goal, obstacles, mask, alpha, config: UnicycleConfig, clearance_uncertainty=0.):
     """Assemble A u <= b for moving disks and continuous second-order CBF.
@@ -67,7 +65,6 @@ def unicycle_cbf_qp(x, goal, obstacles, mask, alpha, config: UnicycleConfig, cle
     return (nominal_unicycle(x, goal, config), jnp.concatenate((a_obs, a_bounds)),
             jnp.concatenate((b_obs, b_bounds)), h, psi)
 
-
 @jax.jit
 def solve_qp2(reference, a, b, weights, tolerance=1e-5):
     """Exact active-set enumeration for strictly convex diagonal two-input QP.
@@ -100,13 +97,11 @@ def solve_qp2(reference, a, b, weights, tolerance=1e-5):
     return QPResult(jnp.where(feasible, candidates[idx], jnp.full(2, jnp.nan)), feasible,
                     jnp.where(feasible, violation[idx], jnp.inf), jnp.where(feasible, costs[idx], jnp.inf))
 
-
 @partial(jax.jit, static_argnames=("config",))
 def control_unicycle(x, goal, obstacles, mask, alpha, config=UnicycleConfig()):
     ref, a, b, h, psi1 = unicycle_cbf_qp(x, goal, obstacles, mask, alpha, config)
     result = solve_qp2(ref, a, b, jnp.ones(2, dtype=x.dtype), config.qp_tolerance)
     return result, jnp.min(jnp.where(mask, h, jnp.inf)), jnp.min(jnp.where(mask, psi1, jnp.inf))
-
 
 class NativeOSQP:
     """Persistent dense-pattern native QP reference, with explicit diagnostics."""
@@ -142,3 +137,76 @@ class NativeOSQP:
         violation = float(np.max(a @ out.x - b)) if feasible else float("inf")
         return dict(control=out.x if feasible else None, feasible=feasible and violation <= 1e-5,
                     violation=violation, status=out.info.status, iterations=out.info.iter)
+
+
+class NativeClarabel:
+    def __init__(self,n_rows,weights=(1.,1.),tolerance=1e-9):
+        import clarabel
+        from scipy import sparse
+        self.api=clarabel;self.sparse=sparse;self.weights=np.asarray(weights,float)
+        if self.weights.ndim!=1 or not np.isfinite(self.weights).all() or np.any(self.weights<=0):
+            raise ValueError('QP weights must be finite and positive')
+        self.scale=np.sqrt(self.weights);self.n_variables=len(self.weights);self.n_rows=n_rows
+        self.hessian=sparse.eye(self.n_variables,format='csc');self.linear=np.zeros(self.n_variables)
+        self.cones=[clarabel.NonnegativeConeT(n_rows)]
+        settings=clarabel.DefaultSettings();settings.verbose=False;settings.max_threads=1
+        settings.tol_gap_abs=tolerance;settings.tol_gap_rel=tolerance;settings.tol_feas=tolerance
+        self.settings=settings
+
+    def solve(self,reference,a,b):
+        reference,a,b=map(lambda value:np.asarray(value,float),(reference,a,b))
+        if reference.shape!=(self.n_variables,) or a.shape!=(self.n_rows,self.n_variables) or b.shape!=(self.n_rows,):
+            raise ValueError('QP shape changed after setup')
+        if not all(np.isfinite(value).all() for value in (reference,a,b)):
+            return dict(control=None,feasible=False,violation=float('inf'),status='nonfinite_input',iterations=0)
+        violation=float(np.max(a@reference-b))
+        if violation<=0:
+            return dict(control=reference.copy(),feasible=True,violation=violation,status='solved_reference',iterations=0)
+        solver=self.api.DefaultSolver(self.hessian,self.linear,self.sparse.csc_matrix(a/self.scale),b-a@reference,
+                                      self.cones,self.settings)
+        result=solver.solve();x=reference+np.asarray(result.x)/self.scale
+        finite=np.isfinite(x).all();violation=float(np.max(a@x-b)) if finite else float('inf')
+        solved=result.status==self.api.SolverStatus.Solved
+        return dict(control=x if finite else None,feasible=bool(solved and finite and violation<=1e-5),
+                    violation=violation,status=str(result.status),iterations=int(result.iterations))
+
+
+class NativeProxQP:
+    def __init__(self,n_rows,weights=(1.,1.),tolerance=1e-9):
+        import proxsuite
+        self.api=proxsuite.proxqp;self.weights=np.asarray(weights,float)
+        if self.weights.ndim!=1 or not np.isfinite(self.weights).all() or np.any(self.weights<=0):
+            raise ValueError('QP weights must be finite and positive')
+        self.scale=np.sqrt(self.weights);self.n_variables=len(self.weights);self.n_rows=n_rows
+        self.solver=self.api.dense.QP(self.n_variables,0,n_rows)
+        self.solver.settings.eps_abs=tolerance;self.solver.settings.eps_rel=0.
+        self.solver.settings.eps_primal_inf=1e-12;self.solver.settings.eps_dual_inf=1e-12
+        self.solver.settings.max_iter=10000
+        self.solver.settings.verbose=False
+        self.solver.init(np.eye(self.n_variables),np.zeros(self.n_variables),None,None,
+                         np.zeros((n_rows,self.n_variables)),np.full(n_rows,-np.inf),np.ones(n_rows))
+        self.previous_solved=False
+
+    def solve(self,reference,a,b):
+        reference,a,b=map(lambda v:np.asarray(v,float),(reference,a,b))
+        if reference.shape!=(self.n_variables,) or a.shape!=(self.n_rows,self.n_variables) or b.shape!=(self.n_rows,):
+            raise ValueError('QP shape changed after setup')
+        if not all(np.isfinite(v).all() for v in (reference,a,b)):
+            return dict(control=None,feasible=False,violation=float('inf'),status='nonfinite_input',iterations=0)
+        violation=float(np.max(a@reference-b))
+        if violation<=0:
+            return dict(control=reference.copy(),feasible=True,violation=violation,status='solved_reference',iterations=0)
+        # ProxQP 0.7.3 can retain an infeasibility status/internal iterate across
+        # updates. A clean initialization is cheap for these 3/4-variable QPs
+        # and is necessary even when a previously rejected scene becomes empty.
+        self.solver.cleanup()
+        self.solver.settings.initial_guess=self.api.InitialGuess.NO_INITIAL_GUESS
+        self.solver.init(np.eye(self.n_variables),-self.scale*reference,None,None,
+                         a/self.scale,np.full(self.n_rows,-np.inf),b)
+        self.solver.solve();result=self.solver.results
+        x=np.asarray(result.x).copy()/self.scale
+        solved=result.info.status==self.api.QPSolverOutput.PROXQP_SOLVED
+        finite=np.isfinite(x).all();violation=float(np.max(a@x-b)) if finite else float('inf')
+        self.previous_solved=bool(solved and finite and violation<=1e-5)
+        return dict(control=x if finite else None,feasible=self.previous_solved,violation=violation,
+                    status=str(result.info.status),iterations=int(result.info.iter))

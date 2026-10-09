@@ -1,40 +1,28 @@
-"""Independent route audit, including FP32 arithmetic and nearest-segment ties.
+"""Shared route audit implementation."""
 
-An argmin is discontinuous: different FP32 operation fusion can pick different
-near-equal segments. On a failed ordinary check we admit only a segment whose
-outward-rounded distance interval overlaps the smallest upper distance bound.
-The target and committed cursor must still match that SAME segment at the
-original tolerance. No physical or CBF audit tolerance is changed.
-"""
 import numpy as np
-
 
 def _outward(lower, upper):
     return (np.nextafter(np.asarray(lower, np.float32), np.float32(-np.inf)).astype(float),
             np.nextafter(np.asarray(upper, np.float32), np.float32(np.inf)).astype(float))
 
-
 def _exact(value):
     a = np.asarray(value, float)
     return a, a
 
-
 def _add(a, b): return _outward(a[0]+b[0], a[1]+b[1])
-def _sub(a, b): return _outward(a[0]-b[1], a[1]-b[0])
 
+def _sub(a, b): return _outward(a[0]-b[1], a[1]-b[0])
 
 def _mul(a, b):
     products = np.stack((a[0]*b[0], a[0]*b[1], a[1]*b[0], a[1]*b[1]))
     return _outward(products.min(axis=0), products.max(axis=0))
 
-
 def _square(a):
     low = np.where((a[0]<=0)&(a[1]>=0), 0., np.minimum(a[0]**2, a[1]**2))
     return _outward(low, np.maximum(a[0]**2, a[1]**2))
 
-
 def _sum2(a): return _add((a[0][:, 0], a[1][:, 0]), (a[0][:, 1], a[1][:, 1]))
-
 
 def distance_intervals(position, points):
     """Enclose FP32 point-to-segment squared distances using operation bounds.
@@ -55,9 +43,8 @@ def distance_intervals(position, points):
     low, high = _sum2(_square(delta))
     return np.maximum(low, 0.), high
 
-
 def check_transition(x, points, mask, cursor, recorded_target, recorded_cursor, active, tolerance=1e-5):
-    from .quad2d_mpc_experiment import numpy_target
+    from .quad2d_mpc import numpy_target
     # Replay the exact stored values in one consistent reference precision.
     # Mixed FP64 observations / FP32 route lengths introduce an extra rounding
     # path in projection and interpolation, unrelated to the recorded kernel.

@@ -1,16 +1,24 @@
-"""Observed full-state Quad3D graph; no physical latent state or future inputs."""
+"""Quad3d features functions and shared contracts."""
+
 import numpy as np
+
 import jax.numpy as jnp
-from .quad3d_routing import flight_target,numpy_flight_target
-from .quad3d_observation import guidance_obstacles,numpy_obstacles,BASE_NOISE
+
+from .quad3d_routing import flight_target, numpy_flight_target
+
+from .quad3d_observation import guidance_obstacles, numpy_obstacles, BASE_NOISE
 
 SCHEMA='quad3d_observed_flight_50_v94'
-FEATURES=50
-OBSERVER_SCHEMA='quad3d_observed_bias_history_58_v98'
-OBSERVER_FEATURES=58
-BIAS_INDICES=np.array([3,4,6,7,8,9,10,11])
-BIAS_SCALE=np.array([BASE_NOISE[1]]*2+[BASE_NOISE[2]]*3+[BASE_NOISE[3]]*3)
 
+FEATURES=50
+
+OBSERVER_SCHEMA='quad3d_observed_bias_history_58_v98'
+
+OBSERVER_FEATURES=58
+
+BIAS_INDICES=np.array([3,4,6,7,8,9,10,11])
+
+BIAS_SCALE=np.array([BASE_NOISE[1]]*2+[BASE_NOISE[2]]*3+[BASE_NOISE[3]]*3)
 
 def graph(x,goal,obstacles,mask,points,route_mask,cursor,previous_u,previous_gain,noise,config):
     c=config;r=c.robot;n=len(obstacles)+2;dtype=x.dtype
@@ -31,7 +39,6 @@ def graph(x,goal,obstacles,mask,points,route_mask,cursor,previous_u,previous_gai
     assert result.shape[-1]==FEATURES
     return jnp.where(node_mask[:,None],result,0.),node_mask
 
-
 def numpy_graph(x,goal,o,mask,points,rm,cursor,previous_u,previous_gain,noise,c):
     """Independent explicit NumPy schema and routing reconstruction."""
     x,goal,o,previous_u,previous_gain,noise=map(np.asarray,(x,goal,o,previous_u,previous_gain,noise));r=c.robot
@@ -49,7 +56,6 @@ def numpy_graph(x,goal,o,mask,points,rm,cursor,previous_u,previous_gain,noise,c)
         result[i]=np.r_[np.eye(3)[kind],pos/5,vel/c.velocity_limit,radius,(np.sqrt(np.dot(pos,pos)+1e-12)-r.radius-radius)/3,context]
     return result,node_mask
 
-
 def history_graph(*args,config,nominal_bias=None):
     """Versioned observer features, preserving the legacy 50-column graph."""
     features,mask=graph(*args,config)
@@ -61,7 +67,6 @@ def history_graph(*args,config,nominal_bias=None):
     result=jnp.concatenate((features,jnp.broadcast_to(bias,(len(mask),8))),axis=-1)
     return jnp.where(mask[:,None],result,0.),mask
 
-
 def numpy_history_graph(*args,config,nominal_bias=None):
     features,mask=numpy_graph(*args,config)
     if config.nominal_bias_observer=='none':
@@ -71,3 +76,41 @@ def numpy_history_graph(*args,config,nominal_bias=None):
     bias=np.asarray(nominal_bias)[[3,4,6,7,8,9,10,11]]/np.array([.004,.004,.015,.015,.015,.008,.008,.008])
     result=np.concatenate((features,np.broadcast_to(bias,(len(mask),8))),axis=-1)
     return np.where(mask[:,None],result,0.),mask
+
+
+import jax
+
+
+def validate(config):
+    if config.robot.inertia_x!=config.robot.inertia_y:
+        raise ValueError('Quarter-turn augmentation requires equal horizontal inertias')
+    if config.nominal_bias_observer!='innovation_ema_v97':
+        raise ValueError('Quarter-turn features require the58-column history contract')
+
+def rotate_xy(values,turns):
+    matrices=jnp.asarray([[[1,0],[0,1]],[[0,-1],[1,0]],
+                          [[-1,0],[0,-1]],[[0,1],[-1,0]]],values.dtype)
+    return values@matrices[turns%4].T
+
+def rotate_control(control,turns):
+    return jnp.take(control,(jnp.arange(4)-turns)%4,axis=-1)
+
+def rotate_features(features,turns):
+    """Transform one stored66x58 observation graph; masks and targets unchanged."""
+    if features.shape[-1]!=58:raise ValueError('Expected the58-column observed Quad3D graph')
+    result=features
+    # Relative positions/velocities, goal/route target, and current velocity.
+    for index in (3,5,9,12,21,52):
+        result=result.at[...,index:index+2].set(rotate_xy(features[...,index:index+2],turns))
+    # Pitch/roll, rates, and matching normalized observer-bias pairs.
+    for index in (18,24,50,55):
+        result=result.at[...,index:index+2].set(rotate_xy(features[...,index:index+2],-turns))
+    sign=jnp.where(turns%2,-1,1)
+    for index in (20,26,57):result=result.at[...,index].set(sign*features[...,index])
+    return result.at[...,27:31].set(rotate_control(features[...,27:31],turns))
+
+def augment_batch(batch,seed,step):
+    """Same seeded transforms for both encoders; all branches share a rotation."""
+    key=jax.random.fold_in(jax.random.PRNGKey(seed),step)
+    turns=jax.random.randint(key,(len(batch['features']),),0,4)
+    return dict(batch,features=jax.vmap(rotate_features)(batch['features'],turns))

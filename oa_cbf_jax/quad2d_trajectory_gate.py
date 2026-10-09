@@ -5,35 +5,51 @@ rejected decisions. Observation reconstruction never reads the latent state.
 The new gate changes the policy: coverage on its trajectories is an independent
 empirical audit, not inherited exchangeability with the calibration policy.
 """
+
 import argparse
+
 from copy import deepcopy
+
 from dataclasses import asdict
+
 import json
+
 from pathlib import Path
+
 import time
+
 import numpy as np
-from .dataset import sha256
+
+from .io import sha256
+
 from .io import write_json
 
 SCHEMA = 'oa_cbf_frozen_trajectory_gate_v1'
+
 SCORE_SCHEMA = 'quad2d_query_pool_trajectory_cs_v1'
+
 LOCAL_DIAGNOSTIC_SCORE_SCHEMA = 'quad2d_local_query_replay_diagnostic_v1'
+
 SPEED_DIAGNOSTIC_SCORE_SCHEMA = 'quad2d_nominal_speed_query_replay_diagnostic_v1'
+
 FRESH_SCHEMA = 'oa_cbf_fresh_flight_predictive_calibration_v61'
+
 CLIPPED_SCHEMA='quad2d_clipped_mixture_prediction_calibration_v1'
+
 CLIPPED_QUERY_SCHEMA='quad2d_clipped_mixture_live_query_statistics_v1'
+
 COMPONENT_FIELDS=('risk_component_mean','risk_component_variance','risk_component_probability')
+
 BASE_SCHEMAS = ('oa_cbf_development_calibration_v1', FRESH_SCHEMA, CLIPPED_SCHEMA)
+
 FRESH_BINDINGS = ('fresh_dataset', 'fresh_dataset_manifest_sha256',
     'fresh_dataset_index_sha256', 'fresh_dataset_audit_sha256', 'training_dataset',
     'event_statistic', 'delayed_calibration_valid', 'candidates', 'label_replicas',
     'bundle_manifest_sha256', 'raw_predictions_sha256', 'network_compute_dtype',
     'training_lineage_manifests')
 
-
 def read(path):
     return json.loads(Path(path).read_text())
-
 
 def query_contexts(data, config, neighborhood=None):
     """Recover pre-query memories by replaying only accepted command records."""
@@ -42,7 +58,7 @@ def query_contexts(data, config, neighborhood=None):
     if (neighborhood is None) != ('controller_obstacle_mask' not in data):
         raise ValueError('Local query traces require an explicit neighborhood contract')
     if neighborhood is not None:
-        from .quad2d_neighborhood import neighborhood_contract, audit_neighborhood
+        from .quad2d_static_inputs import neighborhood_contract, audit_neighborhood
         if neighborhood != neighborhood_contract(neighborhood['capacity']):
             raise ValueError('Unknown diagnostic neighborhood')
         audit_neighborhood(data,neighborhood['capacity'])
@@ -59,14 +75,12 @@ def query_contexts(data, config, neighborhood=None):
             previous_u = data['control'][k]
             previous_gain = data['gain'][k]
 
-
 def numpy_cs(mean, variance):
     """Independent scalar Gaussian pair formula; ensemble is the first axis."""
     m, v = np.moveaxis(np.asarray(mean, float), 0, -1), np.moveaxis(np.asarray(variance, float), 0, -1)
     a, b = v[..., :, None], v[..., None, :]
     d = m[..., :, None] - m[..., None, :]
     return np.maximum((.25*np.log((a+b)**2/(4*a*b))+.5*d*d/(a+b)).mean(axis=(-2, -1)), 0.)
-
 
 def check_live_statistics(live, stages, calibration, policy, reference_mixture_risk=None):
     """Audit the saved values consumed by the decision, including boundaries."""
@@ -78,7 +92,7 @@ def check_live_statistics(live, stages, calibration, policy, reference_mixture_r
         raise ValueError('Invalid actual query statistics')
     if any(k in live for k in COMPONENT_FIELDS):
         if getattr(policy,'risk_aggregation',None):raise ValueError('Ordinary Gaussian members required')
-        from .clipped_risk_reference import parameters,tail,disagreement
+        from .clipped_inference import parameters, tail, clipped_risk_reference_disagreement as disagreement
         cm,cv,cw=parameters(live)
         if cm.shape!=mean.shape:raise ValueError('Invalid live mixture component shape')
         center=(cw*cm).sum(-1);var=(cw*(cv+(cm-center[...,None])**2)).sum(-1)
@@ -90,7 +104,7 @@ def check_live_statistics(live, stages, calibration, policy, reference_mixture_r
         independent = numpy_cs(mean[...,0],variance[...,0])
         if getattr(policy,'risk_aggregation',None):
             if mean.shape[0]!=4:raise ValueError('Exactly four predictive members required')
-            from .mixture_tail import numpy_reference_batch
+            from .uncertainty import numpy_reference_batch
             reference_risk=(numpy_reference_batch(mean[...,0].T,variance[...,0].T,policy.tail_mass)[1]
                 if reference_mixture_risk is None else np.asarray(reference_mixture_risk))
             if reference_risk.shape!=(33,) or not np.isfinite(reference_risk).all():
@@ -107,7 +121,7 @@ def check_live_statistics(live, stages, calibration, policy, reference_mixture_r
     risk_ok=ep & (risk<=np.float32(policy.risk_threshold))
     admitted=risk_ok & (event[:,0]<=np.float32(policy.collision_probability_limit)) & (event[:,1]<=np.float32(policy.failure_probability_limit))
     if getattr(policy,'progress_admission',None):
-        from .quad2d_gain_improvement import difference_statistics
+        from .quad2d_training import difference_statistics
         center, scale = difference_statistics(mean[...,1],variance[...,1],mean.shape[1]-1)
         improving = center-np.float32(calibration['progress_delta_quantile'])*scale>0
         improving[-1]=True
@@ -116,7 +130,6 @@ def check_live_statistics(live, stages, calibration, policy, reference_mixture_r
     if not np.array_equal(actual,np.asarray(stages)[:4]):
         raise ValueError('Saved live statistics disagree with the actual query stages')
     return float(np.max(np.abs(cs-independent)))
-
 
 def score(directory, bundle, calibration, output, batch=128):
     """AOT replay of all recorded query graphs; CPU independently checks graphs/CS."""
@@ -140,7 +153,7 @@ def score(directory, bundle, calibration, output, batch=128):
     live_statistics = manifest.get('query_statistics_schema') in ('quad2d_live_query_statistics_v1',CLIPPED_QUERY_SCHEMA)
     audit = read(root/'independent_replay.json')
     config = flight_config_from_contract(manifest['config'])
-    from .quad2d_nominal_speed import reference_from_manifest
+    from .quad2d_control import reference_from_manifest
     reference_config=reference_from_manifest(manifest)
     speed_diagnostic=manifest.get('diagnostic_nominal_speed')
     physical_source = Path(manifest['source'])
@@ -188,7 +201,7 @@ def score(directory, bundle, calibration, output, batch=128):
         risk_ok = ep & (risk <= policy_config.risk_threshold)
         admitted = risk_ok & (event[..., 0] <= policy_config.collision_probability_limit) & (event[..., 1] <= policy_config.failure_probability_limit)
         if getattr(policy_config,'progress_admission',None):
-            from .quad2d_gain_improvement import admission
+            from .quad2d_training import admission
             improving = jax.vmap(lambda m,v:admission(m,v,cal['progress_delta_quantile'])[0],in_axes=(1,1))(mean[...,1],variance[...,1])
             admitted &= improving
         stages = jnp.stack([a.sum(axis=1) for a in (finite, ep, risk_ok, admitted)], axis=1)
@@ -216,13 +229,13 @@ def score(directory, bundle, calibration, output, batch=128):
         result = jax.device_get(executable(policy.params, policy.calibration, jnp.asarray(candidates), *map(jnp.asarray, contexts)))
         reference_mixture=None
         if getattr(policy_config,'risk_aggregation',None):
-            from .mixture_tail import numpy_reference_batch
+            from .uncertainty import numpy_reference_batch
             if not live_statistics:raise ValueError('Predictive mixture audit requires recorded live statistics')
             live_mean=np.stack([p[4]['mean'][...,0].T for p in pending])
             live_var=np.stack([p[4]['variance'][...,0].T for p in pending])
             reference_mixture=numpy_reference_batch(live_mean,live_var,policy_config.tail_mass)[1]
         if clipped:
-            from .clipped_risk_reference import parameters,disagreement
+            from .clipped_inference import parameters, clipped_risk_reference_disagreement as disagreement
             independent=disagreement(*parameters(result))
         else:
             independent = numpy_cs(result['mean'], result['variance'])
@@ -311,7 +324,6 @@ def score(directory, bundle, calibration, output, batch=128):
         raise ValueError(f'{stage_differences} replayed query stage counts differ from live policy; inspect before calibration')
     print(json.dumps({k: result[k] for k in ('compile_seconds', 'scoring_seconds', 'query_stage_differences', 'audit_passed')}), flush=True)
 
-
 def checked_scores(directory):
     root = Path(directory); report = read(root/'scores.json')
     if report['schema'] != SCORE_SCHEMA or not report['audit_passed'] or report['scores_sha256'] != sha256(root/'query_scores.npz'):
@@ -334,7 +346,6 @@ def checked_scores(directory):
             raise ValueError('Trajectory maximum or query count changed')
     return report
 
-
 def family_thresholds(records, coverage=.95, minimum_parents=50, families=None):
     from .uncertainty import conformal_threshold
     from .scenes import DIVERSE_FAMILIES
@@ -354,7 +365,6 @@ def family_thresholds(records, coverage=.95, minimum_parents=50, families=None):
         if thresholds[family]['status'] != 'calibrated':
             raise ValueError('Insufficient finite-sample trajectory calibration')
     return thresholds
-
 
 def reserved_families(reports):
     """Use the prospective source declaration, never infer strata from outcomes."""
@@ -376,7 +386,6 @@ def reserved_families(reports):
     if result is None:raise ValueError('No trajectory score reports')
     return result
 
-
 def predictive_reservation_matches(manifest, report):
     """Bind one or multiple frozen models to the same physical parent cohort."""
     single=manifest.get('frozen_predictive_calibration_sha256')
@@ -385,7 +394,6 @@ def predictive_reservation_matches(manifest, report):
     if multiple is None:return single==expected
     return (isinstance(multiple,dict) and multiple.get(report['weights_sha256'])==expected
         and (single is None or single==expected))
-
 
 def check_fresh_lineage(base, reports):
     """Reserve full parent lineages, including predictive fit/gate/audit roles."""
@@ -460,7 +468,6 @@ def check_fresh_lineage(base, reports):
         if report['candidates'] != base['candidates']:
             raise ValueError('Fresh trajectory candidate bank changed')
 
-
 def fit(scores, base_calibration, output, coverage=.95, minimum_family_parents=50):
     base = read(base_calibration)
     if base['schema'] not in BASE_SCHEMAS:
@@ -503,7 +510,6 @@ def fit(scores, base_calibration, output, coverage=.95, minimum_family_parents=5
     path = Path(output); path.mkdir(parents=True, exist_ok=False)
     write_json(path/'calibration.json', result)
     print(json.dumps(result['cs_gate']), flush=True)
-
 
 def validate_runtime(info, policy, guidance):
     """Bind changed gate to its frozen predictive transform and scored policy."""

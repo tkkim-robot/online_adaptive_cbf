@@ -1,20 +1,18 @@
-"""Shared geometric routing and bounded-shape JAX route following.
-
-The visibility graph uses observed static disks only. Moving disks remain in
-every local safety constraint; their future trajectories are not given to the
-global planner. A route is guidance, never a certificate of dynamic feasibility.
-No route nodes are silently truncated, and failures have an explicit reason.
-"""
+"""Shared routing implementation."""
 
 from dataclasses import dataclass
+
 from concurrent.futures import ThreadPoolExecutor
+
 import heapq
+
 import time
+
 import numpy as np
+
 import jax.numpy as jnp
 
 from .config import UnicycleConfig
-
 
 @dataclass
 class Route:
@@ -23,7 +21,6 @@ class Route:
     length: float
     planning_margin: float
     status: str
-
 
 def plan_routes(scenes,robot=UnicycleConfig(),*,workers=1,**options):
     """Plan independent scenes in input order; propagate every planner failure.
@@ -42,7 +39,6 @@ def plan_routes(scenes,robot=UnicycleConfig(),*,workers=1,**options):
         with ThreadPoolExecutor(max_workers=workers) as pool:result=list(pool.map(one,scenes))
     return [r for r,_ in result],[t for _,t in result]
 
-
 def segment_clearances(starts, ends, centers, radii):
     """NumPy exact line-segment/disk clearance with arbitrary leading axes."""
     delta = ends - starts
@@ -52,7 +48,6 @@ def segment_clearances(starts, ends, centers, radii):
                        np.maximum(denominator[..., None], 1e-24), 0., 1.)
     closest = starts[..., None, :] + fraction[..., None] * delta[..., None, :]
     return np.linalg.norm(closest - centers, axis=-1) - radii
-
 
 def visibility_weights(nodes, centers, radii, batch_nodes=32):
     """Same complete visibility graph with bounded temporary geometry arrays.
@@ -70,7 +65,6 @@ def visibility_weights(nodes, centers, radii, batch_nodes=32):
         weights[start:stop]=np.where(visible,weights[start:stop],np.inf)
     np.fill_diagonal(weights,np.inf)
     return weights
-
 
 def plan_route(start, goal, obstacles, mask, robot=UnicycleConfig(), *,
                capacity=32, vertices=16, margin=.25, visibility_batch_nodes=None):
@@ -132,14 +126,12 @@ def plan_route(start, goal, obstacles, mask, robot=UnicycleConfig(), *,
         indices.append(int(parents[indices[-1]]))
     return package(nodes[indices[::-1]], 'ready')
 
-
 def route_geometry(points, mask):
     vectors = points[1:] - points[:-1]
     valid = mask[1:] & mask[:-1]
     lengths = jnp.where(valid, jnp.linalg.norm(vectors, axis=-1), 0.)
     cumulative = jnp.concatenate((jnp.zeros(1, points.dtype), jnp.cumsum(lengths)))
     return vectors, valid, lengths, cumulative
-
 
 def physical_route_coordinate(position, points, mask, cursor_hint):
     """Ground-truth arclength metric near the committed route branch.
@@ -158,10 +150,8 @@ def physical_route_coordinate(position, points, mask, cursor_hint):
     index=jnp.argmin(jnp.where(eligible,jnp.sum((projected-position)**2,axis=-1),jnp.inf))
     return coordinate[index]
 
-
 def route_target(x, points, mask, progress, config=UnicycleConfig()):
     return route_target_from_position(x[:2],x[3],points,mask,progress)
-
 
 def route_target_from_position(position,speed,points,mask,progress):
     """Track continuous arclength without jumping to a distant route branch.
@@ -189,7 +179,6 @@ def route_target_from_position(position,speed,points,mask,progress):
     fraction = jnp.clip((desired - cumulative[target_index]) / jnp.maximum(lengths[target_index], 1e-12), 0., 1.)
     target = points[target_index] + fraction * vectors[target_index]
     return target, updated, jnp.maximum(cumulative[-1] - updated, 0.)
-
 
 def route_nominal(x, goal, points, mask, progress, config=UnicycleConfig()):
     target, updated, remaining = route_target(x, points, mask, progress, config)

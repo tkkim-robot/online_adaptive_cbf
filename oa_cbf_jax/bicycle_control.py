@@ -1,19 +1,53 @@
-"""Observed-state DPCBF-QP for the affine-slip bicycle; no learned policy yet.
+"""Bicycle control functions and shared contracts."""
 
-The obstacle barrier follows the existing continuous parabolic shape with an
-explicit smooth relative-speed regularizer. Geometry inside the inflated disk
-is rejected separately; numerical square-root guards never make it admissible.
-"""
-from dataclasses import dataclass,field,asdict
-import math
-import numpy as np
 import jax
-import jax.numpy as jnp
-from .bicycle import BicycleConfig,steering_to_slip
-from .controllers import QPResult,solve_qp2
-from .qp2_interval import solve_qp2_intervals
-from .routing import route_target_from_position
 
+import jax.numpy as jnp
+
+from .controllers import QPResult
+
+@jax.jit
+def solve_qp2_intervals(reference, a, b, weights, tolerance=1e-5):
+    invw=1/weights
+    length=jnp.sqrt(jnp.sum(a*a,axis=1));nonzero=length>0
+    scale=jnp.where(nonzero,length,1.)
+    rows=a/scale[:,None];rhs=b/scale
+    denominator=jnp.sum(rows*rows*invw,axis=1)
+    residual=jnp.matmul(rows,reference,precision='highest')-rhs
+    origins=reference-(residual/jnp.maximum(denominator,1e-30))[:,None]*rows*invw
+    tangent=jnp.stack((-rows[:,1],rows[:,0]),axis=1)
+    coefficient=jnp.matmul(tangent,rows.T,precision='highest')
+    available=rhs[None]-jnp.matmul(origins,rows.T,precision='highest')
+    parallel=jnp.abs(coefficient)<=1e-12
+    bound=available/jnp.where(parallel,1.,coefficient)
+    low=jnp.max(jnp.where(coefficient < -1e-12,bound,-jnp.inf),axis=1)
+    high=jnp.min(jnp.where(coefficient > 1e-12,bound,jnp.inf),axis=1)
+    compatible=jnp.all(~parallel | (available>=-1e-12*(1+jnp.abs(rhs[None]))),axis=1)
+    parameter=jnp.maximum(low,jnp.minimum(jnp.zeros_like(high),high))
+    face=origins+parameter[:,None]*tangent
+    candidates=jnp.concatenate((reference[None],face))
+    geometry=jnp.concatenate((jnp.ones(1,bool),nonzero&compatible&(low<=high+1e-12)))
+    violation=jnp.max(jnp.matmul(candidates,a.T,precision='highest')-b[None],axis=1)
+    valid=geometry&jnp.all(jnp.isfinite(candidates),axis=1)&(violation<=tolerance)
+    cost=.5*jnp.sum(weights*(candidates-reference)**2,axis=1)
+    candidate_cost=jnp.where(valid,cost,jnp.inf)
+    index=jnp.argmax(candidate_cost==jnp.min(candidate_cost));feasible=jnp.any(valid)
+    return QPResult(jnp.where(feasible,candidates[index],jnp.full_like(reference,jnp.nan)),feasible,
+        jnp.where(feasible,violation[index],jnp.inf),jnp.where(feasible,cost[index],jnp.inf))
+
+
+from dataclasses import dataclass, field, asdict
+
+import math
+
+import numpy as np
+
+
+from .bicycle import BicycleConfig, steering_to_slip
+
+from .controllers import solve_qp2
+
+from .routing import route_target_from_position
 
 def constant(value,dtype):
     # With explicit-x64 allowed but global defaults32, JAX0.8.2 converts a
@@ -21,13 +55,11 @@ def constant(value,dtype):
     # A typed NumPy constant preserves the declared physical parameter.
     return jnp.asarray(np.asarray(value,np.float64),dtype)
 
-
 def observed32(value):
     # XLA may elide a bare64->32->64 conversion in a fused consumer while
     # writing a rounded32 trace. Explicit reduce_precision makes the rounding
     # part of the computation, including observed-state and actuator rechecks.
     return jax.lax.reduce_precision(value,exponent_bits=8,mantissa_bits=23).astype(jnp.float32)
-
 
 @dataclass(frozen=True)
 class BicycleControlConfig:
@@ -53,7 +85,6 @@ class BicycleControlConfig:
     @property
     def radius(self):return self.robot.radius
 
-
 def parabolic_terms(state,obstacles,config=BicycleControlConfig()):
     """h, geometric domain, position-gradient and relative-velocity gradient."""
     c=config.robot;direction=jnp.stack((jnp.cos(state[2]),jnp.sin(state[2])))
@@ -74,7 +105,6 @@ def parabolic_terms(state,obstacles,config=BicycleControlConfig()):
     dp=drad+(lam*lateral**2/speed)[:,None]*dz+(2*lam*root*lateral/speed)[:,None]*dlat+mu[:,None]*dz
     dv=unit+(lam*root)[:,None]*(2*lateral[:,None]*normal/speed[:,None]-lateral[:,None]**2*relative/speed[:,None]**3)
     return h,domain,dp,dv
-
 
 def bicycle_rows(state,obstacles,mask,alpha,config=BicycleControlConfig(),speed_error=0.):
     # FP64 row construction and solving; recheck after casting the actuator
@@ -97,7 +127,6 @@ def bicycle_rows(state,obstacles,mask,alpha,config=BicycleControlConfig(),speed_
     rhs=jnp.stack((upper,-lower,constant(c.slip_max,x.dtype),constant(c.slip_max,x.dtype)))
     return jnp.concatenate((obstacle_a,bounds)),jnp.concatenate((obstacle_b,rhs)),h,domain
 
-
 def nominal_bicycle(state,goal,target,config=BicycleControlConfig()):
     delta=target-state[:2];bearing=jnp.arctan2(delta[1],delta[0])-state[2]
     error=jnp.arctan2(jnp.sin(bearing),jnp.cos(bearing))
@@ -105,7 +134,6 @@ def nominal_bicycle(state,goal,target,config=BicycleControlConfig()):
     distance=jnp.maximum(jnp.linalg.norm(goal-state[:2])-.1,0.)
     speed=jnp.maximum(config.robot.speed_min,jnp.minimum(config.cruise_speed,1.2*distance)*jnp.maximum(jnp.cos(error),0.))
     return jnp.stack((config.speed_feedback*(speed-state[3]),steering_to_slip(steering,config.robot)))
-
 
 def project_bicycle_reference(reference,a,b,dtype,config=BicycleControlConfig()):
     """Project a nominal input, then check every row on the rounded actuator."""
@@ -118,7 +146,6 @@ def project_bicycle_reference(reference,a,b,dtype,config=BicycleControlConfig())
     feasible=result.feasible&jnp.isfinite(violation)&(violation<=config.qp_tolerance)
     return QPResult(jnp.where(feasible,u,jnp.full_like(u,jnp.nan)),feasible,violation.astype(dtype),result.objective.astype(dtype))
 
-
 def bicycle_control(state,goal,obstacles,mask,alpha,points,route_mask,cursor,config=BicycleControlConfig(),speed_error=0.):
     target,proposed,remaining=route_target_from_position(state[:2],state[3],points,route_mask,cursor)
     reference=nominal_bicycle(state,goal,target,config)
@@ -126,7 +153,33 @@ def bicycle_control(state,goal,obstacles,mask,alpha,points,route_mask,cursor,con
     result=project_bicycle_reference(reference,a,b,state.dtype,config)
     return result,jnp.min(jnp.where(mask,h,jnp.inf)).astype(state.dtype),jnp.min(jnp.where(mask,domain,jnp.inf)).astype(state.dtype),proposed,remaining,target
 
-
 def bicycle_arrived(state,goal,config=BicycleControlConfig()):
     # Rolling arrival, consistent with the positive declared minimum speed.
     return (jnp.linalg.norm(state[:2]-goal)<=config.goal_tolerance)&(state[3]<=config.terminal_speed)
+
+
+import json
+
+from pathlib import Path
+
+
+def read(path):return json.loads(Path(path).read_text())
+
+def control_config(value):
+    """Restore the complete versioned physical/control contract, no defaults substitution."""
+    value=dict(value);value['robot']=BicycleConfig(**value['robot'])
+    config=BicycleControlConfig(**value)
+    if asdict(config)!=dict(value,robot=asdict(value['robot'])):raise ValueError('Noncanonical bicycle configuration')
+    return config
+
+
+def contract():
+    return dict(schema='bicycle_log_quadratic_affine_gain',gain_dimension=1,
+        fields=['log(alpha/2)/log(4)','(log(alpha/2)/log(4))^2','alpha/2-1'],
+        unchanged_scene_encoding=True,controller_solve=False,training_labels_used=False,
+        explanation='Fixed alpha=2 reference. Last coordinate exposes the exact linear gain dependence in drift+alpha*h.')
+
+def coordinates(gains):
+    if gains.shape[-1]!=1:raise ValueError('Bicycle affine gain requires one scalar gain')
+    value=(jnp.log(jnp.maximum(gains,1e-6))-math.log(2.))/math.log(4.)
+    return jnp.concatenate((value,value**2,gains/2.-1.),axis=-1)

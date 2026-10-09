@@ -1,22 +1,16 @@
-"""Independent NumPy/SciPy flight trajectory and observation audit."""
-import argparse
-from dataclasses import asdict
-import json
-from pathlib import Path
-import numpy as np
-from scipy.integrate import solve_ivp
-from .quad2d import Quad2DConfig
-from .quad2d_control import FlightConfig,flight_config_from_contract
-from .quad2d_rollout import NAMES,COLLISION,GOAL,TIMEOUT
-from .dataset import sha256,source_fingerprint
-from .io import write_json
-from .cli import sanitize
+"""Quad2d audit functions and shared contracts."""
 
+import numpy as np
+
+from scipy.integrate import solve_ivp
+
+from .quad2d_control import FlightConfig
+from .quad2d_rollout import NAMES
+from .simulation import COLLISION
 
 def physical_flow(x,u,c):
     total=u.sum()/c.mass
     return np.array([x[3],x[4],x[5],-np.sin(x[2])*total,np.cos(x[2])*total-c.gravity,c.arm/c.inertia*(u[0]-u[1])])
-
 
 def numpy_graph(x,goal,obs,mask,points,route_mask,noise,config,cursor,previous_control,previous_gain,*,projection_index=None):
     """Independent observed graph, including route memory at visited states."""
@@ -46,7 +40,6 @@ def numpy_graph(x,goal,obs,mask,points,route_mask,noise,config,cursor,previous_c
     node_mask=np.r_[True,True,mask];features[~node_mask]=0.
     return features,node_mask
 
-
 def check_observed_graph(features,node_mask,x,goal,obs,mask,points,route_mask,noise,config,cursor,previous_control,previous_gain):
     """Check every feature, accounting only for a near-tied route argmin.
 
@@ -75,12 +68,6 @@ def check_observed_graph(features,node_mask,x,goal,obs,mask,points,route_mask,no
         candidate,_=numpy_graph(*args,projection_index=int(index))
         if np.allclose(features,candidate,atol=3e-6,rtol=2e-6):return int(index)
     raise ValueError('Graph inconsistent with every numerically admissible route segment')
-
-
-def initial_numpy_graph(x,goal,obs,mask,points,route_mask,noise,config):
-    if not np.allclose(points[0],x[:2],atol=1e-7,rtol=0):raise ValueError('Initial route/observation mismatch')
-    return numpy_graph(x,goal,obs,mask,points,route_mask,noise,config,0.,np.full(2,config.robot.mass*config.robot.gravity/2),np.array([2.,2.]))
-
 
 def check_guidance_trace(data,guidance,config=FlightConfig(),noise=None,goal=None,mask=None,gains=None):
     """Every applied command must have an approved declared guidance profile."""
@@ -129,9 +116,8 @@ def check_guidance_trace(data,guidance,config=FlightConfig(),noise=None,goal=Non
         np.testing.assert_allclose(data['guidance_clearance_penalty'][active],penalty,atol=2e-6,rtol=2e-6)
         np.testing.assert_allclose(data['guidance_score'][active],score,atol=3e-6,rtol=3e-6)
     if 'clearance_guard' in guidance:
-        from .quad2d_clearance_guard import check_guard_trace
+        from .quad2d_guidance import check_guard_trace
         check_guard_trace(data,guidance,config,noise,mask,gains)
-
 
 def check_gain_sources(data,policy,candidates,initial_gain=(4.,4.)):
     """Check declared learned/fallback/held gains without inventing acceptance."""
@@ -160,7 +146,6 @@ def check_gain_sources(data,policy,candidates,initial_gain=(4.,4.)):
         if not np.any(np.all(np.abs(pool-gain)<1e-6,axis=1)):raise ValueError('Gain outside declared candidate/fallback source')
         if data['active'][k]:previous=gain
 
-
 def independent_residual(x,u,obs,mask,gains,config):
     c=config.robot;derivative=physical_flow(x,u,c);delta=x[:2]-obs[:,:2];velocity=x[3:5]-obs[:,3:5]
     h=np.sum(delta*delta,axis=1)-(c.radius+c.clearance_buffer+obs[:,2])**2
@@ -173,7 +158,6 @@ def independent_residual(x,u,obs,mask,gains,config):
         for sign in [1,-1]:residual.append(-sign*derivative[3+axis]+k/2*(config.velocity_limit-sign*x[3+axis]))
     residual.extend(u-c.force_min);residual.extend(c.force_max-u)
     return np.asarray(residual),min(h[mask],default=np.inf),min((hd+gains[0]*h)[mask],default=np.inf)
-
 
 def check_trace(data,summary,observation,obstacles,mask,noise,gains,config,*,command_residual=independent_residual,command_obstacles=None):
     """Replay shared physical/sensor contract with the declared controller rows.
@@ -237,124 +221,97 @@ def check_trace(data,summary,observation,obstacles,mask,noise,gains,config,*,com
         bound_recording_error=bound_error,max_cbf_input_violation=violation,sensor_bound_excess=sensor_excess,collision_consistent=collision_consistent)
 
 
-def audit(dataset):
-    root=Path(dataset);manifest=json.loads((root/'manifest.json').read_text());config=flight_config_from_contract(manifest['config'])
-    source=Path(manifest['source'])
-    if sha256(source/'manifest.json')!=manifest['source_manifest_sha256']:raise ValueError('Source contract changed')
-    source_manifest=json.loads((source/'manifest.json').read_text())
-    if flight_config_from_contract(source_manifest['config'])!=config:raise ValueError('Source physical contract changed')
-    if sha256(source/'scenes.json')!=source_manifest['scenes_sha256']:raise ValueError('Source observations changed')
-    relabeled=manifest['schema']=='oa_cbf_quad2d_initial_hurdle_v2'
-    guided=manifest['schema']=='oa_cbf_quad2d_guided_hurdle_v1'
-    conditional=relabeled or guided
-    terminal=guided and 'terminal_transition_distance' in manifest['controller'].get('predictive_guidance',{})
-    if terminal:
-        from .quad2d_task_targets import contract,check_physical_target_inputs,values
-        target_contract=manifest['controller'].get('performance_target',{})
-        if target_contract.get('kind') not in ('route','terminal_task') or target_contract!=contract(target_contract['kind']) or manifest['targets'][1]!=target_contract['target']:raise ValueError('Unbound terminal performance target')
-    retarget=manifest.get('performance_retarget_source')
-    if retarget:
-        retarget=Path(retarget)
-        if not terminal or sha256(retarget/'manifest.json')!=manifest['performance_retarget_manifest_sha256'] or sha256(retarget/'index.json')!=manifest['performance_retarget_index_sha256']:raise ValueError('Changed performance retarget source')
-        retarget_index={e['file']:e for e in json.loads((retarget/'index.json').read_text())}
-    frozen_gains=None
-    if 'gain_bank_augmentation' in manifest and 'frozen_gain_bank' not in manifest:raise ValueError('Missing augmented gain-bank source')
-    if 'frozen_gain_bank' in manifest:
-        from .quad2d_data import load_gain_bank,augment_gain_bank
-        augmented=manifest.get('gain_bank_augmentation')
-        bank,provenance=load_gain_bank(manifest['frozen_gain_bank']['dataset'],config,None if augmented is not None else manifest['queries'])
-        if provenance!=manifest['frozen_gain_bank']:raise ValueError('Frozen label gain-bank provenance changed')
-        if augmented is not None:
-            bank,expected=augment_gain_bank(bank,manifest['queries'],augmented['seed'],augmented.get('upper',8.))
-            if augmented!=expected:raise ValueError('Augmented label gain-bank provenance changed')
-            if manifest['gain_domain']!=dict(lower=.5,upper=augmented.get('upper',8.)):
-                raise ValueError('Label gain domain differs from explicit augmentation')
-        frozen_gains=np.repeat(bank,manifest['replicas'],axis=0)
-    source_rows={r['group_id']:r for r in json.loads((source/'scenes.json').read_text())} if guided else {}
-    if relabeled:
-        original=Path(manifest['relabel_source'])
-        if sha256(original/'manifest.json')!=manifest['relabel_manifest_sha256'] or sha256(original/'index.json')!=manifest['relabel_index_sha256']:
-            raise ValueError('Relabel provenance changed')
-        original_index={e['file']:e for e in json.loads((original/'index.json').read_text())}
-    rows=[];graph_route_rounding=[]
-    for entry in json.loads((root/'index.json').read_text()):
-        if sha256(root/entry['file'])!=entry['sha256'] or sha256(root/entry['trace_file'])!=entry['trace_sha256']:raise ValueError('Flight trace/shard hash mismatch')
-        with np.load(root/entry['file']) as f:shard={k:f[k] for k in f.files}
-        if terminal:check_physical_target_inputs(shard,manifest)
-        if retarget:
-            old=retarget_index[entry['file']]
-            if sha256(retarget/entry['file'])!=old['sha256']:raise ValueError('Changed retarget raw shard')
-            with np.load(retarget/entry['file']) as raw:
-                if set(raw.files)!=set(shard):raise ValueError('Changed retarget fields')
-                for key in set(shard)-{'target'}:np.testing.assert_array_equal(shard[key],raw[key])
-                np.testing.assert_array_equal(shard['target'][...,0],raw['target'][...,0])
-        if frozen_gains is not None:np.testing.assert_array_equal(shard['gains'],np.broadcast_to(frozen_gains,shard['gains'].shape))
-        if relabeled:
-            old=original_index[entry['file']]
-            if sha256(original/entry['file'])!=old['sha256']:raise ValueError('Raw relabel source changed')
-            with np.load(original/entry['file']) as raw:
-                if set(raw.files)!=set(shard):raise ValueError('Changed raw branch fields')
-                for key in set(shard)-{'target','target_mask'}:
-                    np.testing.assert_array_equal(shard[key],raw[key])
-        for i in range(len(shard['initial_state'])):
-            args=(shard['initial_state'][i],shard['goal'][i],shard['obstacles'][i],shard['obstacle_mask'][i],shard['points'][i],shard['route_mask'][i],shard['noise'][i],config)
-            if guided:
-                r=source_rows[str(shard['group_id'][i])]
-                for key in ['initial_state','goal','obstacles','obstacle_mask','noise']:
-                    np.testing.assert_array_equal(shard[key][i],np.asarray(r[key],dtype=shard[key].dtype))
-                np.testing.assert_array_equal(shard['points'][i],np.asarray(r['route']['points'],np.float32))
-                np.testing.assert_array_equal(shard['route_mask'][i],r['route']['mask'])
-                if str(shard['partition'][i])!=r['partition'] or int(shard['seeds'][i])!=r['seed'] or bool(shard['ready'][i])!=(r['route']['status']=='ready'):
-                    raise ValueError('Observation parent binding changed')
-                for key,default in [('cursor',0.),('previous_control',[config.robot.mass*config.robot.gravity/2]*2),('previous_gain',[2.,2.])]:
-                    np.testing.assert_array_equal(shard[key][i],np.asarray(r.get(key,default),np.float32))
-                rounded=check_observed_graph(shard['features'][i],shard['node_mask'][i],*args,shard['cursor'][i],shard['previous_control'][i],shard['previous_gain'][i])
-                if rounded is not None:graph_route_rounding.append(dict(group_id=str(shard['group_id'][i]),projection_index=rounded))
-            else:
-                features,node_mask=initial_numpy_graph(*args)
-                np.testing.assert_allclose(shard['features'][i],features,atol=3e-6,rtol=2e-6)
-                np.testing.assert_array_equal(shard['node_mask'][i],node_mask)
-        traced=set()
-        for trace_entry in [dict(file=entry['trace_file'],sha256=entry['trace_sha256'])]+entry.get('event_traces',[]):
-            if sha256(root/trace_entry['file'])!=trace_entry['sha256']:raise ValueError('Event trace changed')
-            with np.load(root/trace_entry['file']) as f:data={k:f[k] for k in f.files}
-            parent=int(data['parent']);candidate=int(data['candidate']);traced.add((parent,candidate))
-            if str(data['group_id'])!=str(shard['group_id'][parent]):raise ValueError('Flight trace lineage mismatch')
-            summary={k:shard[k][parent,candidate] for k in ['status','steps','min_clearance']}
-            if int(data['expected_steps'])!=int(summary['steps']) or int(data['final_status'])!=int(summary['status']):raise ValueError('Flight trace/label status mismatch')
-            row=check_trace(data,summary,shard['initial_state'][parent],shard['obstacles'][parent],shard['obstacle_mask'][parent],shard['noise'][parent],shard['gains'][parent,candidate],config)
-            if terminal:
-                np.testing.assert_array_equal(shard['physical_initial_state'][parent,candidate],data['true_initial_state'])
-                np.testing.assert_allclose(shard['final_state'][parent,candidate],data['state'][-1],atol=1e-5,rtol=0)
-            if guided:check_guidance_trace(data,manifest['controller']['predictive_guidance'],config,shard['noise'][parent],shard['goal'][parent],shard['obstacle_mask'][parent],shard['gains'][parent,candidate])
-            rows.append(dict(group_id=str(data['group_id']),candidate=candidate,**row))
-        if not {tuple(pair) for pair in np.argwhere(np.isin(shard['status'],[COLLISION,8]))}<=traced:raise ValueError('Unaudited physical collision/bound branch')
-        # Check target/event semantics on every row, not only the traced branch.
-        adverse=~np.isin(shard['status'],[GOAL,TIMEOUT]);collision=shard['status']==COLLISION
-        physical_risk=-np.minimum(shard['min_clearance'],.6)/.3
-        risk=np.where(~adverse|collision,physical_risk,0.) if conditional else np.where(adverse,1.,physical_risk)
-        target=np.stack((risk,
-            shard['route_progress']/(manifest['horizon_steps']*config.robot.dt*config.cruise_speed)),axis=-1)
-        if terminal:target[...,1]=values(shard,manifest)
-        np.testing.assert_allclose(shard['target'],target,atol=1e-6)
-        np.testing.assert_array_equal(shard['target_mask'],np.stack((~adverse|collision if conditional else np.ones_like(adverse),np.ones_like(adverse)),axis=-1))
-        np.testing.assert_array_equal(shard['events'],np.stack((collision,adverse),axis=-1))
-        np.testing.assert_array_equal(shard['event_mask'],np.stack((~adverse|collision,np.ones_like(adverse)),axis=-1))
-    passed=bool(rows) and all(r['audit_passed'] for r in rows)
-    report=dict(audit_passed=passed,manifest_sha256=sha256(root/'manifest.json'),index_sha256=sha256(root/'index.json'),
-        auditor_source_fingerprint=source_fingerprint(),graph_route_rounding=graph_route_rounding,
-        audited_parents=len({r['group_id'] for r in rows}),audited_branches=len(rows),replayed_steps=sum(r['steps'] for r in rows),rows=rows,
-        all_collision_bound_branches_audited=True,all_initial_graph_features_independently_checked=not manifest.get('visited_observations',False),
-        all_observed_graph_features_independently_checked=True,all_guidance_approvals_checked=guided,
-        all_physical_task_target_inputs_checked=terminal,
-        scope='Predetermined parent/gain traces plus EVERYcollision/bound branch, all nonlinear6state trajectories with SciPy, all physical moving obstacles, independent NumPy CBF/envelope/input rows and raw sensor bounds. All shard graph/context/target/event bindings checked.',
-        limitation='Flight label implementation audit, not certified continuous-time safety, feasibility of unobserved continuation, learned policy performance or generalization evidence.')
-    write_json(root/'independent_replay.json',sanitize(report));print(json.dumps({k:v for k,v in report.items() if k!='rows'}),flush=True)
-    if not passed:raise ValueError('Independent flight replay failed')
-    contract=json.loads((root/'contract_audit.json').read_text())
-    if not contract['contract_valid']:raise ValueError('Dataset contract invalid')
-    write_json(root/'complete.json',dict(status='completed',audit_passed=True,manifest_sha256=sha256(root/'manifest.json'),index_sha256=sha256(root/'index.json')))
+import jax
+
+import jax.numpy as jnp
 
 
-if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--dataset',required=True);audit(p.parse_args().dataset)
+from .quad2d_guidance import TerminalGuidanceConfig, predictive_flight_control
+
+def make_trigger_auditor(config, guidance, batch):
+    guidance=TerminalGuidanceConfig(**guidance)
+    if batch not in (8,32):raise ValueError('Declared trigger audit batch required')
+
+    def predicate(x,goal,obs,mask,gain,points,rm,cursor,noise):
+        result,info=predictive_flight_control(x,goal,obs,mask,gain,points,rm,cursor,config,guidance,noise)
+        qp,h,psi,domain,*_=result
+        tolerance=config.robot.qp_tolerance
+        return info['approved']&qp.feasible&(h>=-tolerance)&(psi>=-tolerance)&(domain>=-tolerance)
+
+    evaluate=jax.jit(jax.vmap(predicate))
+
+    def audit(data):
+        active=np.asarray(data['active'],bool); query=np.asarray(data['requery'],bool)
+        held=active&~query
+        recorded=np.asarray(data['guidance_trigger_previous_feasible'],bool)
+        if recorded.shape!=active.shape or np.any(recorded[query]) or not recorded[held].all():
+            raise ValueError('Query appeared without a failed previous-gain check')
+        if np.any(data['source'][held]!=4):raise ValueError('Non-query action did not retain the previous gain')
+        previous=np.vstack((np.array([[4.,4.]],np.float32),data['gain'][:-1]))
+        np.testing.assert_array_equal(data['gain'][held],previous[held])
+        cursor=np.r_[np.float32(0),data['route_progress'][:-1]].astype(np.float32)
+        indices=np.flatnonzero(query)
+        for start in range(0,len(indices),batch):
+            selected=indices[start:start+batch]
+            padded=np.pad(selected,(0,batch-len(selected)),mode='edge')
+            repeat=lambda value:np.broadcast_to(value,(batch,*value.shape))
+            args=(data['observed_state'][padded],repeat(data['goal']),data['observed_obstacles'][padded],
+                  repeat(data['obstacle_mask']),previous[padded],repeat(data['points']),
+                  repeat(data['route_mask']),cursor[padded],repeat(data['noise']))
+            actual=np.asarray(evaluate(*map(jnp.asarray,args)))[:len(selected)]
+            if actual.any():raise ValueError('Recorded neural query had a feasible previous gain on replay')
+        return dict(trigger_queries_recomputed=len(indices),trigger_held_actions_checked=int(held.sum()),
+                    trigger_audit_passed=True)
+    return audit
+
+
+from .quad2d_guidance import terminal_guidance_from_contract
+
+def make_auditor(config,guidance,batch,candidates):
+    if batch not in (8,32):raise ValueError('Declared incumbent-audit batch required')
+    guidance=terminal_guidance_from_contract(guidance)
+    candidates=np.asarray(candidates,np.float32)
+    def witness(x,goal,obs,mask,gain,points,rm,cursor,noise):
+        result,info=predictive_flight_control(x,goal,obs,mask,gain,points,rm,cursor,config,guidance,noise)
+        qp,h,psi,domain,*_=result;t=config.robot.qp_tolerance
+        return info['approved']&qp.feasible&(h>=-t)&(psi>=-t)&(domain>=-t)
+    evaluate=jax.jit(jax.vmap(witness));executable=None
+
+    def audit(data):
+        nonlocal executable
+        query=np.asarray(data['requery'],bool);indices=np.flatnonzero(query)
+        before=np.vstack((np.full((1,2),4.,np.float32),data['gain'][:-1]))
+        cursor=np.r_[np.float32(0),data['route_progress'][:-1]].astype(np.float32)
+        feasible=np.asarray(data['guidance_incumbent_previous_feasible'],bool)
+        if feasible.shape!=query.shape:raise ValueError('Missing incumbent witness record')
+        for start in range(0,len(indices),batch):
+            chosen=indices[start:start+batch];padded=np.pad(chosen,(0,batch-len(chosen)),mode='edge')
+            repeat=lambda a:np.broadcast_to(a,(batch,*a.shape))
+            args=tuple(map(jnp.asarray,(data['observed_state'][padded],repeat(data['goal']),data['observed_obstacles'][padded],
+                (data['controller_obstacle_mask'][padded] if 'controller_obstacle_mask' in data else repeat(data['obstacle_mask'])),before[padded],repeat(data['points']),repeat(data['route_mask']),cursor[padded],repeat(data['noise']))))
+            if executable is None:executable=evaluate.lower(*args).compile()
+            actual=np.asarray(executable(*args))[:len(chosen)]
+            if not np.array_equal(actual,feasible[chosen]):raise ValueError('Changed previous-gain witness')
+        improvements=recoveries=0
+        for k in indices:
+            pool=np.vstack((candidates,before[k]))
+            mean=np.asarray(data['guidance_query_mean'][k],float)
+            if mean.ndim!=3 or mean.shape[1:]!=(len(pool),2) or not np.isfinite(mean).all():
+                raise ValueError('Missing finite live candidate predictions')
+            ranking=mean[...,1].mean(0)-.01*np.sum(np.log(pool.astype(float)/before[k])**2,-1)
+            previous=float(data['guidance_incumbent_previous_score'][k]);selected=float(data['guidance_incumbent_selected_score'][k])
+            np.testing.assert_allclose(previous,ranking[-1],atol=2e-6,rtol=2e-6)
+            matched=np.all(np.abs(pool-data['gain'][k])<1e-6,-1)
+            if not matched.any() or not np.any(np.isclose(selected,ranking[matched],atol=2e-6,rtol=2e-6)):
+                raise ValueError('Selected score does not match the recorded gain')
+            if data['active'][k] and int(data['source'][k])==0:
+                if feasible[k]:
+                    if not selected>previous:raise ValueError('Learned switch failed the incumbent progress comparison')
+                    improvements+=1
+                else:recoveries+=1
+            elif data['active'][k]:
+                if not feasible[k] or not np.array_equal(data['gain'][k],before[k]):
+                    raise ValueError('Fallback bypassed the incumbent physical witness')
+        return dict(incumbent_query_witnesses_recomputed=len(indices),incumbent_improving_queries=improvements,
+            incumbent_recovery_queries=recoveries,incumbent_audit_passed=True)
+    return audit

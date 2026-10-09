@@ -1,34 +1,30 @@
-"""Prespecified stationary flight inputs for matched learning and comparison.
+"""Quad2d static inputs functions and shared contracts."""
 
-Geometry generators keep their historical names. Actual physical obstacle
-velocities are zero, including under the saved noisy-sensor contract. Failed
-routes and every declared parent remain in their original denominators.
-"""
-
-import argparse
 from collections import Counter
-from dataclasses import asdict
+
 import json
+
 from pathlib import Path
 
 import numpy as np
 
 from .comparison_contracts import physical_obstacle_scope
-from .dataset import sha256
-from .io import write_json
-from .multiscale_scenes import scene
+
+from .io import sha256
+
+from .scenes import multiscale_scenes_scene as scene
+
 from .quad2d_control import FlightConfig, flight_config_from_contract
-from .quad2d_data import prepare as prepare_geometry
+
 from .scenes import DIVERSE_FAMILIES
 
 SCHEMA = 'quad2d_static_source_reservation'
+
 METHODS = ['gat', 'matched_fc', 'fixed_low', 'fixed_high', 'optimal_decay',
            'optimal_decay_qp', 'barriernet']
 
-
 def read(path):
     return json.loads(Path(path).read_text())
-
 
 def partitions(groups, seed, role):
     if role not in ('pilot', 'training', 'comparison') or groups < 64 or groups % 8:
@@ -49,7 +45,6 @@ def partitions(groups, seed, role):
         raise ValueError('Full training needs at least 200 independent calibration parents')
     return result
 
-
 def seeded_fields(seed, index):
     """Reconstruct physical design independently of saved routes and outcomes."""
     local_seed = seed * 100000 + index
@@ -66,32 +61,11 @@ def seeded_fields(seed, index):
                 seed=local_seed, initial_state=state.tolist(), goal=geometry.goal.astype(np.float32).tolist(),
                 obstacles=obstacles.tolist(), obstacle_mask=geometry.obstacle_mask.tolist(), noise=noise.tolist())
 
-
-def prior_inventory(artifacts, ids, own):
-    records = []
-    paths = sorted(Path(artifacts).glob('experiments/*/scenes.json'))
-    paths += sorted(Path(artifacts).glob('datasets/*/manifest.json'))
-    for path in paths:
-        if path.parent.resolve() == own.resolve():
-            continue
-        data = read(path)
-        rows = data.get('groups', []) if isinstance(data, dict) else data
-        if not isinstance(rows, list):
-            continue
-        previous = {r.get('group_id', r.get('scene', {}).get('scene_id'))
-                    for r in rows if isinstance(r, dict)} - {None}
-        if ids & previous:
-            raise ValueError('Previously used physical parent: ' + str(path))
-        if previous:
-            records.append(dict(path=str(path.resolve()), sha256=sha256(path), parents=len(previous)))
-    return records
-
-
 def verify(directory):
     root = Path(directory)
     reservation = read(root / 'reservation.json')
     if reservation.get('schema') == 'quad2d_static_coverage_reservation':
-        from .quad2d_coverage_inputs import verify as verify_coverage
+        from .quad2d_training import verify as verify_coverage
         return verify_coverage(root)
     manifest, rows = read(root / 'manifest.json'), read(root / 'scenes.json')
     if reservation['schema'] != SCHEMA or reservation['manifest_sha256'] != sha256(root / 'manifest.json'):
@@ -122,41 +96,74 @@ def verify(directory):
                 routes=dict(Counter(r['route']['status'] for r in rows)), benchmark_complete=False)
 
 
-def prepare(output, groups=768, seed=9741, role='comparison', workers=1, artifacts='artifacts'):
-    expected_parts = partitions(groups, seed, role)
-    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0 or seed * 100000 + groups >= 2**32:
-        raise ValueError('Nonnegative seed within the physical PRNG range required')
-    root = Path(output)
-    if root.exists():
-        raise ValueError('Use a fresh reservation directory')
-    ids = {f'quad2d_multiscale_v1:{DIVERSE_FAMILIES[i % 8]}:{seed * 100000 + i}'
-           for i in range(groups)}
-    inventory = prior_inventory(artifacts, ids, root)
-    prepare_geometry(root, groups, seed, workers, stationary_obstacles=True)
-    rows, manifest = read(root / 'scenes.json'), read(root / 'manifest.json')
-    for row, partition in zip(rows, expected_parts):
-        row['partition'] = partition
-    write_json(root / 'scenes.json', rows)
-    manifest.update(data_role=role, training_use=role != 'comparison', weight_fit_authorized=role == 'training',
-                    stage='prespecified_static_' + role, scenes_sha256=sha256(root / 'scenes.json'),
-                    selection='Consecutive seeds, balanced families, all failed routes retained; no model outcomes inspected.')
-    write_json(root / 'manifest.json', manifest)
-    reservation = dict(schema=SCHEMA, role=role, manifest_sha256=sha256(root / 'manifest.json'),
-                       scenes_sha256=sha256(root / 'scenes.json'), partitions=dict(Counter(expected_parts)),
-                       prior_sources=inventory, methods=METHODS if role == 'comparison' else None,
-                       steps=1600 if role == 'comparison' else None,
-                       noise='Saved parent noise ranges, identical innovations/latent seeds across methods.',
-                       statistical_unit='Physical parent; family-stratified paired bootstrap.',
-                       benchmark_complete=False, whole_goal_complete=False)
-    write_json(root / 'reservation.json', reservation)
-    return verify(root)
+import jax.numpy as jnp
+
+from .obstacle_selection import contract, nearest_obstacles, nearest_numpy
+
+def neighborhood_contract(count):
+    result = contract(count)
+    result.update(schema='quad2d_observed_neighborhood_diagnostic_v1',
+        storage='Original padded slots; only the graph and controller mask change.',
+        prediction='Hold the current observed neighborhood over the unchanged guidance horizon.',
+        route='Original observed route unchanged.',
+        calibration_coverage_valid=False, final_test=False)
+    return result
+
+def neighborhood_mask(position, obstacles, mask, count):
+    _, present, indices = nearest_obstacles(position, obstacles, mask, count)
+    # Padded -1 entries must not clear the valid entry at index zero.
+    selected = jnp.zeros(mask.shape, jnp.int32).at[jnp.maximum(indices, 0)].add(present.astype(jnp.int32))
+    return mask & (selected > 0)
+
+def numpy_neighborhood_mask(position, obstacles, mask, count):
+    _, present, indices = nearest_numpy(position, obstacles, mask, count)
+    selected = np.zeros_like(mask, dtype=bool)
+    selected[indices[present]] = True
+    return selected
+
+def audit_neighborhood(data, count):
+    actual = np.asarray(data['controller_obstacle_mask'])
+    expected = np.stack([numpy_neighborhood_mask(x, obs, data['obstacle_mask'], count)
+        for x, obs in zip(data['observed_state'], data['observed_obstacles'])])
+    np.testing.assert_array_equal(actual, expected)
+    return dict(neighborhood_audit_passed=True, neighborhood_observations=len(actual),
+        full_world_obstacles=int(np.sum(data['obstacle_mask'])),
+        maximum_controller_obstacles=int(actual.sum(-1).max(initial=0)))
 
 
-if __name__ == '__main__':
-    p = argparse.ArgumentParser()
-    p.add_argument('--output', required=True)
-    p.add_argument('--groups', type=int, default=768)
-    p.add_argument('--seed', type=int, default=9741)
-    p.add_argument('--role', choices=['pilot', 'training', 'comparison'], default='comparison')
-    p.add_argument('--workers', type=int, default=1)
-    print(json.dumps(prepare(**vars(p.parse_args()))), flush=True)
+import hashlib
+
+
+from .quad2d_ood_scenes import FAMILIES as TEMPLATES, geometry
+
+FAMILIES = ('alternating_gates', 'zigzag_channel', 'offset_rooms',
+            'nested_open_boxes', 'interleaved_rows', 'three_lanes',
+            'narrow_gate', 'large_disks')
+
+def static_topologies_seeded_fields(seed, index):
+    local = seed*100000+index
+    x, goal, obstacles, mask = geometry(local, TEMPLATES[index % 8])
+    obstacles[:, 3:5] = 0.
+    rng = np.random.default_rng(local+233)
+    noise = float(rng.choice([0., .5, 1., 2.]))*np.array(
+        [.015, .01, .015, .015, .02, .02, .008], np.float32)
+    fingerprint = hashlib.sha256(b''.join(a.tobytes() for a in
+        (x, goal, obstacles, mask, noise))).hexdigest()
+    family = FAMILIES[index % 8]
+    return dict(group_id=f'quad2d_static_topology:{family}:{local}',
+        family=family, template=TEMPLATES[index % 8], seed=local,
+        partition='frozen_forward_topology', initial_state=x.tolist(), goal=goal.tolist(),
+        obstacles=obstacles.tolist(), obstacle_mask=mask.tolist(), noise=noise.tolist(),
+        solvability='unknown', scene_fingerprint=fingerprint)
+
+
+def validate_parent(parent):
+    total=parent['waypoint_count'];goals=np.asarray(parent['waypoint_goals']);r=parent['waypoint_routes']
+    if isinstance(total,bool) or not isinstance(total,int) or not 1<=total<=3 or goals.shape!=(3,2) or np.shape(r['points'])!=(3,64,2) or np.shape(r['mask'])!=(3,64) or np.shape(r['ready'])!=(3,):raise ValueError('Invalid ordered flight task')
+    if not np.array_equal(np.asarray(parent['goal'],np.float32),goals[total-1].astype(np.float32)):raise ValueError('Final waypoint mismatch')
+
+def numpy_arrived(x,goal,config,noise=None):
+    e=np.zeros(4) if noise is None else 1.15*np.asarray(noise,float)[:4]
+    return bool(np.linalg.norm(x[:2]-goal)+np.sqrt(2)*e[0]<=config.goal_tolerance
+        and np.linalg.norm(x[3:5])+np.sqrt(2)*e[2]<=config.terminal_speed
+        and abs(x[2])+e[1]<=config.terminal_pitch and abs(x[5])+e[3]<=config.terminal_pitch_rate)

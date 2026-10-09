@@ -1,20 +1,24 @@
-"""Explicit, reviewed wide-scalar training inputs; legacy bundles stay unchanged."""
+"""Bicycle gain contract functions and shared contracts."""
+
 import copy
+
 import json
+
 from pathlib import Path
+
 import numpy as np
-from .dataset import sha256
-from .io import write_json
+
+from .io import sha256
 
 RAW_SCHEMA = 'oa_cbf_bicycle_expanded_scalar_observed_labels'
-TRAIN_SCHEMA = 'oa_cbf_bicycle_expanded_scalar_training_view'
-LEGACY_SCHEMA = 'oa_cbf_bicycle_acquired_history_hurdle_v67'
 
+TRAIN_SCHEMA = 'oa_cbf_bicycle_expanded_scalar_training_view'
+
+LEGACY_SCHEMA = 'oa_cbf_bicycle_acquired_history_hurdle_v67'
 
 def candidate_bank():
     return np.r_[np.geomspace(.5, 8., 8).astype(np.float32),
                  np.asarray([.0625, .125, .25, .375, 12., 16., 32., 64.], np.float32)]
-
 
 def contract():
     return dict(schema='bicycle_reviewed_wide_scalar_gain',
@@ -22,7 +26,6 @@ def contract():
                 replicas=2, horizon_steps=40, original_candidates=8,
                 training='Fresh matched encoders; no extrapolation of legacy weights.',
                 deployment='Separate exported-weight qualification and fresh calibration required.')
-
 
 def model_bank(metadata):
     """Resolve only explicitly declared supported domains; never extrapolate."""
@@ -34,7 +37,7 @@ def model_bank(metadata):
                     or metadata['architecture'].get('nearest_dynamics') != 'bicycle'):
                 raise ValueError('Nearest-FC requires the exact reviewed bicycle gain domain')
         else:
-            from .bicycle_candidate_features import validate_metadata
+            from .bicycle_features import validate_metadata
         validate_metadata(metadata)
         if metadata.get('bicycle_gain_contract')!=contract():
             raise ValueError('Missing reviewed wide-gain model contract')
@@ -43,53 +46,21 @@ def model_bank(metadata):
         raise ValueError('Unqualified bicycle model gain domain')
     return np.geomspace(.5,8,8).astype(np.float32)[:,None]
 
-
 def validate_bank(bank):
     a=np.asarray(bank,np.float32)
     if not any(np.array_equal(a,b) for b in (candidate_bank()[:,None],candidate_bank()[:8,None])):
         raise ValueError('Unsupported or reordered bicycle candidate bank')
     return a
 
-
-def qualified_policy_bank(manifest,fit):
-    """Authorize widened physical replay only from the frozen qualified model.
-
-    Legacy physical audits retain their original continuous [0.5,8] check.
-    A trace cannot authorize its own broader range or substitute another bank.
-    """
-    bank=validate_bank(fit['candidates'])
-    if len(bank)==8:return None
-    bundle=Path(manifest['bundle']);metadata=read(bundle/'manifest.json')
-    if (manifest['bundle_manifest_sha256']!=sha256(bundle/'manifest.json')
-            or fit['bundle_manifest_sha256']!=manifest['bundle_manifest_sha256']
-            or fit['weights_sha256']!=manifest['weights_sha256']
-            or metadata['weights_sha256']!=manifest['weights_sha256']
-            or sha256(bundle/'weights.msgpack')!=manifest['weights_sha256']
-            or not np.array_equal(bank,model_bank(metadata))):
-        raise ValueError('Changed model-bound physical audit candidate bank')
-    if metadata.get('event_readout_refit'):
-        from .bicycle_event_policy import validate_fit
-        validate_fit(fit,bundle)
-    elif metadata.get('architecture',{}).get('encoder')=='nearest_fc':
-        from .nearest_fc_qualification import validate_fit
-        validate_fit(fit,bundle)
-    else:
-        from .bicycle_candidate_calibration import validate_fitted_model
-        validate_fitted_model(fit,bundle)
-    return bank
-
-
 def read(path):
     return json.loads(Path(path).read_text())
-
 
 def checked(path, digest):
     if sha256(path) != digest:
         raise ValueError('Changed wide-gain evidence: ' + str(path))
 
-
 def validate_manifest(m):
-    from .bicycle_task_dataset import validate_target_metadata
+    from .bicycle_gain_contract import validate_target_metadata
     validate_target_metadata(m)
     if ('bicycle_task_progress_contract' in m)!=('task_progress_derivative' in m):
         raise ValueError('Explicit task target derivative binding required')
@@ -101,7 +72,6 @@ def validate_manifest(m):
             or m.get('replicas') != 2 or m.get('horizon_steps') != 40
             or m.get('gain_candidates') != candidate_bank().tolist()):
         raise ValueError('Unreviewed or changed wide-gain training contract')
-
 
 def _reviewed_raw(dataset, review):
     root=Path(dataset).resolve(); proof=read(review)
@@ -128,29 +98,10 @@ def _reviewed_raw(dataset, review):
             raise ValueError('Changed part physical proof')
     return root,m,report,proof
 
-
-def create_training_view(dataset, review, output):
-    root,m,report,proof=_reviewed_raw(dataset,review)
-    view=Path(output).resolve();view.mkdir(parents=True,exist_ok=False)
-    manifest=copy.deepcopy(m)
-    manifest.update(schema=TRAIN_SCHEMA,weight_fit_authorized=True,
-        stage='reviewed_wide_gain_matched_training',bicycle_gain_contract=contract(),
-        reviewed_training_view=dict(dataset=str(root),review=str(Path(review).resolve()),
-            review_sha256=sha256(review),report_sha256=sha256(root/'report.json')))
-    validate_manifest(manifest)
-    write_json(view/'manifest.json',manifest)
-    (view/'index.json').write_bytes((root/'index.json').read_bytes())
-    write_json(view/'authorization.json',dict(manifest_sha256=sha256(view/'manifest.json'),
-        index_sha256=sha256(view/'index.json'),review_sha256=sha256(review),
-        unchanged_payloads=True,production_eligible=False))
-    validate_training_view(view)
-    return manifest
-
-
 def validate_training_view(directory):
     view=Path(directory);m=read(view/'manifest.json');validate_manifest(m)
     if 'task_progress_derivative' in m:
-        from .bicycle_task_dataset import validate_view
+        from .bicycle_gain_contract import validate_view
         return validate_view(view)
     binding=m['reviewed_training_view'];checked(binding['review'],binding['review_sha256'])
     root,original,report,proof=_reviewed_raw(binding['dataset'],binding['review'])
@@ -171,4 +122,69 @@ def validate_training_view(directory):
         if not Path(e['file']).is_absolute() or e['group_id'] not in roles or e['branches']!=32:
             raise ValueError('Wrong shared wide-gain query')
         checked(e['file'],e['sha256'])
+    return m
+
+
+def task_progress_contract():
+    return dict(schema='bicycle_physical_route_to_go_progress',
+        potential='Distance to the nearest local route projection plus remaining route arclength.',
+        projection='FP64 physical position; valid positive-length segments clipped to cursor+-1 metre; first nearest-distance tie.',
+        target='Initial potential minus final potential, divided by horizon*dt*cruise_speed.',
+        task_stop='Final potential is zero ONLY on a recorded physically verified GOAL event.',
+        censoring='Actual retained prefix on every branch, including adverse termination; never invent later progress.',
+        new_features=False, gain_search=False, controller_changed=False,
+        limitation='Geometric task progress, not a reachability, safety or navigation-success certificate.')
+
+
+from .bicycle_control import read as task_dataset_read
+
+
+TARGET='physical_route_to_go_reduction_div_horizon_cruise'
+
+def validate_target_metadata(metadata):
+    value=metadata.get('bicycle_task_progress_contract')
+    targets=metadata.get('targets',[])
+    if value is not None or TARGET in targets:
+        if value!=task_progress_contract() or len(targets)!=2 or targets[1]!=TARGET:
+            raise ValueError('Missing or incompatible bicycle task-progress semantics')
+
+def manifest_for(source, base, review):
+    if 'task_progress_derivative' in base or 'bicycle_task_progress_contract' in base:
+        raise ValueError('Nested or reinterpreted progress derivatives are forbidden')
+    result=copy.deepcopy(base)
+    result['stage']='reviewed_physical_task_progress_derivative'
+    result['targets'][1]=TARGET
+    result['bicycle_task_progress_contract']=task_progress_contract()
+    result['task_progress_derivative']=dict(source=str(Path(source).resolve()),
+        source_manifest_sha256=sha256(Path(source)/'manifest.json'),
+        source_index_sha256=sha256(Path(source)/'index.json'),
+        development_review=str(Path(review).resolve()),development_review_sha256=sha256(review),
+        changed_fields=['target[...,1]'],physical_trajectories_unchanged=True)
+    return result
+
+def validate_view(directory):
+    from .bicycle_gain_contract import validate_training_view, validate_manifest
+    root=Path(directory);m=task_dataset_read(root/'manifest.json');validate_manifest(m)
+    binding=m['task_progress_derivative'];source=Path(binding['source'])
+    base=task_dataset_read(source/'manifest.json')
+    if 'task_progress_derivative' in base:raise ValueError('Nested derivative forbidden')
+    validate_training_view(source)
+    review=binding['development_review']
+    expected=manifest_for(source,base,review)
+    if m!=expected:raise ValueError('Progress derivative changed its source, controller or input contract')
+    proof=task_dataset_read(review)
+    if proof.get('status')!='passed' or not proof.get('original_development_queries_statuses_roles_and_independent_statistics_checked'):
+        raise ValueError('Missing independent development diagnosis')
+    audit=task_dataset_read(root/'independent_replay.json');auth=task_dataset_read(root/'authorization.json')
+    for file,key in [('manifest.json','manifest_sha256'),('index.json','index_sha256')]:
+        if sha256(root/file)!=audit[key] or audit[key]!=auth[key]:raise ValueError('Changed derivative authorization')
+    if (auth['audit_sha256']!=sha256(root/'independent_replay.json') or audit['status']!='passed'
+            or not audit['all_nonprogress_fields_exact'] or not audit['all_targets_independently_recomputed']):
+        raise ValueError('Missing independently audited target derivative')
+    original,entries=task_dataset_read(source/'index.json'),task_dataset_read(root/'index.json')
+    if len(original)!=len(entries) or len(entries)!=len(audit['rows']):raise ValueError('Missing original query')
+    for old,new,checked in zip(original,entries,audit['rows'],strict=True):
+        expected=dict(old,file=new['file'],sha256=new['sha256'],target_source_file=old['file'],target_source_sha256=old['sha256'])
+        if new!=expected or sha256(new['file'])!=new['sha256'] or checked['sha256']!=new['sha256'] or checked['source_sha256']!=old['sha256']:
+            raise ValueError('Changed original or derived query binding')
     return m

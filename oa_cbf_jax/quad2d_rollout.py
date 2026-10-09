@@ -1,17 +1,30 @@
-"""Actual six-state flight branches with explicit observation-conditioned noise."""
+"""Shared quad2d rollout implementation."""
+
 from functools import partial
+
 import math
+
 import jax
+
 import jax.numpy as jnp
+
 from .quad2d import integrate_quad2d
-from .quad2d_control import FlightConfig,flight_control,flight_arrived,physical_envelope_violation
-from .dynamics import signed_clearance,swept_disk_clearance
+
+from .quad2d_control import FlightConfig, flight_control, flight_arrived, physical_envelope_violation
+
+from .dynamics import signed_clearance, swept_disk_clearance
+
 from .routing import physical_route_coordinate
-from .simulation import RUNNING,GOAL,COLLISION,INFEASIBLE,TIMEOUT,STATUS_NAMES
+
+from .simulation import RUNNING, GOAL, COLLISION, INFEASIBLE, TIMEOUT, STATUS_NAMES
 
 INADMISSIBLE=5;PLANNER_FAILURE=7;STATE_BOUND=8
-NAMES={**STATUS_NAMES,INADMISSIBLE:'hocbf_inadmissible',6:'policy_rejected',PLANNER_FAILURE:'planner_failure',STATE_BOUND:'state_bound_violation'}
 
+INADMISSIBLE=5;PLANNER_FAILURE=7;STATE_BOUND=8
+
+INADMISSIBLE=5;PLANNER_FAILURE=7;STATE_BOUND=8
+
+NAMES={**STATUS_NAMES,INADMISSIBLE:'hocbf_inadmissible',6:'policy_rejected',PLANNER_FAILURE:'planner_failure',STATE_BOUND:'state_bound_violation'}
 
 def flight_sensor_model(observed,obstacles,mask,noise,key,steps,stationary_obstacles=False):
     """Known ranges[xy,pitch,vxy,pitch_rate,obs_xy,obs_velocity,radius].
@@ -32,7 +45,6 @@ def flight_sensor_model(observed,obstacles,mask,noise,key,steps,stationary_obsta
     ob=truth-obstacles
     innovations=jax.random.uniform(nkey,(steps,6+obstacles.size),dtype=observed.dtype,minval=-1.,maxval=1.).at[0].set(0.)
     return observed+xb,truth,xb,ob,xs,os,innovations
-
 
 @partial(jax.jit,static_argnames=('config','steps','guidance','candidate_hold_steps','continuation_gain'))
 def flight_branch(observed,goal,obstacles,mask,gains,points,route_mask,cursor,noise,key,ready=True,config=FlightConfig(),steps=160,guidance=None,candidate_hold_steps=0,continuation_gain=(4.,4.)):

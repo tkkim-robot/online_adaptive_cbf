@@ -4,20 +4,32 @@ Source method architecture/loss/50epoch/64batch/Adam1e-3/patience10 are fixed.
 Invalid expert solves remain recorded with no fabricated action label. This
 development retraining changes the data source, not the baseline architecture.
 """
-import argparse
-import hashlib
-import json
-from pathlib import Path
-import time
-import numpy as np
-import jax
-import jax.numpy as jnp
-import optax
-from flax import serialization
-from .barriernet import BarrierNet,features,nominal,constraints,hard_deployment_qp,train_prediction,require_x64
-from .dataset import sha256,source_fingerprint
-from .io import write_json
 
+import argparse
+
+import hashlib
+
+import json
+
+from pathlib import Path
+
+import time
+
+import numpy as np
+
+import jax
+
+import jax.numpy as jnp
+
+import optax
+
+from flax import serialization
+
+from .barriernet import BarrierNet, features, nominal, constraints, hard_deployment_qp, train_prediction, require_x64
+
+from .io import sha256, source_fingerprint
+
+from .io import write_json
 
 def prepare(source,output,rows=200000,seed=901):
     require_x64();source=Path(source);root=Path(output);root.mkdir(parents=True,exist_ok=False)
@@ -78,7 +90,6 @@ def prepare(source,output,rows=200000,seed=901):
         limitations='Development supervised data only, not baseline closed-loop results or safety evidence. Raw observations; no OA observer/gates/routing nominal. Native five-nearest controller still evaluated physically against every obstacle.')
     write_json(root/'manifest.json',manifest);print(json.dumps({k:manifest[k] for k in ['rows','groups','partitions','elapsed_seconds']}),flush=True)
 
-
 def load_data(dataset):
     root=Path(dataset);manifest=json.loads((root/'manifest.json').read_text())
     if sha256(root/'data.npz')!=manifest['data_sha256']:raise ValueError('Changed BarrierNet data')
@@ -87,7 +98,6 @@ def load_data(dataset):
     if not train.any():raise ValueError('No valid training labels')
     mean=data['z'][train].mean(0);std=data['z'][train].std(0);std=np.where(std==0,1.,std)
     return manifest,data,mean,std
-
 
 def training_kernels(mean,std,radius,seed=901,*,state_dim=4,goal_dim=2,control_dim=2,model=None,prediction_fn=train_prediction):
     require_x64();model=BarrierNet() if model is None else model;optimizer=optax.adam(1e-3)
@@ -109,13 +119,11 @@ def training_kernels(mean,std,radius,seed=901,*,state_dim=4,goal_dim=2,control_d
         return jax.lax.map(lambda batch:losses(params,batch)[1],batches)
     return (params,optimizer.init(params)),jax.jit(step),jax.jit(epoch),jax.jit(validation)
 
-
 def batches(data,indices):
     indices=np.asarray(indices);count=len(indices);pad=(-count)%64
     padded=np.pad(indices,(0,pad),mode='edge');valid=data['valid'][padded].astype(float);valid[count:]=0.
     arrays=[data[k][padded] for k in ['z','ctx','u_ref','label']]+[valid]
     return tuple(jnp.asarray(a.reshape((-1,64)+a.shape[1:]),jnp.float64) for a in arrays)
-
 
 def method_details(manifest,*,flight=False,variant=None):
     """Only dimensions/architecture change; all native training settings stay fixed."""
@@ -123,7 +131,7 @@ def method_details(manifest,*,flight=False,variant=None):
     name='unicycle';state_dim=4
     if variant is not None:
         if flight:raise ValueError('Choose one native robot model')
-        from .barriernet_variants import BarrierNetVariant,train_prediction as variant_prediction
+        from .barriernet_variants import BarrierNetVariant, train_prediction as variant_prediction
         if variant not in ('Quad3D','KinematicBicycle2D_DPCBF'):raise ValueError('Unknown native variant')
         name='quad3d' if variant=='Quad3D' else 'bicycle'
         options=dict(model=BarrierNetVariant(variant),state_dim=6 if name=='quad3d' else 4,
@@ -138,7 +146,6 @@ def method_details(manifest,*,flight=False,variant=None):
         architecture=f'5x[5->256ReLU->64ReLU], per-obstacle2sigmoid*4, mean pooling, [64+{state_dim}+2+2]->64ReLU->2 residual control'
     if manifest['schema']!=f'barriernet_{name}_training_v1':raise ValueError('Wrong native training data')
     return options,f'barriernet_{name}_jax_v1',architecture
-
 
 def benchmark(dataset,output,samples=128,*,flight=False,variant=None):
     require_x64();manifest,data,mean,std=load_data(dataset)
@@ -155,7 +162,6 @@ def benchmark(dataset,output,samples=128,*,flight=False,variant=None):
         scope='Synchronized warm default64sample end-to-end FP64 BarrierNet differentiable-QP Adam steps. Single model; independent devices are not a larger ensemble or tuned baseline.')
     report['milliseconds']=[v*1000 for v in report['milliseconds']]
     write_json(output,report);print(json.dumps(report),flush=True)
-
 
 def train(dataset,output,*,flight=False,variant=None):
     require_x64();root=Path(output);root.mkdir(parents=True,exist_ok=False)

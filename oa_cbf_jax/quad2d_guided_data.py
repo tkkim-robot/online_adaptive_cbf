@@ -6,26 +6,44 @@ episode fractions sample the recorded prefix, using duration only offline.
 Requeried labels sample a fresh declared observation-conditioned prior. They are
 not a posterior continuation of the acquisition episode's latent physical state.
 """
-import argparse
-from dataclasses import asdict, replace
-import json
-from pathlib import Path
-import time
-import jax
-import jax.numpy as jnp
-import numpy as np
-from scipy.stats import qmc
-from .quad2d_control import FlightConfig,flight_config_from_contract
-from .quad2d_guidance import GuidanceConfig,NoiseClearanceGuidanceConfig,TerminalGuidanceConfig
-from .quad2d_policy import FlightPolicy,FlightPolicyConfig
-from .quad2d_rollout import flight_branch,NAMES
-from .quad2d_features import flight_graph
-from .quad2d_audit import check_trace,check_guidance_trace,check_gain_sources,check_observed_graph
-from .quad2d_data import load_gain_bank
-from .dataset import sha256,source_fingerprint
-from .io import write_json
-from .cli import sanitize
 
+import argparse
+
+from dataclasses import asdict, replace
+
+import json
+
+from pathlib import Path
+
+import time
+
+import jax
+
+import jax.numpy as jnp
+
+import numpy as np
+
+from scipy.stats import qmc
+
+from .quad2d_control import FlightConfig, flight_config_from_contract
+
+from .quad2d_guidance import GuidanceConfig, NoiseClearanceGuidanceConfig, TerminalGuidanceConfig
+
+from .quad2d_policy import FlightPolicy, FlightPolicyConfig
+
+from .quad2d_rollout import flight_branch, NAMES
+
+from .quad2d_features import flight_graph
+
+from .quad2d_audit import check_trace, check_guidance_trace, check_gain_sources, check_observed_graph
+
+from .quad2d_data import load_gain_bank
+
+from .io import sha256, source_fingerprint
+
+from .io import write_json
+
+from .io import sanitize
 
 def arrays(rows):
     values=[np.asarray([r[k] for r in rows],bool if k=='obstacle_mask' else np.float32) for k in ['initial_state','goal','obstacles','obstacle_mask']]
@@ -33,7 +51,6 @@ def arrays(rows):
         np.asarray([r['noise'] for r in rows],np.float32),np.asarray([r['seed'] for r in rows],np.uint32),
         np.asarray([r['route']['status']=='ready' for r in rows],bool),np.asarray([r.get('cursor',0.) for r in rows],np.float32)])
     return tuple(values)
-
 
 def behavior_for_batch(number,mode):
     """75% declared adaptive behavior / 25% fixed over each16batches.
@@ -50,7 +67,6 @@ def behavior_for_batch(number,mode):
         return 'fixed' if (number+number//4)%4==0 else ('learned' if mode=='mixed' else 'backup')
     return mode
 
-
 def behavior_policy(mode, horizon, fallback_mode):
     if fallback_mode not in ('fixed_set','hold_previous'):raise ValueError('Unknown behavior fallback')
     config = FlightPolicyConfig(mode='learned' if mode=='matched_fc' else mode,
@@ -60,12 +76,10 @@ def behavior_policy(mode, horizon, fallback_mode):
         config=replace(config,backup_gains=())
     return config
 
-
 def observation_tick(seed,ticks):
     if not ticks or ticks[0]!=0 or list(ticks)!=sorted(set(ticks)) or any(isinstance(t,bool) or not isinstance(t,int) or not 0<=t<1600 for t in ticks):
         raise ValueError('Prespecified unique ascending observation ticks starting at zero required')
     return int(np.random.default_rng(seed+113).choice(ticks))
-
 
 def acquisition_horizon(ticks, calibration=None):
     """Observation sampling cannot shorten a trajectory-calibrated mission."""
@@ -77,7 +91,6 @@ def acquisition_horizon(ticks, calibration=None):
     if isinstance(horizon,bool) or not isinstance(horizon,int) or not minimum<=horizon<=1600:
         raise ValueError('Observation ticks exceed the calibrated mission horizon')
     return horizon
-
 
 def select_observation(seed,ticks,length,selection='fixed_tick'):
     """One retained parent, with deterministic sampling independent of its score.
@@ -92,7 +105,6 @@ def select_observation(seed,ticks,length,selection='fixed_tick'):
     if selection!='episode_fraction':raise ValueError('Unknown observation selection')
     numerator=int(np.random.default_rng(seed+271).integers(0,9))
     return requested,(numerator*(length-1))//8,numerator/8.
-
 
 def excluded_parents(directory=Path('artifacts/experiments'),calibration_source=None,pilot_source=None):
     """Keep every explicitly held development/test input out of acquisition."""
@@ -120,7 +132,6 @@ def excluded_parents(directory=Path('artifacts/experiments'),calibration_source=
                 if not isinstance(parent,str) or not parent:raise ValueError('Unknown held evaluation parent schema: '+str(scene_file))
                 excluded.add(parent)
     return sorted(excluded)
-
 
 def prepare(source,output,batch=8,shard_index=0,shards=1,mode='fixed',bundle=None,calibration=None,gain_dataset=None,ticks=(0,40,120,240),noise_clearance_weight=0.,terminal_transition_distance=0.,observation_selection='fixed_tick',fc_bundle=None,fc_calibration=None,fallback_mode='fixed_set'):
     if mode=='matched_held' and fallback_mode!='hold_previous':raise ValueError('Matched held acquisition requires the held-gain contract')
@@ -220,7 +231,6 @@ def prepare(source,output,batch=8,shard_index=0,shards=1,mode='fixed',bundle=Non
     write_json(root/'manifest.json',manifest)
     print(json.dumps(dict(stage='acquisition_finished',parents=len(output_rows),compile_seconds=compile_seconds,execution_seconds=execution_seconds,physical_audit_pending=True)),flush=True)
 
-
 def audit(source):
     root=Path(source);m=json.loads((root/'manifest.json').read_text());c=flight_config_from_contract(m['config'])
     if m['scenes_sha256']!=sha256(root/'scenes.json') or m['index_sha256']!=sha256(root/'index.json'):raise ValueError('Acquisition binding changed')
@@ -308,7 +318,6 @@ def audit(source):
     write_json(root/'independent_replay.json',sanitize(report));print(json.dumps({k:v for k,v in report.items() if k!='rows'}),flush=True)
     if not report['audit_passed']:raise ValueError('Observed acquisition audit failed')
 
-
 def merge(parts,output):
     """Join independently audited disjoint workers without replaying twice."""
     parts=list(map(Path,parts));root=Path(output);root.mkdir(parents=True,exist_ok=False)
@@ -349,7 +358,6 @@ def merge(parts,output):
         merge_auditor_source_fingerprint=source_fingerprint(),
         all_behavior_prefixes_replayed=True,all_observed_contexts_independently_checked=True,all_behavior_gain_sources_checked=m.get('schema')=='oa_cbf_quad2d_guided_observation_source_v2',rows=[audits[i] for i in ids],independently_audited_workers=workers)
     write_json(root/'independent_replay.json',sanitize(report));print(json.dumps({k:v for k,v in report.items() if k not in ('rows','independently_audited_workers')}),flush=True)
-
 
 def benchmark(source,output,parents=4,queries=16,replicas=4,horizon=160,noise_clearance_weight=0.,terminal_transition_distance=0.):
     root=Path(source);sm=json.loads((root/'manifest.json').read_text());rows=json.loads((root/'scenes.json').read_text())[:parents]

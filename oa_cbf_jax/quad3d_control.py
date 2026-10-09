@@ -4,13 +4,18 @@ Four-stage obstacle class-K gains are explicit inputs. Fixed envelope barriers
 protect the declared linearized-model domain. QP residual acceptance, cascade
 admissibility and true physical safety are distinct quantities.
 """
-from dataclasses import dataclass, field, asdict
-import math
-import numpy as np
-import jax
-import jax.numpy as jnp
-from .quad3d import Quad3DConfig, matrices, cylinder_hocbf
 
+from dataclasses import dataclass, field, asdict
+
+import math
+
+import numpy as np
+
+import jax
+
+import jax.numpy as jnp
+
+from .quad3d import Quad3DConfig, matrices, cylinder_hocbf
 
 @dataclass(frozen=True)
 class Quad3DControlConfig:
@@ -58,11 +63,9 @@ class Quad3DControlConfig:
         if self.qp_refinement not in ('none','active_faces_v99'):
             raise ValueError('Unknown QP refinement contract')
 
-
 def control_config(value):
     value=dict(value);value['robot']=Quad3DConfig(**value['robot'])
     return Quad3DControlConfig(**value)
-
 
 def envelope_rows(x, config=Quad3DControlConfig()):
     c = config
@@ -93,7 +96,6 @@ def envelope_rows(x, config=Quad3DControlConfig()):
                               (xy_hdd+2*k*xy_hd+k*k*velocity_h[:2]).ravel(), z_h, z_hd+k*z_h))
     return jnp.concatenate((angle_a, angle_a, velocity_a, z_a)), jnp.concatenate((angle_rhs, rate_rhs, velocity_rhs, k*k*z_h+2*k*z_hd)), domain
 
-
 def nominal_quad3d(x, goal, config=Quad3DControlConfig()):
     """Three-dimensional goal feedback; clipping desired acceleration is nominal.
 
@@ -123,14 +125,12 @@ def nominal_quad3d(x, goal, config=Quad3DControlConfig()):
                            [r.yaw_coefficient, -r.yaw_coefficient, r.yaw_coefficient, -r.yaw_coefficient]])
     return jnp.asarray(np.linalg.inv(allocation), x.dtype) @ wrench
 
-
 def quad3d_rows(x, obstacles, mask, gains, config=Quad3DControlConfig()):
     a, b, psi = cylinder_hocbf(x, obstacles, mask, gains, config.robot, config.clearance_buffer)
     ea, eb, domain = envelope_rows(x, config)
     ia = jnp.asarray(np.concatenate((np.eye(4), -np.eye(4))), x.dtype)
     ib = jnp.asarray(np.array([config.robot.input_max]*4+[-config.robot.input_min]*4), x.dtype)
     return jnp.concatenate((a, ea, ia)), jnp.concatenate((b, eb, ib)), jnp.min(jnp.where(mask[:, None], psi, jnp.inf)), jnp.min(domain)
-
 
 def solve_qp4(reference, a, b, tolerance=1e-5, box_bounds=None, refinement='none'):
     """Hard JAX QP with original-unit residual checks.
@@ -149,7 +149,7 @@ def solve_qp4(reference, a, b, tolerance=1e-5, box_bounds=None, refinement='none
     direct=reference if box_bounds is None else jnp.clip(reference,*box_bounds)
     exact=jnp.all(jnp.isfinite(direct)) & (jnp.max(a @ direct-b)<=0.)
     if refinement=='active_faces_v99':
-        from .quad3d_qp_polish import polish
+        from .quad3d_qp import polish
         polished,certificate=jax.lax.cond(exact|~converged,
             lambda _: (u,jnp.bool_(False)),lambda _:polish(reference,aa,bb,dual),operand=None)
         # The independent full original-unit residual test below still applies.
@@ -162,13 +162,11 @@ def solve_qp4(reference, a, b, tolerance=1e-5, box_bounds=None, refinement='none
     # Preserve candidate on rejection for diagnosis; callers must gate application.
     return u, feasible, violation, iterations
 
-
 def quad3d_control(x, goal, obstacles, mask, gains, config=Quad3DControlConfig()):
     reference,a,b,psi,domain=quad3d_problem(x,goal,obstacles,mask,gains,config)
     u, feasible, violation, iterations = solve_qp4(reference, a, b, config.qp_tolerance,
         (config.robot.input_min,config.robot.input_max),refinement=config.qp_refinement)
     return u, feasible, psi, domain, violation, iterations
-
 
 def quad3d_problem(x, goal, obstacles, mask, gains, config=Quad3DControlConfig(), nominal_state=None):
     reference = nominal_quad3d(x if nominal_state is None else nominal_state, goal, config)
@@ -178,7 +176,6 @@ def quad3d_problem(x, goal, obstacles, mask, gains, config=Quad3DControlConfig()
         ha,hb=hold_rows(x,reference,obstacles,mask,gains,config)
         a=jnp.concatenate((a,ha));b=jnp.concatenate((b,hb))
     return reference,a,b,psi,domain
-
 
 def arrived(x, goal, config=Quad3DControlConfig()):
     return ((jnp.linalg.norm(x[:3]-goal) <= config.goal_tolerance)

@@ -1,18 +1,18 @@
-"""OA planar flight nominal and exact collective/differential CBF-QP.
+"""Quad2d control functions and shared contracts."""
 
-The complete six-state nonlinear plant remains in quad2d.py. This controller
-does not stand in for any pinned baseline and has no trained gain policy yet.
-Obstacle class-K parameters are queried explicitly; fixed flight envelope CBFs
-preserve pitch/rate/velocity authority. All observed obstacle rows are checked.
-"""
-from dataclasses import dataclass,field,asdict
+from dataclasses import dataclass, field, asdict
+
 import math
-import jax
-import jax.numpy as jnp
-from .quad2d import Quad2DConfig,quad2d_cbf_rows
-from .controllers import solve_qp2,QPResult
-from .routing import route_target_from_position
 
+import jax
+
+import jax.numpy as jnp
+
+from .quad2d import Quad2DConfig, quad2d_cbf_rows
+
+from .controllers import solve_qp2, QPResult
+
+from .routing import route_target_from_position
 
 def normalize_flight_contract(value):
     """Interpret the historical missing motion flag without altering its file.
@@ -25,7 +25,6 @@ def normalize_flight_contract(value):
     if not isinstance(result['stationary_obstacles'],bool):
         raise ValueError('Stationary-obstacle contract must be boolean')
     return result
-
 
 @dataclass(frozen=True)
 class FlightConfig:
@@ -52,7 +51,6 @@ class FlightConfig:
         if self.pitch_limit>=math.pi/2 or self.cruise_speed>self.velocity_limit:raise ValueError('Invalid hover-capable envelope')
         if not 2*self.robot.force_min<=self.robot.mass*self.robot.gravity<=2*self.robot.force_max:raise ValueError('Hover thrust outside actuator limits')
 
-
 def flight_config_from_contract(value):
     """Load the complete saved plant/sensor contract without resetting defaults.
 
@@ -70,7 +68,6 @@ def flight_config_from_contract(value):
     if asdict(config)!=normalized:raise ValueError('Flight contract does not round trip')
     return config
 
-
 def nominal_flight(x,goal,target,config=FlightConfig()):
     """Bounded outer velocity loop and true pitch/torque inner loop."""
     c=config.robot;delta=target-x[:2];distance=jnp.linalg.norm(delta)
@@ -78,7 +75,6 @@ def nominal_flight(x,goal,target,config=FlightConfig()):
     speed=jnp.minimum(config.cruise_speed,jnp.minimum(1.5*remaining,jnp.sqrt(1.2*remaining)))
     desired_velocity=speed*delta/jnp.maximum(distance,1e-8)
     return nominal_flight_velocity(x,desired_velocity,config)
-
 
 def nominal_flight_velocity(x,desired_velocity,config=FlightConfig()):
     """Shared true pitch/rotor feedback for an explicitly commanded velocity."""
@@ -95,7 +91,6 @@ def nominal_flight_velocity(x,desired_velocity,config=FlightConfig()):
     differential_limit=jnp.minimum(total-2*c.force_min,2*c.force_max-total)
     differential=jnp.clip(torque/c.arm,-differential_limit,differential_limit)
     return .5*jnp.stack((total+differential,total-differential))
-
 
 def envelope_rows(x,config=FlightConfig()):
     """Linear tilt HOCBF and rate/velocity CBFs; no physical state clipping."""
@@ -115,14 +110,12 @@ def envelope_rows(x,config=FlightConfig()):
         (config.velocity_limit-sign[None,:]*x[3:5,None]).reshape(4))))
     return A,b,domain
 
-
 def flight_rows(x,obstacles,mask,gains,config=FlightConfig(),clearance_uncertainty=0.):
     # Preserve precision in small geometric rows; neural/plant storage is FP32.
     dtype=x.dtype;s=x.astype(jnp.float64);o=obstacles.astype(jnp.float64);g=gains.astype(jnp.float64)
     A,b,h,psi=quad2d_cbf_rows(s,o,mask,g,config.robot,clearance_uncertainty)
     guard_A,guard_b,domain=envelope_rows(s,config)
     return jnp.concatenate((A,guard_A)),jnp.concatenate((b,guard_b)),jnp.min(jnp.where(mask,h,jnp.inf)).astype(dtype),jnp.min(jnp.where(mask,psi,jnp.inf)).astype(dtype),domain.astype(dtype)
-
 
 def reduced_flight_qp(reference,A,b,obstacle_count,config=FlightConfig()):
     """Exact row reduction, not hazard truncation or an approximate safe set.
@@ -154,7 +147,6 @@ def reduced_flight_qp(reference,A,b,obstacle_count,config=FlightConfig()):
     valid=result.feasible&valid_t&valid_d&jnp.isfinite(violation)&(violation<=c.qp_tolerance)
     return QPResult(jnp.where(valid,control,jnp.full(2,jnp.nan,jnp.float32)),valid,violation.astype(jnp.float32),result.objective.astype(jnp.float32))
 
-
 def flight_control(x,goal,obstacles,mask,gains,points,route_mask,cursor,config=FlightConfig()):
     target,proposed,remaining=route_target_from_position(x[:2],jnp.linalg.norm(x[3:5]),points,route_mask,cursor)
     nominal=nominal_flight(x,goal,target,config)
@@ -162,12 +154,67 @@ def flight_control(x,goal,obstacles,mask,gains,points,route_mask,cursor,config=F
     result=reduced_flight_qp(nominal,A,b,obstacles.shape[0],config)
     return result,h,psi,domain,proposed,remaining,target
 
-
 def flight_arrived(x,goal,config=FlightConfig()):
     return ((jnp.linalg.norm(x[:2]-goal)<=config.goal_tolerance)&(jnp.linalg.norm(x[3:5])<=config.terminal_speed)&
             (jnp.abs(x[2])<=config.terminal_pitch)&(jnp.abs(x[5])<=config.terminal_pitch_rate))
 
-
 def physical_envelope_violation(x,config=FlightConfig()):
     return jnp.maximum(jnp.max(jnp.abs(x[3:5]))-config.velocity_limit,
                        jnp.maximum(jnp.abs(x[2])-config.pitch_limit,jnp.abs(x[5])-config.pitch_rate_limit))
+
+
+from dataclasses import replace
+
+
+def speed_contract(reference, speed):
+    if isinstance(speed,bool) or not isinstance(speed,(float,int)) or not math.isfinite(speed):
+        raise ValueError('A finite nominal speed is required')
+    # This is a bounded sensitivity experiment, not arbitrary controller transfer.
+    if not reference.cruise_speed < speed <= 1.25*reference.cruise_speed:
+        raise ValueError('Diagnostic speed must increase by at most25percent')
+    runtime=replace(reference,cruise_speed=float(speed))
+    return runtime,dict(schema='quad2d_modest_nominal_speed_diagnostic_v1',
+        reference_config=asdict(reference),cruise_speed=float(speed),
+        calibration_coverage_valid=False,final_test=False,
+        change='Only nominal cruise speed; unchanged physical limits, route, guidance, gain bank and neural weights.')
+
+def reference_from_manifest(manifest):
+    runtime=flight_config_from_contract(manifest['config'])
+    diagnostic=manifest.get('diagnostic_nominal_speed')
+    if diagnostic is None:return runtime
+    if (manifest.get('calibration_coverage_valid') is not False or manifest.get('final_test') is not False
+            or 'observation_neighborhood' in manifest):
+        raise ValueError('Speed-only diagnosis must not imply calibrated coverage or combine locality')
+    reference=flight_config_from_contract(diagnostic['reference_config'])
+    expected,contract=speed_contract(reference,diagnostic['cruise_speed'])
+    if expected!=runtime or contract!=diagnostic:
+        raise ValueError('More than nominal speed changed in the diagnostic')
+    return reference
+
+
+import numpy as np
+
+ROUTE_NAME='observed_prefix_route_progress_div_horizon_cruise_distance'
+
+TASK_NAME='physical_terminal_blended_progress_plus_observed_early_arrival_v1'
+
+def contract(kind):
+    if kind not in ('route','terminal_task'):raise ValueError('Unknown flight performance target')
+    return dict(schema='quad2d_terminal_performance_v1',kind=kind,
+        target=ROUTE_NAME if kind=='route' else TASK_NAME,
+        initial_blend='clip(1-10*observed_graph_ego_feature28/terminal_transition_distance,0,1)' if kind=='terminal_task' else 'unused',
+        physical_progress='(1-initial_blend)*physical_route_progress+initial_blend*physical_goal_distance_decrease' if kind=='terminal_task' else 'physical_route_progress',
+        normalization='full label horizon times dt times cruise speed',
+        arrival_reward='goal_reached*(1-applied_steps/full_horizon)' if kind=='terminal_task' else 'none',
+        censoring='Only integrated prefix progress and actually observed goal arrival; no invented post-stop progress or success')
+
+def values(shard,manifest):
+    c=manifest['config'];h=manifest['horizon_steps'];kind=manifest['controller']['performance_target']['kind']
+    progress=np.asarray(shard['route_progress'],float)
+    if kind=='terminal_task':
+        distance=manifest['controller']['predictive_guidance']['terminal_transition_distance']
+        blend=np.clip(1-10*np.asarray(shard['features'][:,0,28],float)/distance,0.,1.)[:,None]
+        progress=(1-blend)*progress+blend*np.asarray(shard['goal_progress'],float)
+    result=progress/(h*c['robot']['dt']*c['cruise_speed'])
+    if kind=='terminal_task':result+=(shard['status']==1)*(1-np.asarray(shard['steps'],float)/h)
+    return result.astype(np.float32)

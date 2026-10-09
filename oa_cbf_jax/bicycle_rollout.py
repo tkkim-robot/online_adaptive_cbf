@@ -3,15 +3,20 @@
 No learned policy or noisy-observation guarantee is implied. Every attempted
 command, terminal rejection and moving obstacle is retained for replay.
 """
+
 import jax
+
 import jax.numpy as jnp
-from .bicycle import integrate_bicycle,bicycle_state_violation
-from .bicycle_control import BicycleControlConfig,bicycle_control,bicycle_arrived,constant,observed32
-from .dynamics import signed_clearance,swept_disk_clearance
+
+from .bicycle import integrate_bicycle, bicycle_state_violation
+
+from .bicycle_control import BicycleControlConfig, bicycle_control, bicycle_arrived, constant, observed32
+
+from .dynamics import signed_clearance, swept_disk_clearance
 
 RUNNING,GOAL,COLLISION,INFEASIBLE,TIMEOUT,INADMISSIBLE,PLANNER_FAILURE,STATE_BOUND=range(8)
-NAMES={0:'running',1:'goal_reached',2:'collision',3:'qp_rejected',4:'timeout',5:'barrier_inadmissible',6:'planner_failure',7:'state_bound_violation'}
 
+NAMES={0:'running',1:'goal_reached',2:'collision',3:'qp_rejected',4:'timeout',5:'barrier_inadmissible',6:'planner_failure',7:'state_bound_violation'}
 
 def make_bicycle_episode(config=BicycleControlConfig(),steps=1600,guidance=None):
     c=config.robot

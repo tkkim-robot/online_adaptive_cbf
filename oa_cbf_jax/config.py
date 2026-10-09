@@ -1,10 +1,12 @@
-"""Immutable, explicit control and experiment contracts."""
+"""Shared config implementation."""
 
 from dataclasses import asdict, dataclass
-import hashlib
-import json
-import math
 
+import hashlib
+
+import json
+
+import math
 
 @dataclass(frozen=True)
 class UnicycleConfig:
@@ -57,7 +59,6 @@ class UnicycleConfig:
             raise ValueError('Local detour option must be boolean')
         if not isinstance(self.guidance_turn_return,bool):
             raise ValueError('Turn-and-return guidance option must be boolean')
-
 
 def config_hash(config):
     data = asdict(config) if hasattr(config, "__dataclass_fields__") else config

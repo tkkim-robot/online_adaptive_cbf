@@ -1,10 +1,14 @@
-"""Independent NumPy/SciPy checks for acquired-observation bicycle labels."""
-import numpy as np
-from scipy.integrate import solve_ivp
-from .bicycle_audit import reference_rows,reference_flow,polygon_qp
-from .bicycle_control import BicycleControlConfig
-from .bicycle_rollout import GOAL,COLLISION,INFEASIBLE,TIMEOUT,INADMISSIBLE,PLANNER_FAILURE,STATE_BOUND
+"""Shared bicycle observed audit implementation."""
 
+import numpy as np
+
+from scipy.integrate import solve_ivp
+
+from .bicycle_audit import reference_rows, reference_flow, polygon_qp
+
+from .bicycle_control import BicycleControlConfig
+
+from .bicycle_rollout import GOAL, COLLISION, INFEASIBLE, TIMEOUT, INADMISSIBLE, PLANNER_FAILURE, STATE_BOUND
 
 def numpy_graph(x,goal,obs,mask,points,rm,noise,c,cursor,previous_control,previous_gain,projection_index=None):
     x=np.asarray(x,float);obs=np.asarray(obs,float);points=np.asarray(points,float);goal=np.asarray(goal,float);robot=c.robot
@@ -25,7 +29,6 @@ def numpy_graph(x,goal,obs,mask,points,rm,noise,c,cursor,previous_control,previo
     n=len(obs)+2;features=np.column_stack((types,positions/5,velocities/robot.speed_max,radii,clearance/3,np.tile(ego,(n,1)),np.tile(context,(n,1))))
     node_mask=np.r_[True,True,mask];features[~node_mask]=0.;return features,node_mask
 
-
 def check_graph(features,node_mask,args):
     expected,mask=numpy_graph(*args);np.testing.assert_array_equal(node_mask,mask)
     if np.allclose(features,expected,atol=3e-6,rtol=2e-6):return
@@ -41,7 +44,6 @@ def check_graph(features,node_mask,args):
         if np.allclose(features,candidate,atol=3e-6,rtol=2e-6):return
     raise ValueError('Observed bicycle graph differs from independent reference')
 
-
 def reference_route_coordinate(position,points,mask,cursor,projection_index=None):
     points=np.asarray(points,float);position=np.asarray(position,float);v=np.diff(points,axis=0);valid=mask[:-1]&mask[1:]
     length=np.where(valid,np.linalg.norm(v,axis=1),0.);cs=np.r_[0.,np.cumsum(length)]
@@ -52,7 +54,6 @@ def reference_route_coordinate(position,points,mask,cursor,projection_index=None
     index=np.argmin(np.where(eligible,np.sum((projected-position)**2,axis=1),np.inf)) if projection_index is None else projection_index
     return float(coordinate[index])
 
-
 def route_coordinate_candidates(position,points,mask,cursor):
     """Possible nearest segments under FP32 clipped arclength projection.
 
@@ -61,7 +62,7 @@ def route_coordinate_candidates(position,points,mask,cursor):
     Only numerically overlapping distances may supply an alternate segment;
     the returned coordinates are still recomputed independently in FP64.
     """
-    from .route_audit import _exact,_outward,_add,_sub,_mul,_square,_sum2
+    from .route_audit import _exact, _outward, _add, _sub, _mul, _square, _sum2
     points=np.asarray(points,float);position=np.asarray(position,float);mask=np.asarray(mask,bool)
     valid=mask[:-1]&mask[1:];p=_exact(points[:-1]);v=_sub(_exact(points[1:]),p)
     squared=_sum2(_square(v))
@@ -90,7 +91,6 @@ def route_coordinate_candidates(position,points,mask,cursor):
     indices=np.flatnonzero(possible&(distance[0]<=np.min(distance[1][certain],initial=np.inf)))
     return [reference_route_coordinate(position,points,mask,cursor,int(i)) for i in indices]
 
-
 def check_route_progress(saved,initial,final,points,mask,initial_cursor,final_cursor):
     """Check a retained progress label, including genuine nearest-segment ties."""
     args=(points,mask)
@@ -100,7 +100,6 @@ def check_route_progress(saved,initial,final,points,mask,initial_cursor,final_cu
     ends=route_coordinate_candidates(final,*args,final_cursor)
     if any(np.isclose(saved,end-start,atol=3e-5,rtol=2e-6) for start in starts for end in ends):return True
     raise ValueError('Route progress differs from every numerically admissible projection')
-
 
 def recorded_gain(data,mask):
     """Preserve legacy scalar traces; require explicit offline vector semantics."""
@@ -112,7 +111,6 @@ def recorded_gain(data,mask):
             or np.any((value<.5)|(value>8.)) or 'controller_gain' in data):
         raise ValueError('Invalid or mixed fixed per-obstacle gain contract')
     return value.astype(float)
-
 
 def validate_tick_gains(values,candidates=None):
     """Check the declared bank without inferring authorization from a trace."""
@@ -127,7 +125,6 @@ def validate_tick_gains(values,candidates=None):
         valid=np.isin(values,bank)
     if not valid.all():raise ValueError('Invalid per-tick bicycle gain')
 
-
 def audit_trace(d,config=BicycleControlConfig(),*,gain_candidates=None):
     from .route_audit import check_transition
     c=config.robot;physical=d['initial'].astype(float);obs=d['obstacles'].astype(float);mask=d['mask'].astype(bool);noise=d['noise'].astype(float)
@@ -139,7 +136,7 @@ def audit_trace(d,config=BicycleControlConfig(),*,gain_candidates=None):
     assert not np.any(bias_o[~mask])
     bounded_motion=bool(d.get('bounded_motion',False))
     if bounded_motion:
-        from .bicycle_bounded_motion import held_offset
+        from .bicycle_observation import held_offset
         correction=held_offset(d['first_o'],d['motion_past'],mask,noise,float(d['motion_elapsed']))
         np.testing.assert_array_equal(correction['offset'],d['motion_offset'])
         raw_obstacles=d['raw_observed_obstacles']

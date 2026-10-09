@@ -7,25 +7,33 @@ Continuous targets censored by controller failure stay censored throughout.
 """
 
 import argparse
+
 import json
+
 from pathlib import Path
+
 import jax
+
 import jax.numpy as jnp
+
 import numpy as np
+
 from scipy.optimize import minimize
+
 from scipy.special import expit
 
-from .dataset import load_dataset, sha256
-from .inference import ResearchPredictor
-from .io import write_json
-from .uncertainty import cs_disagreement, conformal_threshold
+from .io import load_dataset, sha256
 
+from .inference import ResearchPredictor
+
+from .io import write_json
+
+from .uncertainty import cs_disagreement, conformal_threshold
 
 def grouped_mean(values, valid):
     count=valid.sum(axis=1)
     mean=np.where(valid,values,0.).sum(axis=1)/np.maximum(count,1)
     return mean[count>0].mean()
-
 
 def fit_event_calibration(logits,events,valid):
     """One affine logit transform per head, fitted on equally weighted groups."""
@@ -42,12 +50,11 @@ def fit_event_calibration(logits,events,valid):
         settings.append(dict(temperature=float(np.exp(result.x[0])),bias=float(result.x[1]),fit_bce=float(result.fun)))
     return settings
 
-
 def calibrate(bundle,dataset,output,coverage=.95,seed=71891,runtime_qualification=None):
     root=Path(output);root.mkdir(parents=True,exist_ok=False)
     model=ResearchPredictor(bundle,allow_uncalibrated=True)
     if model.model.config.encoder=='nearest_fc':
-        from .nearest_fc_qualification import validate_qualification
+        from .nearest_fc import validate_qualification
         validate_qualification(runtime_qualification,bundle,dataset)
     manifest=json.loads((Path(dataset)/'manifest.json').read_text())
     if model.metadata.get('controller',dict(sensor_margin_scale=0.))!=manifest.get('controller',dict(sensor_margin_scale=0.)):
@@ -57,7 +64,7 @@ def calibrate(bundle,dataset,output,coverage=.95,seed=71891,runtime_qualificatio
     if manifest['schema'] not in ('oa_cbf_route_sensor_v4','oa_cbf_route_continuation_v5','oa_cbf_route_continuation_v6',*flight_schemas) or model.metadata['dataset_manifest_sha256']!=sha256(Path(dataset)/'manifest.json'):
         raise ValueError('Calibration requires an exact supported observation-conditioned training contract')
     if manifest['schema']==history_schema:
-        from .quad2d_history_contract import validate_dataset
+        from .quad2d_history_data import validate_dataset
         validate_dataset(dataset)
         if model.metadata.get('graph_features')!=50 or model.metadata.get('dataset_schema')!=history_schema:
             raise ValueError('Matched observed-history graph50 model required')

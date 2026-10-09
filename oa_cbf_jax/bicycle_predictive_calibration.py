@@ -1,25 +1,42 @@
-"""Reserved-parent prediction fit/audit; trajectory gating is a separate stage."""
+"""Bicycle predictive calibration functions and shared contracts."""
+
 import argparse
+
 from pathlib import Path
+
 import json
+
 import time
+
 import jax
+
 import jax.numpy as jnp
+
 import numpy as np
+
 from scipy.optimize import minimize
+
 from scipy.special import expit
-from .bicycle_data import validate_training_dataset,SCHEMA as DATA_SCHEMA
+
+from .bicycle_data import validate_training_dataset, SCHEMA as DATA_SCHEMA
+
 from .bicycle_features import SCHEMA as GRAPH_SCHEMA
+
 from .bicycle_observation import SCHEMA as SENSOR_SCHEMA
-from .bicycle_experiment import read
-from .metrics import parent_mean
-from .dataset import load_dataset,sha256
+
+from .bicycle_control import read
+
+from .io import parent_mean
+
+from .io import load_dataset, sha256
+
 from .inference import ResearchPredictor
+
 from .models import predict_ensemble
+
 from .io import write_json
 
 SCHEMA='oa_cbf_bicycle_reserved_predictive_v70'
-
 
 def reserved_role_groups(ids,roles,reserved):
     """Require every preassigned parent; derive counts from frozen reservation."""
@@ -33,9 +50,8 @@ def reserved_role_groups(ids,roles,reserved):
         raise ValueError('Expected complete disjoint prespecified prediction roles')
     return selections,groups
 
-
 def validate_model(metadata,manifest,qualified_motion=False,qualified_candidate=False,qualified_nearest=False):
-    from .bicycle_task_dataset import validate_target_metadata
+    from .bicycle_gain_contract import validate_target_metadata
     validate_target_metadata(metadata);validate_target_metadata(manifest)
     if metadata.get('bicycle_task_progress_contract')!=manifest.get('bicycle_task_progress_contract'):
         raise ValueError('Changed task-progress calibration semantics')
@@ -54,18 +70,18 @@ def validate_model(metadata,manifest,qualified_motion=False,qualified_candidate=
     if candidate and not qualified_candidate:
         raise ValueError('Candidate-encoding pilot requires separate runtime qualification before calibration')
     if candidate:
-        from .bicycle_candidate_features import validate_metadata
+        from .bicycle_features import validate_metadata
         validate_metadata(metadata)
     motion=metadata.get('architecture',{}).get('bicycle_motion_history',False)
     if motion and not qualified_motion:
         raise ValueError('Observed motion-history pilot requires separate runtime qualification before calibration')
     if motion:
-        from .bicycle_motion_runtime import validate_metadata
+        from .bicycle_policy import validate_metadata
         validate_metadata(metadata)
     if metadata.get('architecture',{}).get('bicycle_affine_gain'):
         raise ValueError('Affine-gain pilot requires separate runtime qualification before calibration')
     if metadata.get('architecture',{}).get('bicycle_constraint_features'):
-        from .bicycle_constraint_features import contract
+        from .bicycle_features import constraint_features_contract as contract
         if metadata.get('bicycle_constraint_features_contract') != contract():
             raise ValueError('Missing or changed observed constraint feature contract')
     if metadata.get('offline_reserve_auxiliary_pilot') or metadata.get('architecture',{}).get('bicycle_reserve_auxiliary'):
@@ -79,7 +95,6 @@ def validate_model(metadata,manifest,qualified_motion=False,qualified_candidate=
         if actual!=manifest.get(field):raise ValueError('Bicycle contract mismatch: '+field)
     for field in ('targets','events','controller','gain_domain'):
         if metadata[field]!=manifest[field]:raise ValueError('Changed bicycle prediction semantics: '+field)
-
 
 def fit_parameters(prediction,data):
     means=prediction['mean'].astype(float);variances=prediction['variance'].astype(float);logits=prediction['event_logits'].astype(float)
@@ -109,7 +124,6 @@ def fit_parameters(prediction,data):
     if not event[1]['usable_for_failure_budget']:raise ValueError('Adverse-event head lacks development support')
     return dict(variance_scale=scales,event_calibration=event)
 
-
 def diagnostics(prediction,data,fit):
     means=prediction['mean'].astype(float);variances=prediction['variance'].astype(float)*np.array(fit['variance_scale']);ids=data['group_id']
     mu=means.mean(0);variance=variances.mean(0)+means.var(0)
@@ -120,16 +134,14 @@ def diagnostics(prediction,data,fit):
         adverse_observed_rate=parent_mean(data['events'][...,1],ids,data['event_mask'][...,1]),
         limitation='Parent-weighted observed-label diagnostics. Censored futures stay missing. Not unconditional tail/physical CVaR, OOD, trajectory or rare-collision confidence.')
 
-
 def calibrated_parameters(prediction,data,variance_method='moment'):
     if variance_method not in ('moment','mixture_likelihood'):
         raise ValueError('Unknown reserved-parent variance procedure')
     result=fit_parameters(prediction,data)
     if variance_method=='mixture_likelihood':
-        from .bicycle_variance_calibration import fit_scales
+        from .bicycle_predictive_calibration import fit_scales
         result.update(fit_scales(prediction,data))
     return result
-
 
 def calibrate(bundle,dataset,output,batch=64,variance_method='moment',runtime_qualification=None,phase='full'):
     if phase not in ('full','fit','audit'):raise ValueError('Unknown calibration phase')
@@ -145,24 +157,24 @@ def calibrate(bundle,dataset,output,batch=64,variance_method='moment',runtime_qu
     candidate=model.model.config.bicycle_candidate_encoding
     nearest=model.model.config.encoder=='nearest_fc'
     if nearest:
-        from .nearest_fc_qualification import validate_qualification
+        from .nearest_fc import validate_qualification
         validate_qualification(runtime_qualification,bundle,dataset)
     if candidate:
-        from .bicycle_candidate_calibration import validate_qualification
+        from .bicycle_predictive_calibration import validate_qualification
         validate_qualification(runtime_qualification,bundle,dataset)
     if motion:
-        from .bicycle_motion_calibration import validate_qualification
+        from .bicycle_predictive_calibration import motion_calibration_validate_qualification as validate_qualification
         validate_qualification(runtime_qualification,bundle,dataset)
     validate_model(model.metadata,m,qualified_motion=motion,qualified_candidate=candidate,qualified_nearest=nearest)
     if model.model.config.bicycle_constraint_features and not (motion or candidate):
-        from .bicycle_constraint_runtime import validate_qualification
+        from .bicycle_policy import validate_qualification
         validate_qualification(runtime_qualification,bundle,dataset)
     if sha256(dataset/'manifest.json')!=model.metadata['dataset_manifest_sha256']:raise ValueError('Wrong weight-training lineage')
     print(json.dumps(dict(stage='load_reserved_queries',phase=phase)),flush=True)
     data=load_dataset(dataset,'development_calibration');ids=data['group_id'];roles=data['calibration_role']
     motion_proof=None
     if motion:
-        from .bicycle_motion_calibration import observed_history
+        from .bicycle_predictive_calibration import observed_history
         print(json.dumps(dict(stage='reconstruct_causal_reserved_history',phase=phase,queries=len(ids))),flush=True)
         past,elapsed,motion_proof=observed_history(data,dataset)
         data.update(motion_past_positions=past,motion_elapsed=elapsed)
@@ -175,11 +187,11 @@ def calibrate(bundle,dataset,output,batch=64,variance_method='moment',runtime_qu
         # Reconstruct from actual saved observations/history, never the adjacent
         # latent physical state or obstacle arrays. Same numeric path as runtime.
         from .bicycle_features import bicycle_inference_graph
-        from .bicycle_experiment import control_config
+        from .bicycle_control import control_config
         c=control_config(m['config'])
         fields=('observed_state','goal','observed_obstacles','obstacle_mask','points','route_mask','cursor','previous_control','previous_gain','noise')
         if motion:
-            from .bicycle_motion_runtime import graph as history_graph
+            from .bicycle_policy import graph as history_graph
             fields+=('motion_past_positions','motion_elapsed')
         def graph(*a):
             if motion:return jax.vmap(lambda *v:history_graph(*v,config=c,compute_dtype=model.model.config.compute_dtype))(*a)
@@ -195,7 +207,7 @@ def calibrate(bundle,dataset,output,batch=64,variance_method='moment',runtime_qu
         graph_proof=dict(mode='observed_context_fp64_reconstruction',input_fields=list(fields),compiled_graph_signatures=1,compile_seconds=cold_graph,
             implicit_jit_cache_entries=graph_fn._cache_size(),maximum_change_from_stored_fp32=float(np.max(np.abs(regenerated[...,:35]-data['features']))))
         if motion:
-            from .bicycle_motion_features import numpy_features
+            from .bicycle_features import numpy_features
             history_error=0.
             for i,feature in enumerate(regenerated):
                 expected=numpy_features(feature[:,:35],data['node_mask'][i],data['observed_state'][i],
@@ -276,6 +288,360 @@ def calibrate(bundle,dataset,output,batch=64,variance_method='moment',runtime_qu
     print(json.dumps(dict(stage='predictive_fit_audit_completed',variance_scale=fit['variance_scale'],event_calibration=fit['event_calibration'],diagnostics=report)),flush=True)
 
 
+
+def validate_qualification(review_path,bundle,dataset):
+    if review_path is None:raise ValueError('Independent candidate runtime qualification is required')
+    review=read(review_path);report=read(review['report']);meta=read(Path(bundle)/'manifest.json')
+    from .bicycle_features import validate_metadata
+    from .bicycle_predictive_calibration import CANDIDATE_QUALIFICATION_SCHEMA as SCHEMA, WIDE_SCHEMA
+    validate_metadata(meta);encoder=meta['architecture']['encoder']
+    target=meta.get('bicycle_task_progress_contract')
+    manifest=read(Path(dataset)/'manifest.json')
+    if any(record.get('bicycle_task_progress_contract')!=target for record in (manifest,report,review)):
+        raise ValueError('Qualification changed the task-progress target contract')
+    wide=meta.get('offline_wide_gain_pilot',False)
+    if wide:
+        from .bicycle_gain_contract import contract
+        if (review.get('wide_gain_contract_and_all_candidates_verified') is not True
+                or report.get('bicycle_gain_contract')!=contract()
+                or review.get('bicycle_gain_contract')!=contract()):
+            raise ValueError('Independent wide-gain qualification required')
+    flags=('all_source_and_checkpoint_bindings_verified','all_candidate_and_observed_features_verified',
+        'exported_weights_equal_selected_trained_members','cpu_gpu_and_live_selector_parity_verified',
+        'independent_selection_statistics_verified','warrants_reserved_calibration')
+    if (review.get('schema')!=('independent_bicycle_wide_candidate_runtime_review' if wide else 'independent_bicycle_candidate_runtime_review') or review.get('status')!='passed'
+            or any(review.get(k) is not True for k in flags) or review['report_sha256']!=sha256(review['report'])
+            or review.get('protocol_sha256')!=report.get('protocol_sha256')
+            or report.get('schema')!=(WIDE_SCHEMA if wide else SCHEMA) or report.get('status')!='passed'
+            or report['dataset_manifest_sha256']!=sha256(Path(dataset)/'manifest.json')
+            or meta.get('dataset_manifest_sha256')!=report['dataset_manifest_sha256']
+            or report['dataset_index_sha256']!=sha256(Path(dataset)/'index.json')
+            or report['models'][encoder]['bundle_manifest_sha256']!=sha256(Path(bundle)/'manifest.json')
+            or report['models'][encoder]['weights_sha256']!=sha256(Path(bundle)/'weights.msgpack')
+            or not report['models'][encoder]['parity_passed']
+            or any(x.get(k) is not False for x in (review,report) for k in ('calibration_fitted','reserved_calibration_parents_used','benchmark_parents_used','model_promoted'))):
+        raise ValueError('Changed or incomplete independent candidate runtime qualification')
+    return report
+
+def validate_fitted_model(fit,bundle):
+    """A real fit must remain bound to independent numerical qualification."""
+    path=fit.get('runtime_qualification');dataset=fit.get('dataset')
+    if (path is None or dataset is None or fit.get('diagnostic_identity_only')
+            or not Path(path).is_file() or fit.get('runtime_qualification_sha256')!=sha256(path)):
+        raise ValueError('Candidate policy requires a bound independently reviewed runtime qualification')
+    report=validate_qualification(path,bundle,dataset)
+    from .bicycle_gain_contract import validate_target_metadata
+    validate_target_metadata(fit)
+    meta=read(Path(bundle)/'manifest.json')
+    if fit.get('bicycle_task_progress_contract')!=meta.get('bicycle_task_progress_contract'):
+        raise ValueError('Fitted model changed task-progress semantics')
+    if 'bicycle_gain_contract' in report:
+        from .bicycle_gain_contract import contract, candidate_bank
+        if fit.get('bicycle_gain_contract')!=contract() or fit.get('candidates')!=candidate_bank()[:,None].tolist():
+            raise ValueError('Changed wide-gain calibrated candidate contract')
+    if (fit.get('dataset_manifest_sha256')!=report['dataset_manifest_sha256']
+            or fit.get('dataset_index_sha256')!=report['dataset_index_sha256']):
+        raise ValueError('Candidate calibration dataset differs from runtime qualification')
+    return report
+
+
+CANDIDATE_QUALIFICATION_SCHEMA='bicycle_candidate_encoding_runtime_qualification'
+
+WIDE_SCHEMA='bicycle_wide_candidate_encoding_runtime_qualification'
+
+
+from concurrent.futures import ThreadPoolExecutor
+
+
+def motion_calibration_validate_qualification(review_path,bundle,dataset):
+    if review_path is None:raise ValueError('Independent motion runtime qualification is required')
+    review=read(review_path);report=read(review['report']);meta=read(Path(bundle)/'manifest.json')
+    from .bicycle_policy import validate_metadata
+    from .bicycle_predictive_calibration import MOTION_QUALIFICATION_SCHEMA as SCHEMA
+    validate_metadata(meta);encoder=meta['architecture']['encoder']
+    flags=('all_source_and_checkpoint_bindings_verified','all_causal_history_and_observed_features_verified',
+        'exported_weights_equal_selected_trained_members','cpu_gpu_and_live_selector_parity_verified',
+        'independent_selection_statistics_verified','warrants_reserved_calibration')
+    if (review.get('schema')!='independent_bicycle_motion_runtime_review' or review.get('status')!='passed'
+            or any(review.get(k) is not True for k in flags) or review['report_sha256']!=sha256(review['report'])
+            or review.get('protocol_sha256')!=report.get('protocol_sha256')
+            or report.get('schema')!=SCHEMA or report.get('status')!='passed'
+            or report['dataset_manifest_sha256']!=sha256(Path(dataset)/'manifest.json')
+            or report['dataset_index_sha256']!=sha256(Path(dataset)/'index.json')
+            or report['models'][encoder]['bundle_manifest_sha256']!=sha256(Path(bundle)/'manifest.json')
+            or report['models'][encoder]['weights_sha256']!=sha256(Path(bundle)/'weights.msgpack')
+            or not report['models'][encoder]['parity_passed']
+            or any(x.get(k) is not False for x in (review,report) for k in ('calibration_fitted','reserved_calibration_parents_used','benchmark_parents_used','model_promoted'))):
+        raise ValueError('Changed or incomplete independent motion runtime qualification')
+    return report
+
+def observed_history(data,dataset):
+    from .bicycle_policy import check_files as motion_calibration_check_files
+    from .bicycle_data import source_map
+    from .bicycle_observation import WINDOW_TICKS
+    if not np.all(data['partition']=='development_calibration'):raise ValueError('Only original reserved calibration queries')
+    mapping,bindings=source_map(dataset);motion_calibration_check_files(bindings)
+    index=read(Path(dataset)/'index.json');lookup={}
+    for row in index:
+        record=mapping[str(Path(row['file']).resolve())]
+        if (record['query_sha256']!=row['sha256'] or any(record[k]!=row[k] for k in ('group_id','query_origin','query_tick'))):
+            raise ValueError('Changed acquisition identity')
+        key=(row['group_id'],row['query_origin'],int(row['query_tick']))
+        if key in lookup:raise ValueError('Duplicate reserved source identity')
+        lookup[key]=record
+    manifest=read(Path(dataset)/'manifest.json');dt=manifest['config']['robot']['dt'];n=len(data['group_id'])
+    if not np.isfinite(dt) or dt<=0 or not n or np.any(data['query_tick']<0) or np.any(data['query_tick']!=data['query_tick'].astype(int)):
+        raise ValueError('Invalid reserved history time coordinate')
+    past=np.zeros((n,64,2),np.float32);elapsed=np.minimum(data['query_tick'],WINDOW_TICKS)*dt;requests={}
+    for i,(g,o,t) in enumerate(zip(data['group_id'],data['query_origin'],data['query_tick'])):
+        r=lookup[(g,o,int(t))];file=r['path']
+        if file not in requests:requests[file]=dict(sha256=r['sha256'],rows=[])
+        if requests[file]['sha256']!=r['sha256']:raise ValueError('Mixed history hashes')
+        requests[file]['rows'].append(dict(index=i,group_id=g,origin=o,tick=int(t),past_tick=max(0,int(t)-WINDOW_TICKS)))
+    def read_one(item):
+        from .bicycle_policy import check_files as motion_calibration_check_files
+        file,record=item;motion_calibration_check_files({file:record['sha256']})
+        with np.load(file) as z:obs=z['observed_obstacles'];mask=z['mask'];noise=z['noise']
+        for r in record['rows']:
+            i,t,p=r['index'],r['tick'],r['past_tick']
+            if not 0<=p<=t<len(obs):raise ValueError('Unavailable causal reserved history')
+            np.testing.assert_array_equal(data['observed_obstacles'][i],obs[t]);np.testing.assert_array_equal(data['obstacle_mask'][i],mask);np.testing.assert_array_equal(data['noise'][i],noise)
+            past[i]=obs[p,:,:2]
+    with ThreadPoolExecutor(14) as pool:list(pool.map(read_one,requests.items()))
+    motion_calibration_check_files(bindings)
+    proof=dict(schema='bicycle_reserved_observed_motion_history',dataset_manifest_sha256=sha256(Path(dataset)/'manifest.json'),
+        dataset_index_sha256=sha256(Path(dataset)/'index.json'),source_indices=bindings,sources=requests,queries=n,
+        parents=len(set(data['group_id'])),dt=dt,window_ticks=WINDOW_TICKS,loaded_acquisition_fields=['observed_obstacles','mask','noise'],
+        physical_truth_loaded=False,labels_used_for_history=False,all_current_observations_checked=True)
+    return past,elapsed.astype(np.float64),proof
+
+
+MOTION_QUALIFICATION_SCHEMA='bicycle_motion_history_runtime_qualification'
+
+
+import copy
+
+
+from scipy.optimize import minimize_scalar
+
+from scipy.special import logsumexp
+
+
+SCALE_BOUNDS = (.01, 100.)
+
+GRID_POINTS = 49
+
+METHOD = 'parent_weighted_gaussian_mixture_likelihood_scale'
+
+RUNTIME_SCHEMA = 'oa_cbf_bicycle_variance_calibration_runtime'
+
+def validate_variant(original, candidate):
+    """A calibration-only variant cannot silently change the learned method."""
+    added = {'variance_calibration','derived_from_prediction_fit',
+             'derived_from_prediction_fit_sha256','source_prediction_fit_cache_sha256'}
+    if set(candidate) != set(original)|added:
+        raise ValueError('Unexpected calibration variant fields')
+    for key,value in original.items():
+        if key not in ('variance_scale','limitation') and candidate[key] != value:
+            raise ValueError('Changed frozen prediction semantics: '+key)
+    method = candidate['variance_calibration']
+    scales = np.asarray(candidate['variance_scale'])
+    if (method['method'] != METHOD or method['scale_bounds'] != list(SCALE_BOUNDS)
+            or method['grid_points'] != GRID_POINTS or method['physical_safety_guarantee'] is not False
+            or scales.shape != (2,) or not np.isfinite(scales).all()
+            or np.any(scales < np.float32(SCALE_BOUNDS[0])) or np.any(scales > np.float32(SCALE_BOUNDS[1]))):
+        raise ValueError('Wrong common mixture calibration procedure')
+
+def runtime_models(training, spec, base):
+    """Bind new fits to genuine original checkpoints without claiming retraining."""
+    from .bicycle_control import read
+    if (spec['schema'] != RUNTIME_SCHEMA or spec['training_performed'] is not False
+            or Path(spec['training']).resolve() != Path(training).resolve()
+            or sha256(spec['base_training_complete']) != spec['base_training_complete_sha256']
+            or sha256(spec['review']) != spec['review_sha256']):
+        raise ValueError('Changed calibration-only runtime lineage')
+    proof = read(spec['review']); root = Path(spec['calibration'])
+    if (proof.get('status') != 'passed' or proof['report_sha256'] != sha256(root/'report.json')
+            or not proof['all_source_model_prediction_reservation_bindings_verified']
+            or not proof['independent_mixture_likelihood_minima_and_heldout_diagnostics_verified']
+            or not proof['original_weights_means_event_fits_thresholds_unchanged']):
+        raise ValueError('Independent variance-calibration review required')
+    report = read(root/'report.json'); result = {}
+    for encoder,item in base.items():
+        path = root/encoder/'prediction_fit.json'; new = read(path); old = item['calibration']
+        validate_variant(old,new)
+        if (new['derived_from_prediction_fit_sha256'] != item['fit_sha256']
+                or Path(new['derived_from_prediction_fit']).resolve() != Path(item['fit']).resolve()
+                or new['weights_sha256'] != item['weights_sha256']
+                or sha256(path) != report['methods'][encoder]['prediction_fit_sha256']
+                or sha256(path) != read(root/encoder/'complete.json')['prediction_fit_sha256']
+                or sha256(root/encoder/'prediction_audit.json') != read(root/encoder/'complete.json')['prediction_audit_sha256']):
+            raise ValueError('Changed frozen variance-fit binding')
+        result[encoder] = dict(item,fit=str(path.resolve()),fit_sha256=sha256(path),calibration=new)
+    return result
+
+def inputs(prediction, data, head):
+    means = np.asarray(prediction['mean'], float)
+    variance = np.asarray(prediction['variance'], float)
+    target = np.asarray(data['target'], float)
+    valid = np.asarray(data['target_mask'], bool)
+    ids = np.asarray(data['group_id'])
+    if (means.ndim != 4 or means.shape != variance.shape or means.shape[1:] != target.shape
+            or valid.shape != target.shape or ids.shape != (len(target),)
+            or means.shape[0] < 1 or not 0 <= head < target.shape[-1]
+            or not np.isfinite(means).all() or not np.isfinite(variance).all()
+            or np.any(variance <= 0)):
+        raise ValueError('Finite positive ensemble predictions and aligned parent labels required')
+    mask = valid[..., head]
+    if not mask.any() or not np.isfinite(target[..., head][mask]).all():
+        raise ValueError('No finite observed head targets')
+    _, inverse = np.unique(ids, return_inverse=True)
+    counts = np.bincount(inverse, weights=mask.sum(1))
+    weights = np.broadcast_to(1/np.maximum(counts[inverse, None], 1), mask.shape)[mask]
+    weights /= np.count_nonzero(counts)
+    return means[..., head][:, mask], variance[..., head][:, mask], target[..., head][mask], weights
+
+def score_from_inputs(values, log_scale):
+    mean, variance, target, weights = values
+    log_variance = np.log(variance)+log_scale
+    log_density = -.5*((target[None]-mean)**2*np.exp(-log_variance)+log_variance+np.log(2*np.pi))
+    nll = -(logsumexp(log_density, axis=0)-np.log(len(mean)))
+    return float(np.dot(weights,nll))
+
+def scores(prediction, data, scales):
+    if len(scales) != data['target'].shape[-1] or not np.isfinite(scales).all() or np.any(np.asarray(scales) <= 0):
+        raise ValueError('One finite positive scale per head required')
+    return [score_from_inputs(inputs(prediction,data,h),np.log(scale)) for h,scale in enumerate(scales)]
+
+def fit_scales(prediction, data):
+    """Fit only observed labels, with equal total mass per physical parent.
+
+    Scaling component variance inside the mixture leaves epistemic mean spread
+    unchanged. A fixed log grid plus bounded refinements handles nonconvex
+    scalar mixture likelihoods; scale one is always a candidate. Neither
+    validation/audit targets nor navigation outcomes select any parameter.
+    """
+    if 'calibration_role' in data and not np.all(data['calibration_role'] == 'prediction_fit'):
+        raise ValueError('Variance fitting requires the reserved prediction_fit role')
+    lower, upper = np.log(SCALE_BOUNDS); grid = np.linspace(lower,upper,GRID_POINTS)
+    scales, details = [], []
+    for head in range(data['target'].shape[-1]):
+        values = inputs(prediction,data,head)
+        objective = lambda value: score_from_inputs(values,float(value))
+        curve = np.array([objective(x) for x in grid])
+        candidates = [(float(y),float(x)) for x,y in zip(grid,curve)]
+        candidates.append((objective(0.),0.))
+        for i in range(1,len(grid)-1):
+            if curve[i] <= curve[i-1] and curve[i] <= curve[i+1]:
+                fit = minimize_scalar(objective,bounds=(grid[i-1],grid[i+1]),method='bounded',
+                                      options={'xatol':1e-8,'maxiter':150})
+                if not fit.success or not np.isfinite(fit.fun):
+                    raise ValueError('Finite bounded mixture-likelihood fit required')
+                candidates.append((float(fit.fun),float(fit.x)))
+        _, optimum = min(candidates)
+        scale = float(np.float32(np.exp(optimum))); value = objective(np.log(scale))
+        if not np.isfinite(value) or value > objective(0.)+1e-8:
+            raise ValueError('Likelihood calibration worsened its reference on fit parents')
+        scales.append(scale)
+        details.append(dict(scale=scale,fit_nll=value,unit_scale_nll=objective(0.),
+            observed_labels=len(values[2]),observed_parents=int(len(np.unique(data['group_id'][data['target_mask'][...,head].any(1)]))),
+            scale_at_search_boundary=bool(np.isclose(scale,SCALE_BOUNDS[0]) or np.isclose(scale,SCALE_BOUNDS[1])),
+            log_scale_grid=grid.tolist(),nll_grid=curve.tolist(),candidate_minima=len(candidates)))
+    return dict(variance_scale=scales,variance_calibration=dict(method=METHOD,scale_bounds=list(SCALE_BOUNDS),
+        grid_points=GRID_POINTS,heads=details,unit='one equal-weight original physical parent',
+        uncertainty='Only component variances scale; member means and their disagreement remain unchanged.',
+        status='fitted_development',physical_safety_guarantee=False))
+
+def check_files(files):
+    for p,digest in files.items():
+        if sha256(p) != digest:raise ValueError('Changed frozen input: '+p)
+
+def load_role(dataset, role):
+    from .bicycle_control import read
+    dataset = Path(dataset); manifest = read(dataset/'manifest.json')
+    source = read(Path(manifest['source'])/'scenes.json')
+    reserved = {r['group_id']:r for r in source if r['partition']=='development_calibration'}
+    ids = {g for g,r in reserved.items() if r['calibration_role']==role}
+    parts = []
+    keys = ('group_id','query_tick','calibration_role','partition','target','target_mask','events','event_mask')
+    for entry in read(dataset/'index.json'):
+        if entry['group_id'] not in ids:continue
+        path = dataset/entry['file']
+        if sha256(path) != entry['sha256']:raise ValueError('Changed reserved label shard')
+        with np.load(path) as z:
+            if not (z['calibration_role']==role).all() or not (z['partition']=='development_calibration').all():
+                raise ValueError('Changed prediction role')
+            parts.append({k:z[k] for k in keys})
+    result = {k:np.concatenate([p[k] for p in parts]) for k in keys}
+    if set(result['group_id']) != ids or not ids:raise ValueError('Incomplete reserved parent set')
+    return result
+
+def prediction(path, data):
+    with np.load(path) as z:
+        for key in ('group_id','query_tick'):np.testing.assert_array_equal(z[key],data[key])
+        result = {k:z[k] for k in ('mean','variance','event_logits')}
+    # Stored candidate replicas must carry the identical network prediction.
+    for key,value in result.items():np.testing.assert_array_equal(value[:,:,::2],value[:,:,1::2])
+    return result
+
+def run(protocol, output, directory):
+    from .bicycle_control import read
+    from .bicycle_predictive_calibration import fit_parameters, diagnostics
+    protocol_path = Path(protocol); spec = read(protocol_path); out = Path(output); job = Path(directory)
+    out.mkdir(parents=True,exist_ok=False); start = time.monotonic();check_files(spec['bound_files'])
+    review = read(spec['training_review']); decision_review = read(spec['selection_review'])
+    if (review.get('status')!='passed' or decision_review.get('status')!='passed'
+            or not decision_review['independent_parent_weighted_strata_and_paired_changes_verified']):
+        raise ValueError('Completed independent learning and selection reviews required')
+    dataset = Path(spec['dataset'])
+    for name,key in (('manifest','dataset_manifest_sha256'),('index','dataset_index_sha256'),('independent_replay','dataset_audit_sha256')):
+        if sha256(dataset/(name+'.json'))!=review[key]:raise ValueError('Wrong reviewed calibration source')
+    write_json(job/'progress.json',dict(stage='reserved_fit_parents',estimated_remaining_seconds=300))
+    fit_data = load_role(dataset,'prediction_fit'); fitted = {}; report = {}
+    # Freeze BOTH model-specific fits before opening either audit prediction.
+    for encoder,item in spec['models'].items():
+        base = Path(item['calibration']); original = read(base/'prediction_fit.json')
+        raw = prediction(base/'prediction_fit_predictions.npz',fit_data)
+        old = fit_parameters(raw,fit_data)
+        for key in old:
+            if old[key] != original[key]:raise ValueError('Original fitted parameters do not reproduce')
+        candidate = copy.deepcopy(original); candidate.update(fit_scales(raw,fit_data))
+        candidate.update(derived_from_prediction_fit=str(base/'prediction_fit.json'),
+            derived_from_prediction_fit_sha256=sha256(base/'prediction_fit.json'),
+            source_prediction_fit_cache_sha256=sha256(base/'prediction_fit_predictions.npz'),
+            trajectory_gate_ready=False,production_eligible=False,
+            limitation='Reserved-parent empirical mixture-likelihood component-variance fit. All means, event fits and control thresholds unchanged. '
+            'Censored targets remain missing. New trajectory calibration and prospective physical evaluation required; no unconditional safety guarantee.')
+        path = out/encoder/'prediction_fit.json'; write_json(path,candidate); fitted[encoder] = (candidate,sha256(path))
+        report[encoder] = dict(original_scales=original['variance_scale'],new_scales=candidate['variance_scale'],
+            fit=dict(original_nll=scores(raw,fit_data,original['variance_scale']),new_nll=scores(raw,fit_data,candidate['variance_scale'])),
+            prediction_fit_path=str(path.resolve()),prediction_fit_sha256=sha256(path))
+        print(dict(encoder=encoder,phase='fit_frozen',scales=candidate['variance_scale'],fit=report[encoder]['fit']),flush=True)
+    write_json(job/'progress.json',dict(stage='reserved_audit_parents_fits_frozen',estimated_remaining_seconds=180))
+    audit_data = load_role(dataset,'prediction_audit')
+    if set(fit_data['group_id']) & set(audit_data['group_id']):raise ValueError('Fit and audit parents overlap')
+    for encoder,item in spec['models'].items():
+        base = Path(item['calibration']); original = read(base/'prediction_fit.json'); candidate,digest = fitted[encoder]
+        assert sha256(out/encoder/'prediction_fit.json')==digest
+        raw = prediction(base/'prediction_audit_predictions.npz',audit_data)
+        old_diagnostics = diagnostics(raw,audit_data,original)
+        if old_diagnostics != read(base/'prediction_audit.json')['audit']:raise ValueError('Original held-out audit does not reproduce')
+        new_diagnostics = diagnostics(raw,audit_data,candidate)
+        report[encoder]['audit'] = dict(original_nll=scores(raw,audit_data,original['variance_scale']),
+            new_nll=scores(raw,audit_data,candidate['variance_scale']),original=old_diagnostics,candidate=new_diagnostics)
+        write_json(out/encoder/'prediction_audit.json',dict(prediction_fit_sha256=digest,comparison=report[encoder],whole_goal_complete=False))
+        write_json(out/encoder/'complete.json',dict(status='completed',prediction_fit_sha256=digest,
+            prediction_audit_sha256=sha256(out/encoder/'prediction_audit.json'),training_performed=False,whole_goal_complete=False))
+    check_files(spec['bound_files'])
+    result = dict(method=METHOD,methods=report,protocol_sha256=sha256(protocol_path),
+        fit_parents=len(np.unique(fit_data['group_id'])),audit_parents=len(np.unique(audit_data['group_id'])),
+        fit_queries=len(fit_data['group_id']),audit_queries=len(audit_data['group_id']),
+        elapsed_seconds=time.monotonic()-start,training_performed=False,benchmark_parents_used=False,
+        safety_thresholds_changed=False,event_calibration_changed=False,old_artifacts_unchanged=True,
+        new_trajectory_gates_required=True,model_promoted=False,whole_goal_complete=False)
+    write_json(out/'report.json',result);write_json(job/'progress.json',dict(stage='completed',elapsed_seconds=time.monotonic()-start))
+
+
 if __name__=='__main__':
     p=argparse.ArgumentParser()
     for field in ('bundle','dataset','output'):p.add_argument('--'+field,required=True)
@@ -283,3 +649,8 @@ if __name__=='__main__':
     p.add_argument('--variance-method',choices=['moment','mixture_likelihood'],default='moment')
     p.add_argument('--phase',choices=['full','fit','audit'],default='full')
     p.add_argument('--runtime-qualification');calibrate(**vars(p.parse_args()))
+
+if __name__=='__main__':
+    p=argparse.ArgumentParser()
+    for key in ('protocol','output','directory'):p.add_argument('--'+key,required=True)
+    run(**vars(p.parse_args()))

@@ -1,13 +1,12 @@
-"""Deterministic observed-neighborhood selection shared by graph and QP.
+"""Shared obstacle selection implementation."""
 
-Selection is a controller observation boundary, not a collision-check boundary.
-Callers must retain the full physical world for outcome measurements.
-"""
 from functools import partial
-import numpy as np
-import jax
-import jax.numpy as jnp
 
+import numpy as np
+
+import jax
+
+import jax.numpy as jnp
 
 def contract(count):
     if isinstance(count, bool) or not isinstance(count, int) or count < 1:
@@ -19,7 +18,6 @@ def contract(count):
         graph_obstacles=count, qp_obstacles=count, fc_neural_obstacles=1,
         collision_check='Every physical obstacle, including obstacles outside the selected neighborhood.',
         padding='Masked zero rows with index -1; never silently drop a real obstacle within capacity.')
-
 
 @partial(jax.jit, static_argnames=('count',))
 def nearest_obstacles(position, obstacles, mask, count):
@@ -37,7 +35,6 @@ def nearest_obstacles(position, obstacles, mask, count):
                         jnp.where(valid,distance2,jnp.inf)))[:count]
     selected = valid[order]
     return jnp.where(selected[:,None],rows[order],0.), selected, jnp.where(selected,order,-1)
-
 
 def nearest_numpy(position, obstacles, mask, count):
     contract(count)

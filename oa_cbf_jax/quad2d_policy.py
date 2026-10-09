@@ -1,31 +1,42 @@
-"""Development GAT gain selection for genuine planar flight.
+"""Shared quad2d policy implementation."""
 
-One-observation calibration does not certify adaptive trajectories. Predicted
-shortlists use only observations and constant-velocity obstacle extrapolation.
-All learned and backup decisions are logged; no gain-search comparator exists.
-"""
 from dataclasses import dataclass, asdict
+
 import json
+
 from pathlib import Path
+
 import time
+
 import numpy as np
+
 import jax
+
 import jax.numpy as jnp
-from .quad2d import Quad2DConfig, integrate_quad2d
+
+from .quad2d import integrate_quad2d
+
 from .quad2d_control import FlightConfig, flight_control, flight_arrived, physical_envelope_violation
+
 from .quad2d_features import flight_graph
-from .quad2d_rollout import flight_branch, flight_sensor_model, RUNNING, GOAL, COLLISION, INFEASIBLE, TIMEOUT, INADMISSIBLE, PLANNER_FAILURE, STATE_BOUND
+from .quad2d_rollout import flight_branch, flight_sensor_model, INADMISSIBLE, PLANNER_FAILURE, STATE_BOUND
+from .simulation import RUNNING, GOAL, COLLISION, INFEASIBLE, TIMEOUT
+
 from .routing import physical_route_coordinate
+
 from .dynamics import signed_clearance, swept_disk_clearance
+
 from .models import predict_ensemble
+
 from .inference import ResearchPredictor
+
 from .uncertainty import cs_disagreement, worst_member_cvar
-from .dataset import sha256
+
+from .io import sha256
+
 from .quad2d_guidance import predictive_flight_control
 
 LEARNED, BACKUP, FIXED, REJECTED, HELD = range(5)
-SOURCE_NAMES = ['learned', 'fixed_set_backup', 'fixed_ablation', 'rejected', 'held']
-
 
 @dataclass(frozen=True)
 class FlightPolicyConfig:
@@ -46,7 +57,6 @@ class FlightPolicyConfig:
         if not 0 < self.tail_mass < 1: raise ValueError('Invalid tail mass')
         if not all(np.isfinite(g).all() and np.min(g)>0 for g in (self.fixed_gain,*self.backup_gains)): raise ValueError('Invalid gain')
 
-
 @dataclass(frozen=True)
 class ProgressAdmissionPolicyConfig(FlightPolicyConfig):
     progress_admission: str = 'quad2d_paired_progress_admission_v1'
@@ -56,7 +66,6 @@ class ProgressAdmissionPolicyConfig(FlightPolicyConfig):
         if self.progress_admission != 'quad2d_paired_progress_admission_v1' or self.backup_gains:
             raise ValueError('Paired progress admission requires previous-gain-only fallback')
 
-
 @dataclass(frozen=True)
 class IncumbentProgressPolicyConfig(FlightPolicyConfig):
     incumbent_progress: str = 'feasible_previous_score_v1'
@@ -65,7 +74,6 @@ class IncumbentProgressPolicyConfig(FlightPolicyConfig):
         super().__post_init__()
         if self.incumbent_progress!='feasible_previous_score_v1' or self.backup_gains or self.mode=='fixed':
             raise ValueError('Incumbent comparison requires guided previous-gain-only control')
-
 
 @dataclass(frozen=True)
 class EnsembleRiskPolicyConfig(IncumbentProgressPolicyConfig):
@@ -78,21 +86,18 @@ class EnsembleRiskPolicyConfig(IncumbentProgressPolicyConfig):
                 or self.tail_mass!=.01 or self.risk_threshold!=0.):
             raise ValueError('Explicit learned Gaussian ensemble risk contract required')
 
-
 def ensemble_risk_contract():
     return dict(schema='equal_gaussian_ensemble_mixture_v1',weights='uniform_four_members',
         risk='upper_tail_CVaR_of_predictive_mixture',tail_mass=.01,threshold=0.,
         disagreement='original_member_Gaussian_CS',
         interpretation='Alternative predictive risk statistic; neither it nor maximum-member CVaR universally bounds the other. No physical safety guarantee.')
 
-
 def flight_risk(means,variances,policy):
     if isinstance(policy,EnsembleRiskPolicyConfig):
         if means.shape[-1]!=4:raise ValueError('Exactly four predictive members required')
-        from .mixture_tail import gaussian_mixture_cvar
+        from .uncertainty import gaussian_mixture_cvar
         return gaussian_mixture_cvar(means,variances,policy.tail_mass)['cvar']
     return worst_member_cvar(means,variances,policy.tail_mass)
-
 
 @dataclass(frozen=True)
 class FeasibilityTriggeredPolicyConfig(FlightPolicyConfig):
@@ -103,7 +108,6 @@ class FeasibilityTriggeredPolicyConfig(FlightPolicyConfig):
         if self.query_trigger != 'previous_gain_infeasible_v1' or self.backup_gains or self.mode=='fixed':
             raise ValueError('Feasibility trigger requires guided previous-gain-only adaptation')
 
-
 def flight_policy_from_contract(contract):
     if 'risk_aggregation' in contract:
         return EnsembleRiskPolicyConfig(**contract)
@@ -113,7 +117,6 @@ def flight_policy_from_contract(contract):
         return FeasibilityTriggeredPolicyConfig(**contract)
     cls = ProgressAdmissionPolicyConfig if 'progress_admission' in contract else FlightPolicyConfig
     return cls(**contract)
-
 
 def make_selector(model, norm, config, policy):
     if policy.mode == 'learned':
@@ -165,7 +168,6 @@ def make_selector(model, norm, config, policy):
         return gain,accepted,source,stages
     return select
 
-
 def empty_query_statistics(params, candidates, risk_components=1):
     """Static placeholders for held ticks; only actual query records are scored."""
     members=jax.tree.leaves(params)[0].shape[0]; count=candidates.shape[0]+1
@@ -177,7 +179,6 @@ def empty_query_statistics(params, candidates, risk_components=1):
         for key in ('mean','variance','probability'):
             result['query_risk_component_'+key]=jnp.zeros((members,count,2),jnp.float32)
     return result
-
 
 def make_guided_selector(model,norm,config,policy,guidance,record_query_statistics=False):
     """Neural shortlist with the already computed held-profile witness.
@@ -237,7 +238,7 @@ def make_guided_selector(model,norm,config,policy,guidance,record_query_statisti
         epistemic=finite&(cs<=calibration['cs_threshold']);risk_ok=epistemic&(risk<=policy.risk_threshold)
         admitted=risk_ok&(event[:,0]<=policy.collision_probability_limit)&(event[:,1]<=policy.failure_probability_limit)
         if isinstance(policy, ProgressAdmissionPolicyConfig):
-            from .quad2d_gain_improvement import admission
+            from .quad2d_training import admission
             admitted &= admission(mu[...,1],variance[...,1],calibration['progress_delta_quantile'])[0]
         ranking=jnp.mean(mu[:,:,1],axis=0)-.01*jnp.sum(jnp.log(pool/previous_gain)**2,axis=-1)
         _,indices=jax.lax.top_k(jnp.where(admitted,ranking,-jnp.inf),policy.shortlist)
@@ -266,16 +267,15 @@ def make_guided_selector(model,norm,config,policy,guidance,record_query_statisti
         return gain,accepted,source,stages,result,info
     return select
 
-
 def guided_contract(metadata,calibration,config,guidance):
     expected=None if guidance is None else json.loads(json.dumps(asdict(guidance)))
     controller=metadata['controller']
     if controller.get('predictive_guidance')!=expected:
         raise ValueError('Predictive guidance requires matched new labels and calibration')
     if guidance is not None:
-        from .quad2d_guidance import ObservedMotionGuidanceConfig,ForecastMotionGuidanceConfig
+        from .quad2d_guidance import ObservedMotionGuidanceConfig, ForecastMotionGuidanceConfig
         if isinstance(guidance,ObservedMotionGuidanceConfig):
-            from .quad2d_history import SCHEMA,GRAPH_SCHEMA
+            from .quad2d_history import SCHEMA, GRAPH_SCHEMA
             if (metadata.get('dataset_schema')!=SCHEMA or calibration.get('dataset_schema')!=SCHEMA
                     or metadata.get('graph_features')!=50 or calibration.get('graph_features')!=50
                     or controller.get('graph_schema')!=GRAPH_SCHEMA
@@ -288,11 +288,10 @@ def guided_contract(metadata,calibration,config,guidance):
             raise ValueError('Matched guided observation/initial-gain contract required')
         from .quad2d_guidance import TerminalGuidanceConfig
         if isinstance(guidance,TerminalGuidanceConfig):
-            from .quad2d_task_targets import contract
+            from .quad2d_control import contract
             target=controller.get('performance_target',{})
             if target.get('kind') not in ('route','terminal_task') or target!=contract(target['kind']) or metadata.get('targets',[None,None])[1]!=target['target']:
                 raise ValueError('Explicit matched terminal performance target required')
-
 
 def observed_waypoint_arrival(x,goal,noise,config=FlightConfig()):
     """Conservative pre-action arrival using only sensed state/error ranges."""
@@ -301,10 +300,9 @@ def observed_waypoint_arrival(x,goal,noise,config=FlightConfig()):
         &(jnp.abs(x[2])+1.15*noise[1]<=config.terminal_pitch)
         &(jnp.abs(x[5])+1.15*noise[3]<=config.terminal_pitch_rate))
 
-
 def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=False,record_query_statistics=False,diagnostic_nearest_obstacles=None,return_stepper=False):
     if diagnostic_nearest_obstacles is not None:
-        from .quad2d_neighborhood import neighborhood_contract, neighborhood_mask
+        from .quad2d_static_inputs import neighborhood_contract, neighborhood_mask
         neighborhood_contract(diagnostic_nearest_obstacles)
         from .quad2d_guidance import TerminalGuidanceConfig
         if type(guidance) is not TerminalGuidanceConfig or ordered_waypoints:
@@ -320,7 +318,7 @@ def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=
             raise ValueError('Feasibility trigger requires single-goal raw terminal guidance')
     select=make_selector(model,norm,config,policy);c=config.robot
     from .quad2d_guidance import ForecastMotionGuidanceConfig
-    from . import motion_observer,quad2d_motion
+    from . import motion_observer, quad2d_guidance as quad2d_motion
     tracked=isinstance(guidance,ForecastMotionGuidanceConfig)
     guided_select=make_guided_selector(model,norm,config,policy,guidance,record_query_statistics) if guidance is not None and policy.mode in ('learned','backup') else None
     def episode(params,calibration,candidates,observed,goal,obstacles,mask,points,route_mask,noise,key,ready,waypoint_count=None):
@@ -451,7 +449,6 @@ def make_episode(model,norm,config,policy,steps,guidance=None,ordered_waypoints=
         return summary,trace,dict(initial_state=initial,obstacles=truth_obs)
     return episode
 
-
 class FlightPolicy:
     """Strict model/calibration/config identity, explicit AOT batch signatures."""
     def __init__(self,bundle=None,calibration=None,config=FlightConfig(),policy=FlightPolicyConfig(),guidance=None,record_query_statistics=False,clipped_mixture_pilot=False,diagnostic_nearest_obstacles=None,diagnostic_cruise_speed=None):
@@ -460,7 +457,7 @@ class FlightPolicy:
         self.diagnostic_nearest_obstacles=diagnostic_nearest_obstacles
         self.calibration_coverage_valid=diagnostic_nearest_obstacles is None and diagnostic_cruise_speed is None
         if diagnostic_nearest_obstacles is not None:
-            from .quad2d_neighborhood import neighborhood_contract
+            from .quad2d_static_inputs import neighborhood_contract
             self.neighborhood_contract=neighborhood_contract(diagnostic_nearest_obstacles)
         self.config=config;self.policy=policy;self.metadata={};self.params={};self.calibration={};self.model=None;self.norm=None;self.compiled={}
         self.guidance=guidance;self.fresh_calibration_candidates=None
@@ -471,7 +468,7 @@ class FlightPolicy:
             raise ValueError('Paired progress admission requires matched guided control')
         if record_query_statistics and (guidance is None or policy.mode!='learned'):
             raise ValueError('Query statistics require a learned guided policy')
-        from .quad2d_guidance import ForecastMotionGuidanceConfig,ObservedMotionGuidanceConfig
+        from .quad2d_guidance import ForecastMotionGuidanceConfig, ObservedMotionGuidanceConfig
         if isinstance(guidance,ForecastMotionGuidanceConfig) and policy.mode=='learned' and (not isinstance(guidance,ObservedMotionGuidanceConfig) or bundle is None or calibration is None):
             raise ValueError('Forecast pilot requires new history-aware labels and calibration before learned use')
         if policy.mode=='backup' and guidance is None:raise ValueError('Flight backup-only ablation requires guided controller')
@@ -489,7 +486,7 @@ class FlightPolicy:
                 raise ValueError('Predictive mixture calibration requires its explicit policy')
             if clipped_mixture_pilot:
                 from .clipped_inference import ClippedRiskPredictor
-                from .clipped_calibration import validate_calibration
+                from .clipped_inference import validate_calibration
                 if not record_query_statistics or guidance is None:
                     raise ValueError('Clipped-mixture pilot requires guided live component statistics')
                 predictor=ClippedRiskPredictor(bundle,allow_uncalibrated=True)
@@ -502,7 +499,7 @@ class FlightPolicy:
             if isinstance(policy,EnsembleRiskPolicyConfig) and getattr(predictor.model,'risk_components',1)!=1:
                 raise ValueError('Ordinary Gaussian members required for ensemble mixture risk')
             if predictor.model.config.encoder=='nearest_fc':
-                from .nearest_fc_qualification import validate_fit
+                from .nearest_fc import validate_fit
                 validate_fit(info,bundle)
             features=50 if isinstance(guidance,ObservedMotionGuidanceConfig) else 40
             if info.get('dynamics')!='Quad2D' or metadata.get('graph_features')!=features or info['weights_sha256']!=metadata['weights_sha256']:
@@ -530,13 +527,13 @@ class FlightPolicy:
             if bool(info.get('gain_improvement')) != isinstance(policy, ProgressAdmissionPolicyConfig):
                 raise ValueError('Progress calibration and admission policy must match')
             if isinstance(policy, ProgressAdmissionPolicyConfig):
-                from .quad2d_gain_improvement import validate
+                from .quad2d_training import validate
                 switch = validate(info)
                 self.calibration['progress_delta_quantile'] = jnp.asarray(switch['threshold'],jnp.float32)
             self.calibration_sha256=sha256(calibration)
         if diagnostic_cruise_speed is not None:
             from .quad2d_guidance import TerminalGuidanceConfig
-            from .quad2d_nominal_speed import speed_contract
+            from .quad2d_control import speed_contract
             if type(guidance) is not TerminalGuidanceConfig or not isinstance(policy,IncumbentProgressPolicyConfig):
                 raise ValueError('Speed diagnosis requires the original guided incumbent policy')
             # All model/calibration identity checks above use the original

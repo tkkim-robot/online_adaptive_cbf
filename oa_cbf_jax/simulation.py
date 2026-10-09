@@ -5,17 +5,22 @@ delay-realistic evaluator is required before real-time safety claims.
 """
 
 from functools import partial
+
 from typing import NamedTuple
+
 import jax
+
 import jax.numpy as jnp
 
 from .config import UnicycleConfig
+
 from .controllers import control_unicycle
+
 from .dynamics import integrate_unicycle, signed_clearance, swept_disk_clearance
 
 RUNNING, GOAL, COLLISION, INFEASIBLE, TIMEOUT = range(5)
-STATUS_NAMES = {RUNNING:"running",GOAL:"goal_reached",COLLISION:"collision",INFEASIBLE:"solver_infeasible",TIMEOUT:"timeout"}
 
+STATUS_NAMES = {RUNNING:"running",GOAL:"goal_reached",COLLISION:"collision",INFEASIBLE:"solver_infeasible",TIMEOUT:"timeout"}
 
 class Summary(NamedTuple):
     final_state: jax.Array
@@ -25,7 +30,6 @@ class Summary(NamedTuple):
     min_psi1: jax.Array
     progress: jax.Array
     worst_qp_violation: jax.Array
-
 
 @partial(jax.jit, static_argnames=("config","steps"))
 def rollout_fixed(x0, goal, obstacles, mask, alpha, config=UnicycleConfig(), steps=400):

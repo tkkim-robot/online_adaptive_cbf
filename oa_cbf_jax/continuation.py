@@ -1,24 +1,30 @@
-"""Real fixed-gain counterfactuals from copied causal acquisition snapshots.
+"""Shared continuation implementation."""
 
-A parent contributes one sampled latent physical state. Query replicas share it
-and vary future measurement innovations only. No synthetic physical posterior is
-restarted behind an already-filtered observation. Truth is used by the simulator
-and labels, never passed to the learned selector or its observation estimator.
-"""
 from functools import partial
-from typing import NamedTuple
-import jax
-import jax.numpy as jnp
-from .config import UnicycleConfig
-from .motion_observer import MotionState,initialize,update,effective_noise
-from .dynamics import integrate_unicycle,signed_clearance,swept_disk_clearance
-from .route_control import route_control,INADMISSIBLE
-from .routing import physical_route_coordinate
-from .simulation import Summary,RUNNING,GOAL,COLLISION,INFEASIBLE,TIMEOUT
-from .stochastic import STATE_BOUND_VIOLATION
-from .sensor_margin import clearance_inflation
-from .position_observer import PositionState,initialize as position_initialize,update as position_update
 
+from typing import NamedTuple
+
+import jax
+
+import jax.numpy as jnp
+
+from .config import UnicycleConfig
+
+from .motion_observer import MotionState, update, effective_noise
+
+from .dynamics import integrate_unicycle, signed_clearance, swept_disk_clearance
+
+from .route_control import route_control, INADMISSIBLE
+
+from .routing import physical_route_coordinate
+
+from .simulation import Summary, RUNNING, GOAL, COLLISION, INFEASIBLE, TIMEOUT
+
+from .stochastic import STATE_BOUND_VIOLATION
+
+from .guidance import clearance_inflation
+
+from .motion_observer import PositionState, position_observer_update as position_update
 
 class Snapshot(NamedTuple):
     physical_state:jax.Array
@@ -29,7 +35,6 @@ class Snapshot(NamedTuple):
     raw_obstacles:jax.Array
     observer:MotionState
     position:PositionState|None=None
-
 
 @partial(jax.jit,static_argnames=('config','steps','sensor_margin_scale','margin_guidance','shared_clearance_budget','motion_observer_window','filter_obstacle_position'))
 def rollout(snapshot,goal,mask,gains,points,route_mask,cursor,noise,key,config=UnicycleConfig(),steps=80,
@@ -85,16 +90,9 @@ def rollout(snapshot,goal,mask,gains,points,route_mask,cursor,noise,key,config=U
     delta=physical_route_coordinate(x[:2],points,route_mask,progress)-physical_route_coordinate(x0[:2],points,route_mask,cursor)
     return summary,trace,dict(initial_state=x0,obstacles=obstacles,route_progress_delta=delta)
 
-
 def snapshot_payload(snapshot):
     result={**{f'snapshot_{name}':getattr(snapshot,name) for name in Snapshot._fields if name not in ('observer','position')},
             **{f'observer_{name}':getattr(snapshot.observer,name) for name in MotionState._fields}}
     if snapshot.position is not None:
         result.update({f'position_{name}':getattr(snapshot.position,name) for name in PositionState._fields})
     return result
-
-
-def snapshot_from_payload(data):
-    position=PositionState(*(jnp.asarray(data['position_'+k]) for k in PositionState._fields)) if 'position_center' in data else None
-    return Snapshot(*(jnp.asarray(data['snapshot_'+k]) for k in Snapshot._fields if k not in ('observer','position')),
-                    MotionState(*(jnp.asarray(data['observer_'+k]) for k in MotionState._fields)),position)

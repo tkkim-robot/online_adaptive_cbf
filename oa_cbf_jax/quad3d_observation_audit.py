@@ -1,15 +1,22 @@
-"""Independent observation, route, CBF and continuous physical trace accounting."""
+"""Shared quad3d observation audit implementation."""
+
 from pathlib import Path
+
 import numpy as np
-from .dataset import sha256
+
+from .io import sha256
+
 from .quad3d_control import control_config
-from .quad3d_audit import (audit_hold, independent_obstacle_values,
-    independent_envelope_values, independent_held_cascade_minimum)
+
 from .quad3d_routing import numpy_flight_target
+
 from .quad3d_observation import unit_tape, numpy_observe, numpy_obstacles, numpy_arrived
 
-
 def audit_parent(arguments):
+    from .quad3d_audit import audit_hold
+    from .quad3d_audit import independent_envelope_values
+    from .quad3d_audit import independent_held_cascade_minimum
+    from .quad3d_audit import independent_obstacle_values
     p, row, directory, manifest = arguments
     path = Path(directory)/row['file']
     assert p['id'] == row['id'] and sha256(path) == row['sha256']
@@ -61,7 +68,7 @@ def audit_parent(arguments):
             assert d['waypoint_index'][k]==leg and d['waypoint_handoff'][k]==handoff
             np.testing.assert_array_equal(d['mission_goal'][k],goal)
         if c.nominal_bias_observer=='innovation_ema_v97':
-            from .quad3d_observer import numpy_update_bias
+            from .quad3d_observation import numpy_update_bias
             if k:estimated_bias=numpy_update_bias(estimated_bias,d['observed'][k-1],seen_x,d['control'][k-1],noise,c)
             np.testing.assert_allclose(d['nominal_bias_estimate'][k],estimated_bias,atol=2e-10,rtol=1e-9)
             np.testing.assert_allclose(d['nominal_observation'][k],seen_x-estimated_bias,atol=2e-10,rtol=1e-9)

@@ -1,22 +1,18 @@
-"""Default repository discrete MPC formulations on the shared unicycle plant.
+"""Discrete mpc functions and shared contracts."""
 
-CasADi/IPOPT is an independent CPU comparator, with no solver parameter search.
-JAX remains the learned OA-CBF training/inference/simulation path. These gains
-are dimensionless discrete gains; they are not the continuous OA-CBF gains.
-"""
 from dataclasses import asdict
+
 import time
+
 import numpy as np
+
 from .config import UnicycleConfig
 
-
 DEFAULTS={'fixed_low':(.01,.01),'fixed_high':(.35,.35),'optimal_decay':(.01,.01)}
-
 
 def numpy_euler(x,u,dt):
     x=np.asarray(x,float);u=np.asarray(u,float)
     return x+dt*np.asarray([x[3]*np.cos(x[2]),x[3]*np.sin(x[2]),u[1],u[0]])
-
 
 def numpy_barrier(x,u,obs,gains,omega,robot,buffer=None):
     """Independent NumPy version of the two repeated-input Euler differences."""
@@ -26,7 +22,6 @@ def numpy_barrier(x,u,obs,gains,omega,robot,buffer=None):
     h=lambda y:np.sum((y[:2]-obs[:,:2])**2,axis=-1)-1.01*(radius+obs[:,2])**2
     h0,h1,h2=h(x),h(x1),h(x2)
     return h2-2*h1+h0+a.sum()*(h1-h0)+a.prod()*h0
-
 
 class DiscreteMPC:
     def __init__(self,capacity,method='fixed_low',robot=UnicycleConfig(),*,shared_contract=True):
@@ -120,3 +115,144 @@ class DiscreteMPC:
             solver_success=bool(stats.get('success',False)),
             solver_status=str(stats.get('return_status')),iterations=int(stats.get('iter_count',-1)),solve_seconds=elapsed,
             max_equality_error=eq,max_constraint_violation=ineq,objective=float(answer['f']))
+
+
+import hashlib
+
+
+import jax
+
+
+from .simulation import RUNNING, GOAL, COLLISION, INFEASIBLE, TIMEOUT, STATUS_NAMES
+
+from .stochastic import STATE_BOUND_VIOLATION
+
+PLANNER_FAILURE=7
+
+NAMES={**STATUS_NAMES,PLANNER_FAILURE:'planner_failure',STATE_BOUND_VIOLATION:'state_bound_violation'}
+
+def check_applied(sensed,control,obstacles,mask,omega,solver,speed_error):
+    """Recheck the actual FP32 command; reject rather than clip a bad action."""
+    robot=solver.robot
+    residual=numpy_barrier(sensed,control,obstacles,solver.gains,omega,robot)
+    low=max(0.,float(sensed[3])-speed_error)+robot.dt*float(control[0])
+    high=min(robot.v_max,float(sensed[3])+speed_error)+robot.dt*float(control[0])
+    violation=max(float(np.max(-residual[np.asarray(mask,bool)],initial=-np.inf)),
+        float(np.max(np.abs(control)-[robot.a_max,robot.w_max])),-low,high-robot.v_max)
+    return bool(np.isfinite(control).all() and np.isfinite(omega).all() and violation<=robot.qp_tolerance),violation
+
+def episode(record,solver,kernels,steps,noise_scale,ordered=False):
+    robot=solver.robot;scene=record['scene'];f=lambda a:np.asarray(a,np.float32)
+    mask=np.asarray(scene['obstacle_mask'],bool);observed=f(scene['initial_state']);obstacles=f(scene['obstacles'])
+    if ordered:
+        count=record['waypoint_count'];goals=f(record['waypoint_goals']);routes=record['waypoint_routes']
+        points=f(routes['points']);rmask=np.asarray(routes['mask'],bool);ready=np.asarray(routes['ready'],bool)
+    else:
+        count=1;goals=f([scene['goal']]);points=f([record['route']['points']])
+        rmask=np.asarray([record['route']['mask']],bool);ready=np.asarray([record['route']['status']=='ready'])
+    noise=noise_scale*np.array([.02,.03,.02,.03,.025,.01]);fn=f(noise)
+    seed=int.from_bytes(hashlib.sha256(scene['scene_id'].encode()).digest()[:4],'little');key=np.asarray(jax.random.PRNGKey(seed))
+    x,truth_obs,xb,ob,xs,os,innovations=kernels.prepare(observed,obstacles,mask,fn,key)
+    initial=np.asarray(x);truth=np.asarray(truth_obs);minimum=float(kernels.clearance(x,truth_obs,mask))
+    status=PLANNER_FAILURE if not ready[0] else COLLISION if minimum<=0 else GOAL if count==1 and bool(kernels.arrived(x,goals[0],np.zeros(6,np.float32))) else RUNNING
+    leg=0;cursor=np.float32(0);previous=np.zeros(2,np.float32);solver.last_omega=np.zeros(2)
+    traces=[];applied=0;solve_times=[];step_times=[];solver_statuses={};start=time.perf_counter()
+    for k in range(steps):
+        tick=time.perf_counter();sx,so=kernels.sense(x,truth_obs,xb,ob,xs,os,innovations[k],np.int32(k))
+        sx,so=np.asarray(sx),np.asarray(so)
+        handoff=status==RUNNING and leg<count-1 and bool(kernels.arrived(sx,goals[leg],fn))
+        if handoff:leg+=1;cursor=np.float32(0)
+        if status==RUNNING and not ready[leg]:status=PLANNER_FAILURE
+        attempt=status==RUNNING;result=None;u=np.zeros(2,np.float32);omega=np.ones(2);clear=bound=violation=np.nan
+        target,proposal,remaining=kernels.target(sx,points[leg],rmask[leg],cursor)
+        if attempt:
+            # Pinned tracking.update_goal and MPCCBF.solve_control_problem use
+            # the current mandatory waypoint, not a receding route lookahead.
+            result=solver.solve(sx,goals[leg],so,mask,previous,speed_error=1.15*float(fn[2]))
+            solve_times.append(result['solve_seconds']);label=result['solver_status'];solver_statuses[label]=solver_statuses.get(label,0)+1
+            candidate=f(result['control']);omega=result['omega']
+            accepted,violation=check_applied(sx,candidate,so,mask,omega,solver,1.15*float(fn[2]))
+            accepted=accepted and result['feasible']
+            if accepted:
+                u=candidate;x,clear,bound=kernels.advance(x,u,truth_obs,mask,np.int32(k))
+                clear,bound=float(clear),float(bound);minimum=min(minimum,clear)
+                cursor=np.float32(proposal);previous=u.copy();solver.last_omega=omega.copy();applied+=1
+                if leg==count-1 and bool(kernels.arrived(x,goals[leg],np.zeros(6,np.float32))):status=GOAL
+                if bound>robot.qp_tolerance:status=STATE_BOUND_VIOLATION
+                if clear<=0:status=COLLISION
+            else:status=INFEASIBLE
+        else:accepted=False
+        traces.append(dict(state=np.asarray(x),control=u,active=accepted,status=status,gains=solver.gains,
+            omega=omega,observed_state=sx,observed_obstacles=so,clearance=clear,state_bound_violation=bound,
+            qp_violation=violation,route_target=np.asarray(target),mpc_reference=goals[leg],route_remaining=float(remaining),route_progress=cursor,
+            selection_tick=attempt,selection_accepted=accepted,solver_status='' if result is None else result['solver_status'],
+            solver_success=False if result is None else result['solver_success'],
+            solver_iterations=-1 if result is None else result['iterations'],solver_seconds=np.nan if result is None else result['solve_seconds'],
+            predicted_states=np.full((11,4),np.nan) if result is None else result['states'],
+            predicted_controls=np.full((10,2),np.nan) if result is None else result['controls'],
+            predicted_omegas=np.full((10,2),np.nan) if result is None else result['omegas'],
+            solver_equality_error=np.nan if result is None else result['max_equality_error'],
+            solver_constraint_violation=np.nan if result is None else result['max_constraint_violation'],
+            waypoint_index=leg,waypoint_handoff=handoff,waypoints_visited=leg+int(status==GOAL),mission_goal=goals[leg],
+            collision_event=accepted and clear<=0,state_bound_event=accepted and bound>robot.qp_tolerance))
+        step_times.append(time.perf_counter()-tick)
+        if status!=RUNNING:break
+    if status==RUNNING:status=TIMEOUT
+    trace={k:np.stack([t[k] for t in traces]) for k in traces[0]}
+    row=dict(scene_id=scene['scene_id'],family=scene['family'],mode='discrete_mpc_'+solver.method,status=NAMES[status],steps=applied,
+        min_clearance=minimum,goal_progress=float(np.linalg.norm(initial[:2]-goals[count-1])-np.linalg.norm(np.asarray(x)[:2]-goals[count-1])),
+        final_route_coordinate=float(kernels.coordinate(x[:2],points[leg],rmask[leg],cursor)),
+        applied_source_counts={'default_discrete_mpc':applied},selection_attempts=len(solve_times),
+        selection_rejections=int(status==INFEASIBLE),reactive_reselections=0,gate_stage_totals=[],gain_total_variation=0.,
+        max_physical_bound_violation=float(np.max(trace['state_bound_violation'][trace['active']])) if applied else None,
+        solver_status_counts=solver_statuses,elapsed_seconds=time.perf_counter()-start,
+        solver_seconds=sum(solve_times),tick_seconds_p50_p99_max=np.quantile(step_times,[.5,.99,1]).tolist(),
+        collision_event=bool(np.any(trace['collision_event'])) or minimum<=0,state_bound_event=bool(np.any(trace['state_bound_event'])))
+    if status==INFEASIBLE:
+        row['termination_reason']=('solver_reported_failure:'+result['solver_status'] if not result['solver_success'] else
+            'independent_prediction_residual_rejection' if not result['feasible'] else 'applied_command_residual_rejection')
+    if ordered:row.update(waypoint_index=leg,waypoints_visited=leg+int(status==GOAL),required_waypoints=count,waypoint_handoffs=int(trace['waypoint_handoff'].sum()))
+    return row,trace,dict(true_initial_state=initial,true_obstacles=truth,scene_id=scene['scene_id'],noise=noise,key=key)
+
+
+import jax.numpy as jnp
+
+
+from .dynamics import integrate_unicycle, signed_clearance, swept_disk_clearance
+
+from .routing import route_target, physical_route_coordinate
+
+from .stochastic import conditioned_sensor_model
+
+class PhysicalKernels:
+    def __init__(self,capacity,route_capacity,steps,robot=UnicycleConfig()):
+        # Keep the common physical prior, RNG and plant identical when an FP64
+        # controller is hosted in this process. Only AOT compilation uses this
+        # context; runtime executes the fixed FP32 signatures.
+        with jax.enable_x64(False):
+            self._compile(capacity,route_capacity,steps,robot)
+
+    def _compile(self,capacity,route_capacity,steps,robot):
+        x=jnp.zeros(4);obs=jnp.zeros((capacity,5));mask=jnp.zeros(capacity,bool)
+        noise=jnp.zeros(6);key=jax.random.PRNGKey(0);points=jnp.zeros((route_capacity,2));rmask=jnp.ones(route_capacity,bool)
+        begin=time.perf_counter()
+        def prepare(x,obs,mask,noise,key):
+            return conditioned_sensor_model(x,obs,mask,noise,key,robot,steps)
+        def sense(x,truth_obs,xb,ob,xs,os,innovation,k):
+            physical_obs=truth_obs.at[:,:2].set(truth_obs[:,:2]+k*robot.dt*truth_obs[:,3:5])
+            return x-xb+.15*xs*innovation[:4],physical_obs-ob+.15*os*innovation[4:].reshape(obs.shape)
+        def advance(x,u,truth_obs,mask,k):
+            y,sub=integrate_unicycle(x,u,robot.dt,robot.integration_substeps)
+            starts=jnp.concatenate((x[None],sub[:-1]));times=k*robot.dt+jnp.arange(robot.integration_substeps)*robot.dt/robot.integration_substeps
+            clear=jnp.min(jax.vmap(lambda a,b,t:swept_disk_clearance(a,b,truth_obs,mask,robot.radius,t,t+robot.dt/robot.integration_substeps))(starts,sub,times))
+            return y,clear,jnp.maximum(-y[3],y[3]-robot.v_max)
+        def arrived(x,goal,noise):
+            return (jnp.linalg.norm(x[:2]-goal)+jnp.sqrt(2.)*1.15*noise[0]<=robot.goal_tolerance)&(jnp.abs(x[3])+1.15*noise[2]<=.2)
+        self.prepare=jax.jit(prepare).lower(x,obs,mask,noise,key).compile()
+        self.sense=jax.jit(sense).lower(x,obs,x,obs,x,jnp.zeros(5),jnp.zeros(4+capacity*5),jnp.int32(0)).compile()
+        self.advance=jax.jit(advance).lower(x,jnp.zeros(2),obs,mask,jnp.int32(0)).compile()
+        self.target=jax.jit(lambda x,p,m,c:route_target(x,p,m,c,robot)).lower(x,points,rmask,jnp.float32(0)).compile()
+        self.coordinate=jax.jit(physical_route_coordinate).lower(x[:2],points,rmask,jnp.float32(0)).compile()
+        self.clearance=jax.jit(lambda x,o,m:jnp.min(signed_clearance(x[:2],o,m,robot.radius))).lower(x,obs,mask).compile()
+        self.arrived=jax.jit(arrived).lower(x,jnp.zeros(2),noise).compile()
+        self.compile_seconds=time.perf_counter()-begin

@@ -3,21 +3,34 @@
 All row selection precedes teacher solves. Invalid solves stay in the dataset;
 their absent labels are masked. No evaluation/hero observations enter training.
 """
-import argparse
-from dataclasses import asdict
-import hashlib
-import json
-from pathlib import Path
-import time
-import jax
-import jax.numpy as jnp
-import numpy as np
-from .quad2d_barriernet import features,nominal,constraints,bounded_qp,contract,require_x64
-from .quad2d_control import flight_config_from_contract
-from .barriernet_training import benchmark,train
-from .dataset import sha256,source_fingerprint
-from .io import write_json
 
+import argparse
+
+from dataclasses import asdict
+
+import hashlib
+
+import json
+
+from pathlib import Path
+
+import time
+
+import jax
+
+import jax.numpy as jnp
+
+import numpy as np
+from .quad2d_barriernet import features, nominal, constraints, bounded_qp, contract
+from .barriernet import require_x64
+
+from .quad2d_control import flight_config_from_contract
+
+from .barriernet_training import benchmark, train
+
+from .io import sha256, source_fingerprint
+
+from .io import write_json
 
 def prepare(source,output,rows=200000,seed=901):
     require_x64();source=Path(source);root=Path(output);root.mkdir(parents=True,exist_ok=False)

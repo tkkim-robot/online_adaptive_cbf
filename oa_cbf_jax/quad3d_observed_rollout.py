@@ -1,13 +1,18 @@
-"""Full-state noisy acquisition, with a strict observable-only control boundary."""
-import numpy as np
-import jax
-import jax.numpy as jnp
-from .quad3d import integrate_quad3d
-from .quad3d_control import Quad3DControlConfig, quad3d_problem, solve_qp4
-from .quad3d_routing import flight_target
-from .quad3d_observation import (observe, controller_obstacles, guidance_obstacles,
-                                 observed_arrived)
+"""Shared quad3d observed rollout implementation."""
 
+import numpy as np
+
+import jax
+
+import jax.numpy as jnp
+
+from .quad3d import integrate_quad3d
+
+from .quad3d_control import Quad3DControlConfig, quad3d_problem, solve_qp4
+
+from .quad3d_routing import flight_target
+
+from .quad3d_observation import observe, controller_obstacles, guidance_obstacles, observed_arrived
 
 def observed_problem(x, goal, obstacles, mask, gains, points, route_mask, cursor, noise, config, transition_guard=False, nominal_bias=None):
     """No physical state, sensor bias, innovations, or scene identity accepted."""
@@ -22,14 +27,12 @@ def observed_problem(x, goal, obstacles, mask, gains, points, route_mask, cursor
         a = jnp.concatenate((a, aa)); b = jnp.concatenate((b, bb))
     return reference, a, b, psi, domain, target, proposed, remaining, visible
 
-
 def observed_control(x, goal, obstacles, mask, gains, points, route_mask, cursor, noise, config, transition_guard=False, nominal_bias=None):
     reference, a, b, psi, domain, target, proposed, remaining, visible = observed_problem(
         x, goal, obstacles, mask, gains, points, route_mask, cursor, noise, config, transition_guard, nominal_bias)
     u, feasible, residual, iterations = solve_qp4(reference, a, b, config.qp_tolerance,
                                                  (config.robot.input_min, config.robot.input_max),refinement=config.qp_refinement)
     return u, feasible, psi, domain, residual, iterations, target, proposed, remaining, visible, observed_arrived(x, goal, noise, config)
-
 
 def make_observed_rollout(steps=1600, config=Quad3DControlConfig(hold_guard='bernstein_v87'), transition_guard=False):
     c = config
@@ -51,7 +54,7 @@ def make_observed_rollout(steps=1600, config=Quad3DControlConfig(hold_guard='ber
             state, status, count, cursor, bias_estimate, previous_seen, previous_u, previous_gain = carry
             seen_x, seen_o = current(state, k)
             if estimating:
-                from .quad3d_observer import update_bias
+                from .quad3d_observation import update_bias
                 updated=update_bias(bias_estimate,previous_seen,seen_x,previous_u,noise,c)
                 bias_estimate=jnp.where(k>0,updated,bias_estimate)
             if gain_schedule is None:

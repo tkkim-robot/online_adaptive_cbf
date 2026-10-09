@@ -1,13 +1,10 @@
-"""Pinned planar-flight optimal-decay QP, with OSQP library defaults.
+"""Quad2d odqp functions and shared contracts."""
 
-The repository controller has one obstacle row, two unrestricted independent
-coefficients, and a fixed original nominal. No OA guidance or rescue is added.
-"""
-from dataclasses import asdict
 import time
-import numpy as np
-from .quad2d_control import FlightConfig
 
+import numpy as np
+
+from .quad2d_control import FlightConfig
 
 def nominal(x, target, config=FlightConfig()):
     """Direct NumPy transcription of Quad2D.nominal_input's default gains."""
@@ -20,12 +17,10 @@ def nominal(x, target, config=FlightConfig()):
     # FlightConfig has equal radius/arm; no substitute gain tuning is applied.
     return np.clip(.5*np.array([thrust+torque/c.radius,thrust-torque/c.radius]),c.force_min,c.force_max)
 
-
 def nearest(x,obs,mask):
     """Tracking's default Quad2D full-angle nearest-center selection."""
     if not np.any(mask):return -1
     return int(np.argmin(np.where(mask,np.linalg.norm(obs[:,:2]-x[:2],axis=1),np.inf)))
-
 
 def problem(x,target,obs,mask,config=FlightConfig(),shared_buffer=True):
     x=np.asarray(x,float);obs=np.asarray(obs,float);mask=np.asarray(mask,bool);c=config.robot
@@ -38,22 +33,6 @@ def problem(x,target,obs,mask,config=FlightConfig(),shared_buffer=True):
         A[0]=[-collective,-collective,-hd,-.25*h];b[0]=drift
     A[1:,:2]=[[1,0],[-1,0],[0,1],[0,-1]];b[1:]=[c.force_max,-c.force_min,c.force_max,-c.force_min]
     return np.r_[nominal(x,target,config),1.,1.],A,b,selected
-
-
-def contract(config=FlightConfig(),shared_buffer=True):
-    import osqp
-    return dict(method='optimal_decay_cbf_qp',schema='quad2d_native_odqp_v1',alpha1=.5,alpha2=.5,omega_reference=[1.,1.],penalties=[1e4,1e4],
-        omega_bounds='unrestricted independent coefficients; not a product of effective class-K gains',
-        objective='sum((u-u_ref)^2)+1e4*(omega1-1)^2+1e4*(omega2-1)^2',
-        barrier='hddot+(alpha1+alpha2)*omega1*hdot+alpha1*alpha2*omega2*h>=0',beta=1.01,
-        obstacles='Single nearest observed center among every active obstacle; no velocity term, no field-of-view truncation for Quad2D',
-        nominal='Original Quad2D.nominal_input defaults: kpx3,kdx.5,kpz.1,kdz.5,kptheta.05,kdtheta.05; original torque/rotor clipping',
-        solver='OSQP',solver_version=osqp.__version__,solver_options=dict(verbose=False),
-        initialization='New default OSQP instance per episode; default warm starting within episode; no retries, scaling or tolerance overrides',
-        shared_buffer=shared_buffer,config=asdict(config),
-        task_adapter='Common observed route target, shared robot/sensor/physical plant/arrival/envelope termination. Shared buffer optionally added to barrier radius. Original single-obstacle API receives one vector (legacy tracking currently passes an incompatible multi-obstacle array). No added flight-envelope CBF or OA fallback.',
-        acceptance='Solver solved/solved-inaccurate plus independently checked original QP rows and actual stored FP32 actuator command, tolerance1e-5. Rejected future censored.')
-
 
 class Quad2DODQP:
     def __init__(self,config=FlightConfig(),shared_buffer=True):
@@ -82,3 +61,64 @@ class Quad2DODQP:
         return dict(solution=solution,reference=ref,selected_obstacle=selected,solver_success=success,solver_status=result.info.status,status_value=int(result.info.status_val),
             iterations=int(result.info.iter),solve_seconds=time.perf_counter()-start,primal_residual=float(result.info.prim_res),dual_residual=float(result.info.dual_res),
             raw_violation=raw_violation,stored_violation=stored_violation,feasible=bool(success and max(raw_violation,stored_violation)<=self.config.robot.qp_tolerance))
+
+
+import jax
+
+
+from .quad2d_static_inputs import validate_parent, numpy_arrived
+
+from .quad2d_rollout import NAMES
+
+from .io import sanitize
+
+def episode(parent,kernels,steps,config=FlightConfig()):
+    c=config.robot;solver=Quad2DODQP(config);ordered='waypoint_count' in parent
+    observed,final_goal,obs,mask,noise=(np.asarray(parent[k],bool if k=='obstacle_mask' else np.float32) for k in ['initial_state','goal','obstacles','obstacle_mask','noise'])
+    if ordered:
+        validate_parent(parent);goals=np.asarray(parent['waypoint_goals'],np.float32);total=parent['waypoint_count']
+        routes=np.asarray(parent['waypoint_routes']['points'],np.float32);route_masks=np.asarray(parent['waypoint_routes']['mask'],bool);ready=np.asarray(parent['waypoint_routes']['ready'],bool)
+    else:
+        goals=final_goal[None];total=1;routes=np.asarray(parent['route']['points'],np.float32)[None];route_masks=np.asarray(parent['route']['mask'],bool)[None];ready=[parent['route']['status']=='ready']
+    leg=0;key=np.asarray(jax.random.PRNGKey(parent['seed']+7193));initial,truth,xb,ob,xs,os,innovations=kernels.prepare(observed,obs,mask,noise,key)
+    x=initial;previous=np.zeros(2,np.float32);cursor=np.float32(0);count=0;minimum=float(kernels.clearance(x,truth,mask))
+    status=1 if total==1 and bool(kernels.arrived(x,goals[0])) else 0
+    if float(kernels.bound(x))>c.qp_tolerance:status=8
+    if minimum<=0:status=2
+    if not ready[0]:status=7
+    records=[];reason=NAMES[status];start=time.perf_counter()
+    for k in range(steps):
+        sensed,seen=map(np.asarray,kernels.sense(x,truth,xb,ob,xs,os,innovations[k],np.int32(k)))
+        handoff=bool(status==0 and leg<total-1 and numpy_arrived(sensed.astype(float),goals[leg].astype(float),config,noise))
+        if handoff:leg+=1;cursor=np.float32(0)
+        goal=goals[leg];points=routes[leg];rm=route_masks[leg]
+        if status==0 and not ready[leg]:status=7;reason=NAMES[status]
+        before_cursor=cursor;before_control=previous.copy();target,proposed,remaining=map(np.asarray,kernels.target(sensed,points,rm,cursor))
+        attempted=status==0;accepted=False;u=np.zeros(2,np.float32);clear=bound=np.nan
+        result=dict(solution=np.full(4,np.nan),reference=np.r_[nominal(sensed,target,config),1.,1.],selected_obstacle=nearest(sensed,seen,mask),solver_success=False,solver_status='not_attempted',status_value=0,
+            iterations=0,solve_seconds=0.,primal_residual=np.nan,dual_residual=np.nan,raw_violation=np.nan,stored_violation=np.nan,feasible=False)
+        if attempted:
+            result=solver.solve(sensed,target,seen,mask);accepted=result['feasible']
+            if not accepted:
+                status=3;reason=('solver_reported_failure:'+result['solver_status'] if not result['solver_success'] else 'independent_stored_qp_rejected')
+            else:
+                u=result['solution'][:2].astype(np.float32);x,clear,bound=kernels.advance(x,u,truth,mask,np.int32(k));clear=float(clear);bound=float(bound);minimum=min(minimum,clear)
+                count+=1;cursor=np.float32(proposed);previous=u
+                if leg==total-1 and bool(kernels.arrived(x,goal)):status=1
+                if bound>c.qp_tolerance:status=8
+                if clear<=0:status=2
+                reason=NAMES[status]
+        mission=dict(waypoint_index=leg,waypoint_handoff=handoff,mission_goal=goal,mission_previous_control=before_control,mission_route_cursor_before=before_cursor,waypoints_visited=leg+int(status==1)) if ordered else {}
+        records.append(dict(state=np.asarray(x),control=u,active=accepted,status=status,observed_state=sensed,observed_obstacles=seen,clearance=clear,state_bound_violation=bound,
+            route_progress=cursor,route_target=target,route_remaining=remaining,solver_attempted=attempted,**{'odqp_'+k:v for k,v in result.items()},**mission))
+        if status:break
+    if not status:status=4;reason=NAMES[status]
+    data={k:np.asarray([r[k] for r in records]) for k in records[0]}
+    data.update(true_initial_state=np.asarray(initial),true_obstacles=np.asarray(truth),initial_observation=observed,observed_obstacles_initial=obs,obstacle_mask=mask,noise=noise,goal=final_goal,key=key)
+    if not ordered:data.update(points=routes[0],route_mask=route_masks[0])
+    row=dict(group_id=parent['group_id'],family=parent['family'],obstacles=int(mask.sum()),noise_scale=float(parent.get('noise_scale',round(float(noise[0]/.015),6))),status=NAMES[status],status_code=status,
+        steps=count,min_clearance=minimum,final_state=np.asarray(x).tolist(),route_progress=float(cursor),termination_reason=reason,execution_seconds=time.perf_counter()-start,
+        solver_attempts=int(data['solver_attempted'].sum()),solver_seconds=float(data['odqp_solve_seconds'].sum()),solver_setup_seconds=solver.setup_seconds,
+        waypoint_index=leg,waypoints_visited=leg+int(status==1),required_waypoints=total,waypoint_handoffs=sum(int(r.get('waypoint_handoff',False)) for r in records))
+    if ordered:row.update(original_kind=parent['original_kind'],variant_index=parent['variant_index'])
+    return sanitize(row),data

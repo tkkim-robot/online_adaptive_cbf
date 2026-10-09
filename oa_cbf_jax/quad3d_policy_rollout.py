@@ -1,11 +1,16 @@
-"""AOT learned-policy scan: observed inputs, checked gain switches, actual physics."""
-import numpy as np
-import jax
-import jax.numpy as jnp
-from .quad3d import integrate_quad3d
-from .quad3d_observation import observe,observed_arrived
-from .quad3d_observed_rollout import observed_control
+"""Shared quad3d policy rollout implementation."""
 
+import numpy as np
+
+import jax
+
+import jax.numpy as jnp
+
+from .quad3d import integrate_quad3d
+
+from .quad3d_observation import observe, observed_arrived
+
+from .quad3d_observed_rollout import observed_control
 
 def checked_control(x,goal,o,mask,proposed,previous,points,rm,cursor,noise,c,nominal_bias=None,previous_result=None):
     primary=observed_control(x,goal,o,mask,proposed,points,rm,cursor,noise,c,True,nominal_bias)
@@ -16,11 +21,9 @@ def checked_control(x,goal,o,mask,proposed,previous,points,rm,cursor,noise,c,nom
         attempted_residual=primary[4],attempted_iterations=primary[5])
     return result,jnp.where(retry,previous,proposed),retry,proof
 
-
 def failure_query_trigger(running,scheduled,arrived,held_feasible):
     """One extra learned query only when the held QP has actually failed."""
     return running&~scheduled&~arrived&~held_feasible
-
 
 def make_policy_rollout(selector,steps=1600,ordered=False,failure_requery=False,return_stepper=False):
     c=selector.robot;p=selector.config
@@ -49,7 +52,7 @@ def make_policy_rollout(selector,steps=1600,ordered=False,failure_requery=False,
             goal,points,rm=mission(leg)
             requery=(status==0)&((k%p.query_every_ticks==0)|handoff)
             if estimating:
-                from .quad3d_observer import update_bias
+                from .quad3d_observation import update_bias
                 updated=update_bias(bias_estimate,previous_seen,seen,previous_u,noise,c)
                 bias_estimate=jnp.where(k>0,updated,bias_estimate)
             if failure_requery:

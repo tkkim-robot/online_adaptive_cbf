@@ -1,24 +1,22 @@
-"""Pinned Quad2D discrete MPC baselines; direct CasADi/IPOPT transcription.
+"""Quad2d mpc functions and shared contracts."""
 
-The shared-task adapter uses every sensed obstacle, the common clearance buffer,
-and predicted flight-envelope bounds. Method gains, horizon, objective, decay
-penalties and solver defaults are preserved. No OA safety filter is appended.
-"""
 from dataclasses import asdict
+
 import time
+
 import numpy as np
+
 from .quad2d_control import FlightConfig
 
 DEFAULTS = {'fixed_low': (.01, .01), 'fixed_high': (.99, .99), 'optimal_decay': (.01, .01)}
-Q = np.array([25., 25., 50., 10., 10., 50.])
 
+Q = np.array([25., 25., 50., 10., 10., 50.])
 
 def numpy_euler(x, u, robot):
     x = np.asarray(x, float); u = np.asarray(u, float)
     force = u.sum() / robot.mass
     return x + robot.dt * np.array([x[3], x[4], x[5], -np.sin(x[2])*force,
         np.cos(x[2])*force-robot.gravity, robot.arm/robot.inertia*(u[0]-u[1])])
-
 
 def numpy_barrier(x, u, obs, gains, omega, robot, buffer=None):
     """Pinned two repeated-input Euler differences; centers remain observed/fixed.
@@ -32,7 +30,6 @@ def numpy_barrier(x, u, obs, gains, omega, robot, buffer=None):
     def h(y): return np.sum((y[:2]-obs[:, :2])**2, axis=-1)-1.01*(radius+obs[:, 2])**2
     h0, h1, h2 = h(x), h(x1), h(x2)
     return h2-2*h1+h0+a.sum()*(h1-h0)+a.prod()*h0
-
 
 def prediction_residual(states, controls, omegas, x, obs, mask, gains, config, shared_contract=True):
     """Independent NumPy check of every equality, obstacle, actuator and bound."""
@@ -49,7 +46,6 @@ def prediction_residual(states, controls, omegas, x, obs, mask, gains, config, s
         limits = np.array([config.pitch_limit, config.velocity_limit, config.velocity_limit, config.pitch_rate_limit])
         violation = max(violation, float(np.max(np.abs(states[1:, 2:])-limits)))
     return equality, violation
-
 
 class Quad2DMPC:
     def __init__(self, capacity, method='fixed_low', config=FlightConfig(), *, shared_contract=True):
@@ -126,3 +122,141 @@ class Quad2DMPC:
         return dict(control=U[0], omega=W[0], states=X, controls=U, omegas=W, feasible=feasible,
             solver_success=bool(stats.get('success', False)), solver_status=str(stats.get('return_status')), iterations=int(stats.get('iter_count', -1)),
             solve_seconds=elapsed, max_equality_error=eq, max_constraint_violation=violation, objective=float(answer['f']))
+
+
+import jax
+
+import jax.numpy as jnp
+
+
+from .quad2d import integrate_quad2d
+
+from .quad2d_control import flight_arrived, physical_envelope_violation
+from .quad2d_rollout import flight_sensor_model, NAMES, STATE_BOUND, PLANNER_FAILURE
+from .simulation import GOAL, COLLISION, TIMEOUT
+
+from .routing import route_target_from_position, physical_route_coordinate
+
+from .dynamics import signed_clearance, swept_disk_clearance
+
+from .io import sanitize
+
+class FlightPhysicalKernels:
+    def __init__(self, capacity, route_capacity, steps, config=FlightConfig()):
+        with jax.enable_x64(False): self._compile(capacity, route_capacity, steps, config)
+
+    def _compile(self, capacity, route_capacity, steps, config):
+        c = config.robot; x = jnp.zeros(6); obs = jnp.zeros((capacity, 5)); mask = jnp.zeros(capacity, bool)
+        noise = jnp.zeros(7); points = jnp.zeros((route_capacity, 2)); rm = jnp.ones(route_capacity, bool)
+        start = time.perf_counter()
+        self.prepare = jax.jit(lambda x, o, m, n, key: flight_sensor_model(x, o, m, n, key, steps,config.stationary_obstacles)).lower(x, obs, mask, noise, jax.random.PRNGKey(0)).compile()
+        def sense(x, truth, xb, ob, xs, os, innovation, k):
+            seen = truth.at[:, :2].set(truth[:, :2]+k*c.dt*truth[:, 3:5])-ob+.15*os*innovation[6:].reshape(obs.shape)
+            return x-xb+.15*xs*innovation[:6], seen
+        self.sense = jax.jit(sense).lower(x, obs, x, obs, x, jnp.zeros(5), jnp.zeros(6+capacity*5), jnp.int32(0)).compile()
+        def advance(x, u, truth, mask, k):
+            y, sub = integrate_quad2d(x, u, c); starts = jnp.concatenate((x[None], sub[:-1]))
+            times = k*c.dt+jnp.arange(c.integration_substeps)*c.dt/c.integration_substeps
+            clear = jnp.min(jax.vmap(lambda a, b, t: swept_disk_clearance(a, b, truth, mask, c.radius, t, t+c.dt/c.integration_substeps))(starts, sub, times))
+            bound = jnp.max(jax.vmap(lambda s: physical_envelope_violation(s, config))(jnp.concatenate((x[None], sub))))
+            return y, clear, bound
+        self.advance = jax.jit(advance).lower(x, jnp.zeros(2), obs, mask, jnp.int32(0)).compile()
+        self.target = jax.jit(lambda x, p, m, cursor: route_target_from_position(x[:2], jnp.linalg.norm(x[3:5]), p, m, cursor)).lower(x, points, rm, jnp.float32(0)).compile()
+        self.coordinate = jax.jit(physical_route_coordinate).lower(x[:2], points, rm, jnp.float32(0)).compile()
+        self.clearance = jax.jit(lambda x, o, m: jnp.min(signed_clearance(x[:2], o, m, c.radius))).lower(x, obs, mask).compile()
+        self.arrived = jax.jit(lambda x, g: flight_arrived(x, g, config)).lower(x, jnp.zeros(2)).compile()
+        self.bound = jax.jit(lambda x: physical_envelope_violation(x, config)).lower(x).compile()
+        self.compile_seconds = time.perf_counter()-start
+
+def command_residual(x, u, obs, mask, effective_gains, config):
+    c = config.robot
+    residual = numpy_barrier(x, u, obs, effective_gains, np.ones(2), c)[mask]
+    return np.r_[residual, u-c.force_min, c.force_max-u], np.inf, np.inf
+
+def episode(parent, solver, kernels, steps, ordered=False):
+    config = solver.config; c = config.robot
+    observed, goal, obs, mask, noise = (np.asarray(parent[k], bool if k == 'obstacle_mask' else np.float32)
+        for k in ('initial_state', 'goal', 'obstacles', 'obstacle_mask', 'noise'))
+    if ordered:
+        from .quad2d_static_inputs import validate_parent, numpy_arrived
+        validate_parent(parent);goals=np.asarray(parent['waypoint_goals'],np.float32);total=parent['waypoint_count'];leg=0
+        routes=np.asarray(parent['waypoint_routes']['points'],np.float32);route_masks=np.asarray(parent['waypoint_routes']['mask'],bool);route_ready=np.asarray(parent['waypoint_routes']['ready'],bool)
+        goal=goals[0];points=routes[0];rm=route_masks[0]
+    else:
+        points = np.asarray(parent['route']['points'], np.float32); rm = np.asarray(parent['route']['mask'], bool)
+    key = np.asarray(jax.random.PRNGKey(parent['seed']+7193))
+    initial, truth, xb, ob, xs, os, innovations = kernels.prepare(observed, obs, mask, noise, key)
+    x = initial; previous = np.zeros(2, np.float32); solver.last_omega = np.zeros(2)
+    cursor = np.float32(0); count = 0; status = 0; minimum = float(kernels.clearance(x, truth, mask))
+    if bool(kernels.arrived(x, goal)) and (not ordered or total==1): status = GOAL
+    if float(kernels.bound(x)) > c.qp_tolerance: status = STATE_BOUND
+    if minimum <= 0: status = COLLISION
+    if not (bool(route_ready[0]) if ordered else parent['route']['status']=='ready'): status = PLANNER_FAILURE
+    records = []; reason = NAMES[status]; start = time.perf_counter()
+    for k in range(steps):
+        sensed, seen = map(np.asarray, kernels.sense(x, truth, xb, ob, xs, os, innovations[k], np.int32(k)))
+        mission_info={}
+        if ordered:
+            handoff=status==0 and leg<total-1 and numpy_arrived(sensed.astype(float),goals[leg].astype(float),config,noise)
+            if handoff:leg+=1;cursor=np.float32(0)
+            goal=goals[leg];points=routes[leg];rm=route_masks[leg]
+            if status==0 and not route_ready[leg]:status=PLANNER_FAILURE;reason=NAMES[status]
+            mission_info=dict(waypoint_index=leg,waypoint_handoff=handoff,mission_goal=goal,mission_previous_control=previous,mission_route_cursor_before=cursor)
+        target, proposed, remaining = map(np.asarray, kernels.target(sensed, points, rm, cursor))
+        attempted = status == 0; accepted = False; control = np.zeros(2, np.float32); clear = bound = np.nan
+        result = dict(states=np.full((11, 6), np.nan), controls=np.full((10, 2), np.nan), omegas=np.full((10, 2), np.nan),
+            omega=np.ones(2), solver_success=False, solver_status='not_attempted', iterations=0, solve_seconds=0.,
+            max_equality_error=np.nan, max_constraint_violation=np.nan, feasible=False)
+        if attempted:
+            result = solver.solve(sensed, target, seen, mask, previous)
+            candidate = result['control'].astype(np.float32)
+            residual, _, _ = command_residual(sensed, candidate, seen, mask, solver.gains*result['omega'], config)
+            accepted = result['feasible'] and np.isfinite(candidate).all() and np.isfinite(residual).all() and residual.min() >= -c.qp_tolerance
+            if not accepted:
+                status = 3
+                reason = ('solver_reported_failure:'+result['solver_status'] if not result['solver_success'] else
+                    'independent_prediction_rejected' if not result['feasible'] else 'stored_command_rejected')
+            else:
+                control = candidate; x, clear, bound = kernels.advance(x, control, truth, mask, np.int32(k))
+                clear = float(clear); bound = float(bound); minimum = min(minimum, clear)
+                count += 1; cursor = np.float32(proposed); previous = control; solver.last_omega = result['omega'].copy()
+                if bool(kernels.arrived(x, goal)) and (not ordered or leg==total-1): status = GOAL
+                if bound > c.qp_tolerance: status = STATE_BOUND
+                if clear <= 0: status = COLLISION
+                reason = NAMES[status]
+        if ordered:mission_info['waypoints_visited']=leg+int(status==GOAL)
+        records.append(dict(state=np.asarray(x), control=control, active=accepted, status=status, observed_state=sensed, observed_obstacles=seen,
+            clearance=clear, state_bound_violation=bound, route_progress=cursor, route_target=target, route_remaining=remaining,
+            solver_attempted=attempted, solver_success=result['solver_success'], solver_status=result['solver_status'], solver_feasible=result['feasible'],
+            solver_iterations=result['iterations'], solve_seconds=result['solve_seconds'], prediction_equality=result['max_equality_error'],
+            prediction_violation=result['max_constraint_violation'], predicted_states=result['states'], predicted_controls=result['controls'],
+            predicted_omegas=result['omegas'], omega=result['omega'],**mission_info))
+        if status != 0: break
+    if status == 0: status = TIMEOUT; reason = NAMES[status]
+    progress = float(kernels.coordinate(x[:2], points, rm, cursor)-kernels.coordinate(initial[:2], points, rm, np.float32(0)))
+    data = {k: np.asarray([r[k] for r in records]) for k in records[0]}
+    data.update(true_initial_state=np.asarray(initial), true_obstacles=np.asarray(truth), initial_observation=observed,
+        observed_obstacles_initial=obs, obstacle_mask=mask, noise=noise, goal=goal, points=points, route_mask=rm, key=key)
+    row = dict(group_id=parent['group_id'], family=parent['family'], obstacles=int(mask.sum()), noise_scale=float(noise[0]/.015),
+        status=NAMES[status], status_code=status, steps=count, min_clearance=minimum, route_progress=progress,
+        final_state=np.asarray(x).tolist(), termination_reason=reason, execution_seconds=time.perf_counter()-start,
+        solver_attempts=int(data['solver_attempted'].sum()), solver_seconds=float(data['solve_seconds'].sum()))
+    if ordered:
+        data['goal']=np.asarray(parent['goal'],np.float32)
+        row.update(waypoint_index=leg,waypoints_visited=leg+int(status==GOAL),required_waypoints=total,waypoint_handoffs=int(data['waypoint_handoff'].sum()))
+    return sanitize(row), data
+
+def numpy_target(x, points, mask, cursor, *, projection_index=None):
+    vectors = points[1:]-points[:-1]; valid = mask[:-1]&mask[1:]
+    lengths = np.where(valid, np.linalg.norm(vectors, axis=1), 0.); cumulative = np.r_[0., np.cumsum(lengths)]
+    fractions = np.clip(np.sum((x[:2]-points[:-1])*vectors, axis=1)/np.maximum(lengths**2, 1e-12), 0., 1.)
+    projected = cumulative[:-1]+fractions*lengths; eligible = valid&(projected>=cursor-.05)&(projected<=cursor+1.)
+    index = np.argmin(np.where(eligible, np.sum((points[:-1]+fractions[:, None]*vectors-x[:2])**2, axis=1), np.inf))
+    if projection_index is not None:
+        if not eligible[projection_index]: raise ValueError('Ineligible route segment')
+        index = projection_index
+    updated = max(cursor, projected[index]) if eligible.any() else cursor
+    desired = min(updated+np.clip(.45+.65*np.linalg.norm(x[3:5]), .35, 1.1), cumulative[-1])
+    segment = np.argmax(valid&(cumulative[1:]>=desired-1e-6))
+    target = points[segment]+np.clip((desired-cumulative[segment])/max(lengths[segment], 1e-12), 0., 1.)*vectors[segment]
+    return target, updated

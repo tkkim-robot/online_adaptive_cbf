@@ -1,17 +1,20 @@
 """Residual graph attention with scene encoding reused over queried CBF gains."""
 
 from dataclasses import dataclass
+
 from functools import partial
+
 import math
+
 import flax.linen as nn
+
 import jax
+
 import jax.numpy as jnp
 
 from .config import UnicycleConfig
 
-# Fixed FP32 reference; lower-precision neural variants require their own audit.
 Dense = partial(nn.Dense, precision="highest")
-
 
 @dataclass(frozen=True)
 class GATConfig:
@@ -137,7 +140,6 @@ class GATConfig:
         if not math.isfinite(self.continuous_log_variance_min) or not -10.<=self.continuous_log_variance_min<=0. or self.continuous_log_variance_min!=-10. and self.encoder not in ('gat','matched_fc'):
             raise ValueError('Continuous variance floor is an explicit OA GAT variant')
 
-
 def unicycle_graph(x,goal,obstacles,obstacle_mask,config=UnicycleConfig()):
     """One observed scene -> nodes [M+2,18], mask. No gain-dependent encoding.
 
@@ -158,7 +160,6 @@ def unicycle_graph(x,goal,obstacles,obstacle_mask,config=UnicycleConfig()):
     mask=jnp.concatenate((jnp.ones(2,bool),obstacle_mask))
     return jnp.where(mask[:,None],features,0.),mask
 
-
 def route_graph(x,goal,obstacles,obstacle_mask,points,route_mask,progress,previous_control,
                 previous_gain,noise,config=UnicycleConfig()):
     """Schema v2: 31 features, adding observable route/controller/sensor context.
@@ -174,7 +175,6 @@ def route_graph(x,goal,obstacles,obstacle_mask,points,route_mask,progress,previo
                              previous_control/jnp.array([config.a_max,config.w_max]),jnp.log(previous_gain),noise))
     expanded=jnp.concatenate((features,jnp.broadcast_to(context,(features.shape[0],context.shape[0]))),axis=-1)
     return jnp.where(mask[:,None],expanded,0.),mask
-
 
 class AttentionBlock(nn.Module):
     width:int
@@ -200,7 +200,6 @@ class AttentionBlock(nn.Module):
         residual=Dense(self.width)(nn.gelu(residual))
         return jnp.where(mask[:,:,None],nodes+residual,0.)
 
-
 def flight_gain_coordinates(gains):
     """Two ordered gains, log curvature, and the actual HOCBF coefficients.
 
@@ -214,7 +213,6 @@ def flight_gain_coordinates(gains):
         (coordinate[...,0]*coordinate[...,1])[...,None],
         (gains.sum(-1)/8.-1.)[...,None],(gains.prod(-1)/16.-1.)[...,None]),axis=-1)
 
-
 def clipped_mixture_heads(output):
     """Two latent risk components; all ten head outputs have a learned role."""
     means=jnp.stack((output[...,0],output[...,6]),axis=-1)
@@ -227,7 +225,6 @@ def clipped_mixture_heads(output):
         log_variance=jnp.stack((jnp.log(variance),jnp.clip(output[...,3],-10.,3.)),axis=-1),
         event_logits=output[...,4:6],risk_component_mean=means,
         risk_component_log_variance=log_variances,risk_component_logits=logits)
-
 
 class CandidateGAT(nn.Module):
     config:GATConfig=GATConfig()
@@ -282,13 +279,13 @@ class CandidateGAT(nn.Module):
             features=features.at[...,29:33].set(0.)
         clean=jnp.where(mask[:,:,None],features,0.)
         if self.config.flight_constraint_features:
-            from .quad2d_constraint_features import coefficients
+            from .quad2d_features import coefficients
             clean=jnp.concatenate((clean,coefficients(clean,mask)),axis=-1)
         if self.config.unicycle_constraint_features:
-            from .unicycle_constraint_features import coefficients
+            from .unicycle_features import coefficients
             clean=jnp.concatenate((clean,coefficients(clean,mask)),axis=-1)
         if self.config.bicycle_constraint_features:
-            from .bicycle_constraint_features import append_constraints
+            from .bicycle_features import append_constraints
             derived=append_constraints(clean[...,:35],mask)[...,35:]
             clean=jnp.concatenate((clean,derived),axis=-1)
         return clean
@@ -296,7 +293,7 @@ class CandidateGAT(nn.Module):
     def encode(self,features,mask,candidate=None):
         clean=self.prepare_features(features,mask)
         if self.config.bicycle_candidate_encoding:
-            from .bicycle_candidate_features import condition_nodes
+            from .bicycle_features import condition_nodes
             clean=condition_nodes(clean,mask,candidate)
         nodes=self.project(clean)
         positions=clean[:,:,3:5]
@@ -348,7 +345,7 @@ class CandidateGAT(nn.Module):
             broadcast=broadcast.at[...,:width].add(delta)
         log_gain=jnp.log(jnp.maximum(gains,1e-6))
         if self.config.unicycle_constraint_features:
-            from .unicycle_constraint_features import gain_coordinates
+            from .unicycle_features import gain_coordinates
             log_gain=gain_coordinates(gains)
         if self.config.flight_gain_basis:
             log_gain=flight_gain_coordinates(gains)
@@ -366,7 +363,7 @@ class CandidateGAT(nn.Module):
             coordinate=(log_gain-math.log(2.))/math.log(4.)
             log_gain=jnp.concatenate((coordinate,coordinate**2),axis=-1)
         if self.config.bicycle_affine_gain:
-            from .bicycle_gain_features import coordinates
+            from .bicycle_control import coordinates
             log_gain=coordinates(gains)
         z=jnp.concatenate((broadcast,log_gain),axis=-1)
         z=nn.gelu(self.head1(z));z=z+nn.gelu(self.head2(z))
@@ -395,7 +392,6 @@ class CandidateGAT(nn.Module):
             return jax.tree.map(lambda a:a.reshape(batch,count,a.shape[-1]),prediction)
         return self.score(self.encode(features,mask),gains)
 
-
 class CandidateFC(nn.Module):
     """Repository FC/PENN family: ReLU widths W,2W,3W,W, Gaussian outputs.
 
@@ -419,7 +415,7 @@ selection framework. Neither is BarrierNet or a direct-gain imitation policy.
                 features = features.astype(jnp.float64)
             context=encode(features, mask, self.config.nearest_dynamics, self.config.nearest_yaw_scale)
             if self.config.unicycle_constraint_features:
-                from .unicycle_constraint_features import nearest_coefficients
+                from .unicycle_features import nearest_coefficients
                 context=jnp.concatenate((context,nearest_coefficients(features,mask)),axis=-1)
             return context
         clean=jnp.where(mask[...,None],features,0.)
@@ -446,7 +442,7 @@ selection framework. Neither is BarrierNet or a direct-gain imitation policy.
         context=jnp.broadcast_to(context[:,None,:],(*gains.shape[:2],context.shape[-1]))
         gain_features=jnp.log(jnp.maximum(gains,1e-6))
         if self.config.unicycle_constraint_features:
-            from .unicycle_constraint_features import gain_coordinates
+            from .unicycle_features import gain_coordinates
             gain_features=gain_coordinates(gains)
         values=jnp.concatenate((context,gain_features),axis=-1)
         for layer in self.hidden:values=nn.relu(layer(values))
@@ -458,7 +454,6 @@ selection framework. Neither is BarrierNet or a direct-gain imitation policy.
 
     def __call__(self,features,mask,gains):
         return self.score(self.encode(features,mask),gains)
-
 
 class CandidateMatchedFC(CandidateGAT):
     """Encoder-only ablation: all observed nodes -> dense scene embedding.
@@ -481,7 +476,7 @@ class CandidateMatchedFC(CandidateGAT):
     def encode(self,features,mask,candidate=None):
         clean=self.prepare_features(features,mask)
         if self.config.bicycle_candidate_encoding:
-            from .bicycle_candidate_features import condition_nodes
+            from .bicycle_features import condition_nodes
             clean=condition_nodes(clean,mask,candidate)
         obstacles=clean[:,2:];om=mask[:,2:]
         keys=(obstacles[:,:,6],obstacles[:,:,5],obstacles[:,:,7],obstacles[:,:,4],obstacles[:,:,3],
@@ -502,7 +497,6 @@ class CandidateMatchedFC(CandidateGAT):
         weights=weights/jnp.maximum(weights.sum(-1,keepdims=True),1e-12)
         geometry=jnp.sum(weights[...,None]*clean[:,2:,3:9],axis=1)
         return jnp.concatenate((context,clean[:,0,:features.shape[-1]],geometry,nearest),axis=-1)
-
 
 class CandidateFlightLocalResidualGAT(CandidateGAT):
     """Frozen nearest-obstacle predictor plus a trainable scene GAT correction.
@@ -528,7 +522,6 @@ class CandidateFlightLocalResidualGAT(CandidateGAT):
             log_variance=jnp.clip(base['log_variance']+correction['log_variance'],-10.,3.),
             event_logits=base['event_logits']+correction['event_logits'])
 
-
 def make_model(config,risk_components=1):
     if risk_components != 1:
         if (risk_components!=2 or config.encoder not in ('gat','nearest_fc')
@@ -540,12 +533,10 @@ def make_model(config,risk_components=1):
     if config.encoder=='matched_fc':return CandidateMatchedFC(config)
     return CandidateGAT(config) if config.encoder=='gat' else CandidateFC(config)
 
-
 def initialize_ensemble(model,key,features,mask,gains,members=4):
     """Independent entire encoders and heads, not just independent last layers."""
     keys=jax.random.split(key,members)
     return jax.vmap(lambda k:model.init(k,features,mask,gains)['params'])(keys)
-
 
 def predict_ensemble(model,params,features,mask,gains):
     if model.config.encoder=='matched_fc':

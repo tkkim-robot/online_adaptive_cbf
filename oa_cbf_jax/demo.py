@@ -1,17 +1,23 @@
 """Run navigation scenarios with released controller models."""
+
 import argparse
+
 import hashlib
+
 import json
+
 import os
+
 from pathlib import Path
+
 import time
 
 from .model_release import DEFAULT, read, verify
 
 ALIASES = {'dynamic_unicycle':'unicycle', 'kinematic_bicycle_dpcbf':'bicycle'}
+
 METHODS = {'ours_gat':'gat', 'ours_fc':'nearest_fc', 'fc':'nearest_fc',
            'od_cbf_qp':'optimal_decay_qp', 'od_cbf_mpc':'optimal_decay'}
-
 
 def learned_stepper(root, dynamics, method, scenario):
     import jax
@@ -63,14 +69,13 @@ def learned_stepper(root, dynamics, method, scenario):
         dt=p.robot.robot.dt; radius=p.robot.robot.radius
     return tick,carry,inputs,truth,dt,radius,finish_status
 
-
 def bicycle_stepper(p,row):
     """Same observation -> selector -> one-tick plant sequence as evaluation."""
     import jax
     import jax.numpy as jnp
     from .bicycle_observed_rollout import make_observed_episode
     from .bicycle_control import constant
-    from .bicycle_observation import observe,unit_errors
+    from .bicycle_observation import observe, unit_errors
     f=lambda v:jnp.asarray(v,jnp.float32)
     f64=lambda v:jnp.asarray(v,jnp.float64)
     mask=jnp.asarray(row['mask'],bool); route=row['route']; rm=jnp.asarray(route['mask'],bool)
@@ -99,7 +104,6 @@ def bicycle_stepper(p,row):
     from .bicycle_rollout import TIMEOUT
     carry=(x,jnp.int32(TIMEOUT),jnp.int32(0),jnp.float32(0),jnp.zeros(2,jnp.float32),jnp.float32(p.config.initial_gain))
     return tick,carry,dict(initial_state=x,obstacles=o)
-
 
 def run_learned(root,dynamics,method,scenario,limit):
     import jax
@@ -140,7 +144,6 @@ def run_learned(root,dynamics,method,scenario,limit):
     return report,dict(states=states,obstacles=np.asarray(truth['obstacles']),mask=np.asarray(scenario['parent'].get('mask',scenario['parent'].get('obstacle_mask',scenario['parent'].get('scene',{}).get('obstacle_mask')))),
         goal=np.asarray(scenario['parent'].get('goal',scenario['parent'].get('scene',{}).get('goal'))),dt=dt,radius=radius,**data)
 
-
 def display(data,report,backend=None,video=None,hold=False,pause=.001):
     import matplotlib
     if backend:matplotlib.use(backend)
@@ -174,7 +177,6 @@ def display(data,report,backend=None,video=None,hold=False,pause=.001):
     else:
         plt.show(block=True)
     plt.close(fig)
-
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)

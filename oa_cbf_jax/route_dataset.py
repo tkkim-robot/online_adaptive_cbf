@@ -1,39 +1,54 @@
-"""Grouped route/visited-state data with observation-conditioned noise replicas.
-
-One observation per independently split scene group keeps whole-group bootstrap
-exact. Gain queries and noise replicas are descendants of that observation, not
-independent rows. This development version still fixes robot dynamics/limits and
-does not supply the fresh final calibration or a deployment certificate.
-"""
+"""Route dataset functions and shared contracts."""
 
 import argparse
+
 from dataclasses import asdict
+
 import json
+
 import hashlib
+
 from pathlib import Path
+
 import time
+
 import jax
+
 import jax.numpy as jnp
+
 import numpy as np
+
 from scipy.stats import qmc
 
 from .config import UnicycleConfig, config_hash
-from .dataset import sha256, source_fingerprint, load_dataset
+
+from .io import sha256, source_fingerprint, load_dataset
+
 from .io import write_json
+
 from .models import route_graph
+
 from .route_control import rollout_route, INADMISSIBLE
+
 from .routing import plan_routes
+
 from .scenes import DIVERSE_FAMILIES, diverse_scene, stationary_scene
+
 from .simulation import STATUS_NAMES, COLLISION, INFEASIBLE, GOAL, TIMEOUT
+
 from .stochastic import stochastic_branch, STATE_BOUND_VIOLATION
-from .sensor_margin import controller_contract
+
+from .guidance import controller_contract
 
 SCHEMA='oa_cbf_route_sensor_v4'
-TARGETS=['negative_min_clearance_div_0.3_capped_below_minus_2','physical_route_progress_div_horizon_distance']
-EVENTS=['collision_first','controller_failure_first']
-PLANNER_FAILURE=7
-NAMES={**STATUS_NAMES,INADMISSIBLE:'hocbf_inadmissible',PLANNER_FAILURE:'planner_failure',STATE_BOUND_VIOLATION:'state_bound_violation'}
 
+TARGETS=['negative_min_clearance_div_0.3_capped_below_minus_2','physical_route_progress_div_horizon_distance']
+
+EVENTS=['collision_first','controller_failure_first']
+
+PLANNER_FAILURE=7
+
+NAMES={**STATUS_NAMES,INADMISSIBLE:'hocbf_inadmissible',PLANNER_FAILURE:'planner_failure',STATE_BOUND_VIOLATION:'state_bound_violation'}
 
 def manifest_for(groups,capacity,queries,replicas,horizon,seed,shard_groups,robot=UnicycleConfig(),gain_upper=4.,visitation=None,sensor_margin_scale=0.,margin_guidance=False,shared_clearance_budget=False,physical_continuation=False,motion_observer_window=0,filter_obstacle_position=False,scene_profile='legacy',visibility_batch_nodes=None,route_capacity=32,reuse_dataset=None):
     if scene_profile not in ('legacy','multiscale_v1') or (scene_profile=='multiscale_v1' and capacity!=64):
@@ -76,7 +91,7 @@ def manifest_for(groups,capacity,queries,replicas,horizon,seed,shard_groups,robo
                    event_semantics='mutually exclusive first terminal events; no claim about events after termination',
                    limitations='fixed unicycle physics; no online-adaptive visited states yet; development calibration only'))
     if scene_profile!='legacy':
-        from .multiscale_scenes import contract
+        from .scenes import contract
         result['scene_distribution']=contract()
     if visibility_batch_nodes is not None:result['visibility_batch_nodes']=visibility_batch_nodes
     if visitation is not None:
@@ -104,15 +119,13 @@ def manifest_for(groups,capacity,queries,replicas,horizon,seed,shard_groups,robo
         raise ValueError('Observer targets require physical continuation, not a restarted prior')
     if route_capacity!=32:result['route_capacity']=route_capacity
     if reuse_dataset is not None:
-        from .route_recovery import origin_for
+        from .guidance import origin_for
         result['recovery_origin']=origin_for(reuse_dataset,result)
     return result
-
 
 def behavior_gains(upper):
     base=[.5,1.,1.5,2.,3.]
     return np.unique(np.r_[base,[4.,upper/2,.75*upper,upper]]).astype(np.float32) if upper>4. else np.array(base,np.float32)
-
 
 def query_gains(seed,rng,previous,queries,upper):
     sobol=qmc.Sobol(2,scramble=True,seed=seed).random_base2(int(np.log2(queries)))
@@ -123,7 +136,6 @@ def query_gains(seed,rng,previous,queries,upper):
     if upper>4.:
         query[7:12]=[[4.,4.],[upper/2,upper/2],[.75*upper,.75*upper],[4.,upper],[upper,4.]]
     return query
-
 
 def audit(directory):
     root=Path(directory);manifest=json.loads((root/'manifest.json').read_text())
@@ -153,7 +165,6 @@ def audit(directory):
     return dict(schema=manifest['schema'],contract_valid=all(checks),partitions=parts,unique_groups=len(seen),
                 production_eligible=False,group_bootstrap_contract='one observation per independent parent group')
 
-
 def collection_kernels(manifest):
     """Shared collection kernels for execution and complete-stage timing.
 
@@ -174,8 +185,8 @@ def collection_kernels(manifest):
     teacher=pool=extract=None
     visit=jax.jit(jax.vmap(lambda x,g,o,m,a,p,r:rollout_route(x,g,o,m,a,p,r,config=robot,steps=behavior_horizon)))
     if visitation is not None:
-        from .adaptive import DevelopmentPolicy,NonlearnedPolicy,PolicyConfig
-        from .adaptive_experiment import candidate_pool
+        from .adaptive import DevelopmentPolicy, NonlearnedPolicy, PolicyConfig
+        from .adaptive import candidate_pool
         from .closed_loop import make_closed_loop
         teacher=(NonlearnedPolicy(PolicyConfig(**visitation['policy']),robot)
                  if visitation['mode']=='fixed_behavior' else
@@ -201,7 +212,6 @@ def collection_kernels(manifest):
         return result,truth,jax.tree.map(lambda a:a[audit_parent,audit_branch],trace)
     return visit,encode,simulate,extract,teacher,pool
 
-
 def collect(output,groups=1024,capacity=16,queries=16,replicas=4,horizon_steps=80,seed=4139,shard_groups=32,
             guidance_horizon=0.,guidance_min_speed=0.,worker_id=0,workers=1,
             guidance_kernel='scan',guidance_goal_braking=False,gain_upper=4.,visitation_bundle=None,visitation_calibration=None,sensor_margin_scale=0.,margin_guidance=False,shared_clearance_budget=False,physical_continuation=False,motion_observer_window=0,visitation_experiment=None,filter_obstacle_position=False,scene_profile='legacy',visibility_batch_nodes=None,route_capacity=32,reuse_dataset=None,guidance_wide_turns=False,visitation_steps=400,route_workers=1,guidance_detour=False,guidance_turn_return=False,stationary_obstacles=False,visitation_fixed_gain=None):
@@ -212,7 +222,7 @@ def collect(output,groups=1024,capacity=16,queries=16,replicas=4,horizon_steps=8
                          guidance_kernel=guidance_kernel,guidance_goal_braking=guidance_goal_braking,
                          guidance_wide_turns=guidance_wide_turns,guidance_detour=guidance_detour,guidance_turn_return=guidance_turn_return,
                          stationary_obstacles=stationary_obstacles)
-    from .onpolicy_visitation import acquisition_contract,select_visited_contexts
+    from .route_dataset import acquisition_contract, select_visited_contexts
     if visitation_fixed_gain is not None and not physical_continuation:
         raise ValueError('Fixed acquisition requires actual physical continuation')
     visitation=acquisition_contract(visitation_bundle,visitation_calibration,experiment=visitation_experiment,
@@ -240,7 +250,7 @@ def collect(output,groups=1024,capacity=16,queries=16,replicas=4,horizon_steps=8
         audit_parent=int(audit_rng.integers(shard_groups));audit_branch=int(audit_rng.integers(queries*replicas))
         scene_function=diverse_scene
         if scene_profile=='multiscale_v1':
-            from .multiscale_scenes import scene as scene_function
+            from .scenes import multiscale_scenes_scene as scene_function
         scenes=[scene_function(e['seed'],e['family'],capacity) for e in entries]
         if robot.stationary_obstacles:scenes=list(map(stationary_scene,scenes))
         planning_start=time.perf_counter()
@@ -355,7 +365,6 @@ def collect(output,groups=1024,capacity=16,queries=16,replicas=4,horizon_steps=8
         return
     finalize(root,time.perf_counter()-start,signatures)
 
-
 def finalize(root,elapsed,signatures):
     root=Path(root);path=root/'manifest.json';manifest=json.loads(path.read_text())
     expected=len(manifest['groups'])//manifest['shard_groups']
@@ -371,6 +380,121 @@ def finalize(root,elapsed,signatures):
                manifest_sha256=sha256(path),jit_signatures=signatures))
     print(json.dumps(report),flush=True)
     if not report['contract_valid']:raise ValueError('Route dataset contract audit failed')
+
+
+
+def wide_pairs(upper):
+    return np.asarray([(upper,upper),(upper/2,upper/2),(.75*upper,.75*upper),
+        (upper/2,upper/4),(upper,upper/2),(upper,upper/4),(upper/4,upper/2),(upper/2,upper)],np.float32)
+
+
+from .adaptive import PolicyConfig
+
+
+def acquisition_contract(bundle, calibration, *, experiment=None, visitation_steps=400,
+                         fixed_gain=None, robot=None, gain_upper=4., controller=None):
+    """Resolve learned acquisition or an explicitly declared fixed behavior.
+
+    A fixed controller provides causal noisy histories for a fresh dataset without
+    pretending old moving-obstacle weights were calibrated for the static plant.
+    It is collection behavior only, never a learned policy or gain-search oracle.
+    """
+    if fixed_gain is None:
+        return visitation_contract(bundle, calibration, experiment=experiment,
+                                   visitation_steps=visitation_steps)
+    if bundle is not None or calibration is not None or experiment is not None:
+        raise ValueError('Fixed acquisition cannot also use learned acquisition assets')
+    if robot is None or not isinstance(visitation_steps, int) or isinstance(visitation_steps, bool) or visitation_steps < 2:
+        raise ValueError('Fixed acquisition requires robot and at least two observations')
+    gain = np.asarray(fixed_gain, dtype=float)
+    if gain.shape != (2,) or not np.isfinite(gain).all() or np.any(gain < .3) or np.any(gain > gain_upper):
+        raise ValueError('Fixed acquisition gain must lie inside the queried gain domain')
+    config = PolicyConfig(mode='fixed', fixed_gain=tuple(gain), backup_gains=(),
+                          **(controller or {}))
+    return dict(mode='fixed_behavior', policy=json.loads(json.dumps(asdict(config))),
+                robot=asdict(robot), pool=[gain.tolist()], queries=1,
+                gain_domain=dict(lower=.3, upper=float(gain_upper)),
+                behavior_horizon=visitation_steps, noise_seed_offset=12819,
+                visitation_seed_offset=25903,
+                acquisition='50% initial; 50% uniformly selected available pre-action observations under a declared fixed gain; one observation per independent parent; no outcome rejection sampling',
+                noise='Actual latent acquisition state, bounded raw readings and causal observer memory are copied; replicas vary future sensor innovations only.',
+                interpretation='Fixed collection behavior, no neural weights or calibration, no online gain search; all candidate labels use actual simulator continuations.')
+
+def visitation_contract(bundle,calibration,queries=16,experiment=None,visitation_steps=400):
+    if isinstance(visitation_steps,bool) or not isinstance(visitation_steps,int) or visitation_steps<1:
+        raise ValueError('Visitation steps must be a positive integer')
+    if not bundle and not calibration and experiment is None:
+        if visitation_steps!=400:raise ValueError('Custom visitation steps require a frozen acquisition policy')
+        return None
+    if not bundle or not calibration:raise ValueError('Both visitation bundle and calibration are required')
+    bundle=Path(bundle).resolve();calibration=Path(calibration).resolve()
+    model=json.loads((bundle/'manifest.json').read_text());cal=json.loads(calibration.read_text())
+    if model['weights_sha256']!=cal['weights_sha256']:raise ValueError('Visitation calibration does not match the model')
+    domain=model.get('gain_domain',dict(lower=.3,upper=4.))
+    gains=tuple((g,g) for g in (1.,2.,3.,4.,8.,12.,16.) if domain['lower']<=g<=domain['upper'])
+    config=PolicyConfig(mode='learned',fixed_gain=(4.,4.),backup_gains=gains,reactive_reselection=True,
+        sensor_margin_scale=model.get('controller',{}).get('sensor_margin_scale',0.),
+        margin_guidance=model.get('controller',{}).get('margin_guidance',False),
+        shared_clearance_budget=model.get('controller',{}).get('shared_clearance_budget',False),
+        motion_observer_window=model.get('controller',{}).get('motion_observer_window',0),
+        filter_obstacle_position=model.get('controller',{}).get('filter_obstacle_position',False))
+    result=dict(mode='frozen_oa_cbf',bundle=str(bundle),calibration=str(calibration),queries=queries,
+        weights_sha256=model['weights_sha256'],calibration_sha256=sha256(calibration),gain_domain=domain,
+        policy=json.loads(json.dumps(asdict(config))),behavior_horizon=visitation_steps,
+        acquisition='50% initial; 50% uniformly selected available visited observations; one observation per independent parent; no outcome rejection sampling',
+        noise='Known group noise bounds also used during visitation; independent key from the branch replicas. Branches restart the documented conditional physical prior at the sensed observation.',
+        noise_seed_offset=12819,visitation_seed_offset=25903)
+    if experiment is not None:
+        path=Path(experiment).resolve()/'manifest.json'
+        saved=json.loads(path.read_text())
+        if saved.get('stage')!='development_adaptive_closed_loop' or saved['policy']['mode']!='learned':
+            raise ValueError('Visitation requires a recorded learned closed-loop experiment')
+        if saved['weights_sha256']!=model['weights_sha256'] or saved['calibration_sha256']!=sha256(calibration):
+            raise ValueError('Visitation experiment/model/calibration mismatch')
+        from .config import UnicycleConfig
+        recorded_robot=UnicycleConfig(**saved['robot'])
+        if recorded_robot!=UnicycleConfig(**cal['robot']):
+            raise ValueError('Visitation experiment/calibration robot mismatch')
+        config=PolicyConfig(**saved['policy'])
+        from .guidance import require_matching_controller
+        require_matching_controller(model,cal,config.sensor_margin_scale,config.margin_guidance,
+                                    config.shared_clearance_budget,config.motion_observer_window,config.filter_obstacle_position)
+        if cal.get('gain_domain',dict(lower=.3,upper=4.))!=domain:
+            raise ValueError('Visitation model/calibration gain-domain mismatch')
+        pool=np.asarray(saved['pool'],np.float32)
+        if pool.shape!=(saved['queries'],2) or saved['queries']+1<config.shortlist:
+            raise ValueError('Invalid recorded visitation candidate shape or shortlist')
+        for values in (pool,np.asarray([config.fixed_gain,*config.backup_gains])):
+            if not np.isfinite(values).all() or np.any(values<domain['lower']) or np.any(values>domain['upper']):
+                raise ValueError('Recorded visitation gains exceed the calibrated domain')
+        result.update(policy=json.loads(json.dumps(asdict(config))),queries=saved['queries'],
+            pool=pool.tolist(),robot=asdict(recorded_robot),candidate_design=saved.get('candidate_design','legacy'),
+            source_experiment=str(path.parent),source_experiment_manifest_sha256=sha256(path),
+            source_experiment_fingerprint=saved.get('source_fingerprint'),
+            noise='Known group noise bounds used during visitation; independent acquisition key from branch replicas. Dataset schema records whether branches preserve acquired physical states or restart the conditional prior.',
+            policy_capture=f'Exact saved decision settings and candidate values; acquisition still uses its declared{visitation_steps}-step budget and fresh scenes/noise. Package source fingerprint records the executing implementation.')
+    return result
+
+def select_visited_contexts(trace,counts,rngs,initial_gain):
+    """Use pre-action observation at t and ONLY committed context from t-1.
+
+    The final available observation may be at a terminal decision. It is kept
+    without pretending its censored physical future is known. Branch targets
+    are subsequently obtained from fresh real simulations of every query.
+    """
+    limit=trace['observed_state'].shape[1]-1
+    snapshot=np.array([rng.integers(1,min(int(n),limit)+1) if min(int(n),limit)>0 and rng.random()<.5 else 0
+                       for rng,n in zip(rngs,counts)],np.int32)
+    indices=np.arange(len(snapshot))
+    observed_x=trace['observed_state'][indices,snapshot].copy()
+    observed_obs=trace['observed_obstacles'][indices,snapshot].copy()
+    gain=np.broadcast_to(np.asarray(initial_gain,np.float32),(len(snapshot),2)).copy()
+    control=np.zeros_like(gain);cursor=np.zeros(len(snapshot),np.float32)
+    for i,t in enumerate(snapshot):
+        if t:
+            if not trace['active'][i,t-1]:raise ValueError('Selected context has no applied predecessor')
+            gain[i]=trace['gains'][i,t-1];control[i]=trace['control'][i,t-1];cursor[i]=trace['route_progress'][i,t-1]
+    return observed_x,observed_obs,gain,control,cursor,snapshot
 
 
 if __name__=='__main__':

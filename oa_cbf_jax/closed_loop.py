@@ -1,25 +1,30 @@
-"""Common noisy physical environment for learned and nonlearned controllers.
-
-The controller receives only sensed values. All methods share the same physical
-prior, noise innovations, integration, route and limits. This initial evaluator
-is synchronous; full control computation delay is a separate required gate.
-"""
+"""Shared closed loop implementation."""
 
 import jax
+
 import jax.numpy as jnp
-from .adaptive import Decision,REJECTED
-from .dynamics import integrate_unicycle,signed_clearance,swept_disk_clearance
-from .predictive import PREDICTIVE_REJECTED
-from .route_control import route_control,INADMISSIBLE
+
+from .adaptive import Decision, REJECTED
+
+from .dynamics import integrate_unicycle, signed_clearance, swept_disk_clearance
+
+from .adaptive import PREDICTIVE_REJECTED
+
+from .route_control import route_control, INADMISSIBLE
+
 from .routing import physical_route_coordinate
-from .simulation import Summary,RUNNING,GOAL,COLLISION,INFEASIBLE,TIMEOUT
-from .stochastic import conditioned_sensor_model,STATE_BOUND_VIOLATION
-from .sensor_margin import clearance_inflation
-from .motion_observer import initialize as initialize_observer,update as update_observer,effective_noise
-from .position_observer import initialize as position_initialize,update as position_update
+
+from .simulation import Summary, RUNNING, GOAL, COLLISION, INFEASIBLE, TIMEOUT
+
+from .stochastic import conditioned_sensor_model, STATE_BOUND_VIOLATION
+
+from .guidance import clearance_inflation
+
+from .motion_observer import initialize as initialize_observer, update as update_observer, effective_noise
+
+from .motion_observer import position_observer_initialize as position_initialize, position_observer_update as position_update
 
 PLANNER_FAILURE=7
-
 
 def make_closed_loop(policy,steps=800,batch_axis=None,ordered_waypoints=False,return_stepper=False):
     """Run one continuous physical episode, optionally through ordered goals.

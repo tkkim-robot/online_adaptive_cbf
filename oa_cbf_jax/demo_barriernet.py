@@ -1,25 +1,28 @@
-"""Native BarrierNet navigation on the shared bicycle and Quad3D plants.
+"""Shared demo barriernet implementation."""
 
-These controllers retain each baseline's original proxy constraints, default
-OSQP settings and actuator clipping. The simulation checks the full plant.
-"""
 import time
 
 import jax
+
 import jax.numpy as jnp
+
 import numpy as np
 
 from .barriernet_variant_inference import load_bundle, network_problem, NativeVariantQP
+
 from .bicycle import BicycleConfig
+
 from .bicycle_rollout import NAMES, GOAL, COLLISION, INFEASIBLE, TIMEOUT, STATE_BOUND
+
 from .comparison_contracts import physical_obstacle_scope
+
 from .quad3d import Quad3DConfig
-from .quad3d_mpc_experiment import execute64, initial_physical
+
+from .quad3d_mpc import execute64, initial_physical
+
 from .quad3d_observation import unit_tape
 
 KIND = 'KinematicBicycle2D_DPCBF'
-
-
 
 class BicycleController:
     def __init__(self,bundle,config=BicycleConfig(),capacity=64):
@@ -51,14 +54,12 @@ class BicycleController:
             raise ValueError('Unexpected implicit native inference compilation')
         return result
 
-
 def bicycle_empty_result():
     return dict(control=np.zeros(2),raw_control=np.full(2,np.nan),dual=np.full(9,np.nan),
         accepted=False,status_value=0,status='not_attempted',iterations=0,seconds=0.,
         raw_residual=np.nan,applied_residual=np.nan,network_reference=np.full(2,np.nan),
         G=np.full((5,2),np.nan),h=np.full(5,np.nan),gains=np.full((5,1),np.nan),
         nominal=np.full(2,np.nan),z=np.full(25,np.nan),ctx=np.full(41,np.nan),total_seconds=0.)
-
 
 def bicycle_episode(parent, controller, kernels, steps=1600):
     if steps<1:
@@ -111,7 +112,6 @@ def bicycle_episode(parent, controller, kernels, steps=1600):
         applied_proxy_violation_ticks=int(np.sum(data['active']&(data['nn_applied_residual']>c.qp_tolerance))))
     return row,data
 
-
 class Quad3DController:
     def __init__(self,bundle,config=Quad3DConfig(),capacity=64):
         self.config=config
@@ -136,14 +136,12 @@ class Quad3DController:
         if self.fn._cache_size()!=0:raise ValueError('Unexpected native inference tracing')
         return result
 
-
 def quad3d_empty_result():
     return dict(control=np.full(4,np.nan),raw_control=np.full(4,np.nan),accepted=False,
         status='not_attempted',status_value=-1,iterations=0,raw_residual=np.nan,applied_residual=np.nan,
         dual=np.full(13,np.nan),seconds=0.,network_reference=np.full(4,np.nan),G=np.full((5,4),np.nan),
         h=np.full(5,np.nan),gains=np.full((5,2),np.nan),nominal=np.full(4,np.nan),z=np.full(25,np.nan),
         ctx=np.full(44,np.nan),total_seconds=0.)
-
 
 def quad3d_episode(parent,kernels,solver,steps,config):
     c=config;mask=np.asarray(parent['mask'],bool);original=np.asarray(parent['obstacles'],float)

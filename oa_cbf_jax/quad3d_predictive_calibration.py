@@ -1,28 +1,42 @@
 """Reserved-parent conditional prediction calibration for genuine Quad3D bundles."""
+
 import argparse
+
 from pathlib import Path
+
 import json
+
 import time
+
 import jax
+
 import jax.numpy as jnp
+
 import numpy as np
-from .quad3d_learning_contract import validate_training_dataset,validate_model,read
-from .quad3d_candidate_data import candidate_bank,REPLICAS
-from .dataset import load_dataset,sha256
+
+from .quad3d_learning_contract import validate_training_dataset, validate_model, read
+
+from .quad3d_data import candidate_bank, REPLICAS
+
+from .io import load_dataset, sha256
+
 from .inference import ResearchPredictor
+
 from .models import predict_ensemble
-from .bicycle_predictive_calibration import fit_parameters,diagnostics
-from .metrics import parent_mean
+
+from .bicycle_predictive_calibration import fit_parameters, diagnostics
+
+from .io import parent_mean
+
 from .io import write_json
 
 SCHEMA='oa_cbf_quad3d_reserved_predictive_v95'
-
 
 def calibrate(bundle,dataset,output,batch=32,runtime_qualification=None):
     root=Path(output);root.mkdir(parents=True,exist_ok=False);dataset=Path(dataset)
     m=validate_training_dataset(dataset);model=ResearchPredictor(bundle,allow_uncalibrated=True)
     if model.model.config.encoder=='nearest_fc':
-        from .nearest_fc_qualification import validate_qualification
+        from .nearest_fc import validate_qualification
         validate_qualification(runtime_qualification,bundle,dataset)
     validate_model(model.metadata,m)
     if model.model.config.compute_dtype!='float32':raise ValueError('This contract uses original trained FP32 neural inference')

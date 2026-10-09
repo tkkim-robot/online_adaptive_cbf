@@ -1,10 +1,14 @@
-"""Extract actual simulator state and causal observer memory at one visited tick."""
-import jax
-import jax.numpy as jnp
-from .motion_observer import MotionState,initialize,replay,effective_noise
-from .continuation import Snapshot
-from .position_observer import PositionState,initialize as position_initialize,replay as position_replay
+"""Shared continuation acquisition implementation."""
 
+import jax
+
+import jax.numpy as jnp
+
+from .motion_observer import MotionState, initialize, replay, effective_noise
+
+from .continuation import Snapshot
+
+from .motion_observer import PositionState, position_observer_initialize as position_initialize, position_observer_replay as position_replay
 
 def make_extractor(robot,window,filter_obstacle_position=False):
     if filter_obstacle_position and not window:raise ValueError('Position filtering requires velocity intervals')

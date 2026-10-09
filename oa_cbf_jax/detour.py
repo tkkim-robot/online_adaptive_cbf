@@ -1,14 +1,10 @@
-"""Bounded observed local detours for nominal guidance, not a safety filter.
+"""Shared detour implementation."""
 
-Route anchors remain on the current mandatory leg. Eight candidate obstacle
-disks provide geometric nodes; ALL disks check every proposed segment. Current
-centers guide reconnection; the existing moving-obstacle motion bank and actual
-CBF/predictive checks retain responsibility for dynamics and feasibility.
-"""
 import jax
-import jax.numpy as jnp
-from .routing import route_geometry
 
+import jax.numpy as jnp
+
+from .routing import route_geometry
 
 def segment_gap(starts,ends,obstacles,mask,radii):
     delta=ends-starts;relative=obstacles[:,:2]-starts[...,None,:]
@@ -16,7 +12,6 @@ def segment_gap(starts,ends,obstacles,mask,radii):
     closest=starts[...,None,:]+fraction[...,None]*delta[...,None,:]
     gap=jnp.linalg.norm(closest-obstacles[:,:2],axis=-1)-radii
     return jnp.min(jnp.where(mask,gap,jnp.inf),axis=-1)
-
 
 def local_detour(x,target,points,route_mask,cursor,obstacles,mask,config,clearance_credit=0.):
     """Return a current-center two-segment nominal target and diagnostics.
@@ -80,7 +75,6 @@ def local_detour(x,target,points,route_mask,cursor,obstacles,mask,config,clearan
     return jnp.where(changed,proposed,target),dict(changed=changed,available=available,original_gap=original_gap,
         selected_gap=jnp.where(direct,direct_gap[direct_index],jnp.minimum(first_gap[node_index],second_gap[node_index,anchor_index])),
         reconnect=jnp.where(direct,anchors[direct_index],anchors[anchor_index]),padding=padding)
-
 
 def detour_reference(x,goal,reference,target,points,route_mask,cursor,obstacles,mask,config,clearance_credit=0.):
     chosen,info=local_detour(x,target,points,route_mask,cursor,obstacles,mask,config,clearance_credit)

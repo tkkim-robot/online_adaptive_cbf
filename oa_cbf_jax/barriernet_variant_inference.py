@@ -1,23 +1,28 @@
-"""Default native bicycle/Quad3D BarrierNet deployment components.
+"""Shared barriernet variant inference implementation."""
 
-The neural features and nominal/constraint arithmetic compile together in JAX.
-The hard QP uses untouched OSQP defaults; the original inner bounds and wrapper
-post-clip are distinct. No OA guidance, observer, solver polish or rescue is used.
-"""
 import time
-import json
-from dataclasses import asdict
-from pathlib import Path
-import numpy as np
-import jax
-import jax.numpy as jnp
-from flax import serialization
-from .bicycle import BicycleConfig
-from .quad3d import Quad3DConfig
-from .barriernet_variants import (bicycle_features,quad3d_features,bicycle_nominal,
-    quad3d_nominal,bicycle_constraints,quad3d_constraints,require_x64,BarrierNetVariant)
-from .dataset import sha256
 
+import json
+
+from dataclasses import asdict
+
+from pathlib import Path
+
+import numpy as np
+
+import jax
+
+import jax.numpy as jnp
+
+from flax import serialization
+
+from .bicycle import BicycleConfig
+
+from .quad3d import Quad3DConfig
+from .barriernet_variants import bicycle_features, quad3d_features, bicycle_nominal, quad3d_nominal, bicycle_constraints, quad3d_constraints, BarrierNetVariant
+from .barriernet import require_x64
+
+from .io import sha256
 
 def native_variant_contract(robot_model,config):
     flight=robot_model=='Quad3D'
@@ -32,7 +37,6 @@ def native_variant_contract(robot_model,config):
         physical_evaluation='Full shared plant, all obstacles, actual actuator limits; native proxy residual is not a physical safety certificate',
         inference='Original observed-goal nominal and neural residual, default OSQP hard rows and original inner bounds, actual wrapper post-clip',
         training='Original single-model architecture and loss; default50epochs,64batch,Adam1e-3,patience10')
-
 
 def load_bundle(bundle,robot_model,config):
     """Reload native parameters; fail on wrong physics or modified artifacts."""
@@ -60,7 +64,6 @@ def load_bundle(bundle,robot_model,config):
         raise ValueError('Invalid native normalization')
     return m,model,params,jnp.asarray(mean),jnp.asarray(std)
 
-
 def network_problem(model,params,mean,std,robot_model,config):
     """Return one fixed-shape NN/nominal/constraint function; caller AOT compiles."""
     require_x64()
@@ -81,7 +84,6 @@ def network_problem(model,params,mean,std,robot_model,config):
         G,h=rows(ctx[:state_dim],ctx[state_dim+goal_dim:].reshape(5,7),p,config.radius)
         return u_nom,G,h,p,ref,z,ctx
     return jax.jit(problem)
-
 
 class NativeVariantQP:
     """One episode's default OSQP instance, original inner bounds then post-clip.

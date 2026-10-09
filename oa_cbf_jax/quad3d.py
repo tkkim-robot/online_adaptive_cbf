@@ -1,17 +1,14 @@
-"""Full 12-state *linearized* repository quadrotor, with exact held-input flow.
+"""Shared quad3d implementation."""
 
-x = [px,py,pz,pitch,roll,yaw,vx,vy,vz,q,p,r]; u = four motor-force
-DEVIATIONS about hover. The repository has no -g vertical drift and permits
-negative u, so zero input is hover at zero attitude/velocity. This is not a
-nonlinear rigid-body model. No wrapping, state projection or clipping occurs.
-Obstacles retain the repository's infinite vertical cylinder semantics.
-"""
 from dataclasses import dataclass, asdict
-import math
-import numpy as np
-import jax
-import jax.numpy as jnp
 
+import math
+
+import numpy as np
+
+import jax
+
+import jax.numpy as jnp
 
 @dataclass(frozen=True)
 class Quad3DConfig:
@@ -40,7 +37,6 @@ class Quad3DConfig:
         if type(self.integration_substeps) is not int or self.integration_substeps < 1:
             raise ValueError('Positive integer substep count required')
 
-
 def matrices(config=Quad3DConfig()):
     """Host constants; converting NumPy constants avoids implicit JAX FP32 casts."""
     c = config
@@ -58,12 +54,6 @@ def matrices(config=Quad3DConfig()):
                        1/c.inertia_z]) @ allocation
     return a, b
 
-
-def quad3d_flow(x, u, config=Quad3DConfig()):
-    a, b = (jnp.asarray(v, x.dtype) for v in matrices(config))
-    return a @ x + b @ u
-
-
 def held_quad3d_state(x, u, duration, config=Quad3DConfig()):
     """Exact quartic trajectory: A**4=0, but A**3 B is nonzero.
 
@@ -77,13 +67,11 @@ def held_quad3d_state(x, u, duration, config=Quad3DConfig()):
     d4 = a @ d3
     return x + duration*(d1 + duration*(d2/2 + duration*(d3/6 + duration*d4/24)))
 
-
 def integrate_quad3d(x, u, config=Quad3DConfig()):
     times = jnp.asarray(np.arange(1, config.integration_substeps+1, dtype=np.float64)
                         * config.dt/config.integration_substeps, x.dtype)
     states = jax.vmap(lambda t: held_quad3d_state(x, u, t, config))(times)
     return states[-1], states
-
 
 def cylinder_hocbf(x, obstacles, mask, gains, config=Quad3DConfig(), clearance=0.):
     """Four-stage continuous HOCBF for constant-velocity vertical cylinders.

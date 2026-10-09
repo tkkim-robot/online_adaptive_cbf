@@ -1,19 +1,16 @@
-"""JAX port of the pinned repository's unicycle BarrierNet formulation.
+"""Shared barriernet implementation."""
 
-Native five-nearest-obstacle architecture and static-center HOCBF are retained.
-No OA ranker, gain search, observer, detour, safety slack at deployment, or
-baseline tuning is introduced. Run this module in an isolated x64 JAX process.
-"""
 import jax
-import jax.numpy as jnp
-from flax import linen as nn
-from .controllers import solve_qp2
 
+import jax.numpy as jnp
+
+from flax import linen as nn
+
+from .controllers import solve_qp2
 
 def require_x64():
     if not jax.config.x64_enabled:
         raise ValueError('BarrierNet port requires JAX_ENABLE_X64=true; silent downcasting is forbidden')
-
 
 def features(state,goal,obstacles,mask,radius=.25):
     """Pinned build_z_ctx_for: nearest five by clearance, absolute dummy(100,100)."""
@@ -35,14 +32,12 @@ def features(state,goal,obstacles,mask,radius=.25):
     ctx=jnp.concatenate((state[:4],goal[:2],selected.reshape(35)))
     return z,ctx
 
-
 def nominal(state,goal,v_max=1.):
     """Original DynamicUnicycle2D.nominal_input, default gains/d_min."""
     delta=goal-state[:2];distance=jnp.maximum(jnp.linalg.norm(delta)-.05,0.)
     angle=(jnp.arctan2(delta[1],delta[0])-state[2]+jnp.pi)%(2*jnp.pi)-jnp.pi
     speed=jnp.where(jnp.abs(angle)>jnp.pi/2,0.,jnp.minimum(distance*jnp.cos(angle),v_max))
     return jnp.stack((speed-state[3],2*angle))
-
 
 class BarrierNet(nn.Module):
     @nn.compact
@@ -65,7 +60,6 @@ class BarrierNet(nn.Module):
         hidden=nn.relu(layer(hidden,64,'u_fc1'))
         return u_ref+layer(hidden,2,'u_out'),parameters
 
-
 def constraints(state,obstacles,parameters,radius=.25):
     """Exact pinned static-center unicycle HOCBF; ignores obstacle velocity."""
     delta=state[:2]-obstacles[:,:2];c=jnp.cos(state[2]);s=jnp.sin(state[2]);v=state[3]
@@ -75,7 +69,6 @@ def constraints(state,obstacles,parameters,radius=.25):
     G=-jnp.column_stack((2*along,2*v*(-delta[:,0]*s+delta[:,1]*c)))
     h=2*v*v+jnp.sum(parameters,axis=-1)*derivative+jnp.prod(parameters,axis=-1)*barrier
     return G,h
-
 
 def soft_training_qp(u_nom,G,h):
     """Solve the pinned training QP exactly by eliminating its five slacks.
@@ -99,7 +92,6 @@ def soft_training_qp(u_nom,G,h):
     costs=.5*diagonal*jnp.sum(points**2,axis=-1)-jnp.sum(points*u_nom,axis=-1)+.5*rho*jnp.sum(violation**2,axis=-1)
     return points[jnp.argmin(costs)]
 
-
 def hard_deployment_qp(u_nom,G,h,a_max=.5,w_max=.5,return_diagnostics=False):
     """Original input bounds plus default exact-JAX solve and post-clip audit."""
     A=jnp.concatenate((G,jnp.array([[1.,0.],[-1.,0.],[0.,1.],[0.,-1.]],G.dtype)))
@@ -113,7 +105,6 @@ def hard_deployment_qp(u_nom,G,h,a_max=.5,w_max=.5,return_diagnostics=False):
     if return_diagnostics:
         return clipped,valid,violation,solved.control,solved.feasible,solved.max_violation
     return clipped,valid,violation
-
 
 def train_prediction(model,params,z,ctx,u_ref,mean,std,radius=.25):
     u_nom,p=model.apply({'params':params},(z-mean)/std,ctx[:4],ctx[4:6],u_ref)

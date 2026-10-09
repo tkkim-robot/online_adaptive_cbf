@@ -1,32 +1,32 @@
-"""Shared offline gain labels at audited OA/FC observations, never a controller."""
-import argparse
+"""Shared bicycle policy labels implementation."""
+
 from collections import Counter, defaultdict
+
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import asdict
+
 from multiprocessing import get_context
+
 from pathlib import Path
-import time
-import shutil
 
 import jax
-import jax.numpy as jnp
+
 import numpy as np
 
-from .bicycle_data import FIELDS, args, trace_payload, targets, audit_one
-from .bicycle_experiment import read, control_config
-from .bicycle_features import bicycle_graph, SCHEMA as GRAPH_SCHEMA
-from .bicycle_guidance import guidance_from_controller
-from .bicycle_observed_rollout import make_observed_episode
-from .bicycle_rollout import NAMES
-from .bicycle_trace_storage import write_query_traces, open_trace, verify_index_dependencies, STORAGE_SCHEMA
-from .dataset import sha256, source_fingerprint
+from .bicycle_control import read, control_config
+
+from .bicycle_trace_storage import open_trace, verify_index_dependencies
+
+from .io import sha256
+
 from .io import write_json
 
 SCHEMA = 'bicycle_shared_learned_visitation_labels_v1'
-BANK = np.geomspace(.5, 8, 8).astype(np.float32)
-HORIZON = 40
-REPLICAS = 2
 
+BANK = np.geomspace(.5, 8, 8).astype(np.float32)
+
+HORIZON = 40
+
+REPLICAS = 2
 
 def select_queries(queries):
     """First, middle, last *available* grid query, without outcome filtering."""
@@ -52,7 +52,6 @@ def select_queries(queries):
         raise ValueError('Both encoders must contribute every same physical parent')
     return selected
 
-
 def dense_queries(trace_map, stride=10):
     """Uniform recorded observations plus actual last query, including failures."""
     if type(stride) is not int or stride < 1:
@@ -77,7 +76,6 @@ def dense_queries(trace_map, stride=10):
     select_queries(selected)
     return selected
 
-
 def validate_visitation(directory, review, selection='sparse3'):
     root = Path(directory).resolve(); report = read(root/'report.json'); proof = read(review)
     if (proof.get('source_selection_roles_physical_models_and_query_bindings_verified') is not True
@@ -85,7 +83,7 @@ def validate_visitation(directory, review, selection='sparse3'):
             or report['query_index_sha256'] != sha256(root/'query_index.json')
             or report['training_performed'] or report['benchmark_parents_used']):
         raise ValueError('Independently reviewed, unmodified reserved visitation required')
-    from .bicycle_acquisition_contracts import validate_source
+    from .bicycle_data import validate_source
     parents = None; config = None; controller = None; bound = {}
     for file in (Path(review), root/'report.json', root/'query_index.json'):
         bound[str(file.resolve())] = sha256(file)
@@ -129,20 +127,6 @@ def validate_visitation(directory, review, selection='sparse3'):
     return dict(queries=selected, parents={p['group_id']: p for p in parents}, config=config,
                 controller=controller, bound_inputs=bound)
 
-
-def query_state(acquisition, query, config):
-    """Latent values only initialize simulation; exact observations feed graph/QP."""
-    tick = query['tick']; a = acquisition
-    if not 0 <= tick < len(a['active']): raise ValueError('No fabricated post-stop query')
-    if bool(a['active'][tick]) != query['acquisition_active'] or float(a['previous_gain'][tick]) != query['previous_gain']:
-        raise ValueError('Changed actual acquired query')
-    row = {k: np.array(a[k], copy=True) for k in FIELDS}
-    row.update(initial=np.array(a['state_before'][tick], copy=True), first_x=np.array(a['observed_state'][tick], copy=True),
-               first_o=np.array(a['observed_obstacles'][tick], copy=True), cursor=np.array(a['cursor_before'][tick], copy=True))
-    row['obstacles'][:, :2] += tick*config.robot.dt*row['obstacles'][:, 3:5]
-    return row, np.array(a['previous_control'][tick], copy=True), np.float32(a['previous_gain'][tick])
-
-
 def worker_queries(contract, shard, shards, limit):
     if shards < 1 or not 0 <= shard < shards or limit < 0: raise ValueError('Invalid shard/limit')
     # Both policy histories of the same parent stay in one worker; no dropped parents.
@@ -151,83 +135,9 @@ def worker_queries(contract, shard, shards, limit):
     rows = [q for q in contract['queries'] if q['group_id'] in selected]
     return rows[:limit] if limit else rows
 
-
-def collect(visitation, review, output, shard=0, shards=4, limit=0, min_free_gib=150.35, selection='sparse3'):
-    contract = validate_visitation(visitation, review, selection)
-    queries = worker_queries(contract, shard, shards, limit)
-    if not queries: raise ValueError('Empty worker')
-    root = Path(output); root.mkdir(parents=True, exist_ok=False)
-    c = control_config(contract['config']); guidance = guidance_from_controller(contract['controller'])
-    manifest = dict(schema=SCHEMA, visitation=str(Path(visitation).resolve()), review=str(Path(review).resolve()),
-        bound_inputs=contract['bound_inputs'], source_fingerprint=source_fingerprint(),
-        config=contract['config'], controller=contract['controller'], graph_schema=GRAPH_SCHEMA,
-        horizon_steps=HORIZON, replicas=REPLICAS, trace_storage=STORAGE_SCHEMA, shard=shard, shards=shards,
-        limit=limit, query_selection=selection, training_use=False, weight_fit_authorized=False, final_test=False,
-        scope='Offline label pilot only; independent physical/graph/lineage review before any shared fit.',
-        selection=('First/middle/last available40tick-grid query.' if selection=='sparse3' else 'Every10ticks plus actual last query from every trajectory; no outcome selection.'),
-        conditioning='Exact acquired first observation retained. Later innovations paired across all gains; latent state and biases only initialize simulator.',
-        parent_weighting='A physical parent remains ONE statistical group across both policy histories and times.',
-        production_eligible=False)
-    write_json(root/'manifest.json', manifest); write_json(root/'selected_queries.json', queries)
-    branch_fn = jax.jit(jax.vmap(make_observed_episode(c, HORIZON, guidance)))
-    graph_fn = jax.jit(bicycle_graph); branch_exec = graph_exec = None
-    canonical = np.repeat(BANK, REPLICAS); entries = []; traces = []
-    start = time.monotonic(); compile_seconds = 0.; previous_path = None
-    for number, q in enumerate(queries):
-        if shutil.disk_usage(root).free/2**30 < min_free_gib: raise ValueError('Disk safety buffer reached')
-        if previous_path != q['trace']:
-            if sha256(q['trace']) != q['trace_sha256']: raise ValueError('Changed acquired trajectory')
-            with np.load(q['trace']) as z:
-                keys = set(FIELDS) | {'active', 'state_before', 'observed_state', 'observed_obstacles', 'cursor_before', 'previous_control', 'previous_gain'}
-                acquisition = {k: z[k] for k in keys}
-            previous_path = q['trace']
-        row, previous, previous_gain = query_state(acquisition, q, c)
-        parent = contract['parents'][q['group_id']]
-        graph_args = tuple(jnp.asarray(v) for v in (row['first_x'], row['goal'], row['first_o'], row['mask'], row['points'], row['route_mask'], row['cursor'], previous, previous_gain, row['noise']))
-        if graph_exec is None:
-            begin = time.monotonic(); graph_exec = graph_fn.lower(*graph_args).compile(); compile_seconds += time.monotonic()-begin
-        features, node_mask = jax.device_get(graph_exec(*graph_args))
-        keys = np.array(jax.random.split(jax.random.fold_in(jax.random.PRNGKey(parent['seed']+3), q['tick']), REPLICAS))
-        branches = [dict(row, alpha=g, key=keys[i % REPLICAS]) for i, g in enumerate(canonical)]
-        payloads = []; sums = []
-        for offset in (0, 8):
-            batch_rows = [args(r) for r in branches[offset:offset+8]]
-            batch = tuple(jnp.stack([r[k] for r in batch_rows]) for k in range(len(FIELDS)))
-            if branch_exec is None:
-                begin = time.monotonic(); branch_exec = branch_fn.lower(*batch).compile(); compile_seconds += time.monotonic()-begin
-                print(dict(stage='explicit_compilation_complete', seconds=compile_seconds, device=str(jax.devices()[0])), flush=True)
-            summaries, histories = jax.device_get(branch_exec(*batch))
-            for i in range(8):
-                ss = {k: v[i] for k, v in summaries.items()}; hh = {k: v[i] for k, v in histories.items()}
-                sums.append(ss); payloads.append(trace_payload(branches[offset+i], ss, hh, HORIZON))
-        names = [f'branch_{number:04d}_c{i:02d}.npz' for i in range(16)]
-        records = write_query_traces(root, names, payloads, REPLICAS, f'query_{number:04d}')
-        branch_entries = [dict(record, kind='label', group_id=q['group_id'], encoder=q['encoder'], query_tick=q['tick'],
-            candidate=i, steps=int(sums[i]['steps']), status=NAMES[int(sums[i]['status'])], acquisition_file=q['trace'],
-            acquisition_sha256=q['trace_sha256']) for i, record in enumerate(records)]
-        traces.extend(branch_entries)
-        sums = {k: np.asarray([s[k] for s in sums]) for k in sums[0]}
-        payload = dict(features=features[None], node_mask=node_mask[None], gains=canonical[None, :, None],
-            group_id=np.array([q['group_id']]), partition=np.array([q['partition']]), query_tick=np.array([q['tick']]),
-            acquisition_encoder=np.array([q['encoder']]), calibration_role=np.array([parent['calibration_role']]),
-            initial_state=row['initial'][None], goal=row['goal'][None], obstacles=row['obstacles'][None], obstacle_mask=row['mask'][None],
-            points=row['points'][None], route_mask=row['route_mask'][None], observed_state=row['first_x'][None], observed_obstacles=row['first_o'][None],
-            cursor=np.array([row['cursor']]), previous_control=previous[None], previous_gain=np.array([previous_gain]), noise=row['noise'][None],
-            **{k: v[None] for k, v in sums.items()}, **{k: v[None] for k, v in targets(sums, HORIZON, c).items()})
-        file = f'shard_{number:04d}.npz'; np.savez_compressed(root/file, **payload)
-        entries.append(dict(file=file, sha256=sha256(root/file), groups=1, branches=16, observed_steps=int(sums['steps'].sum()),
-                            query=q, group_id=q['group_id'], query_tick=q['tick'], acquisition_encoder=q['encoder'], traces=branch_entries))
-        write_json(root/'index.json', entries); write_json(root/'trace_index.json', traces)
-        if (number+1) % 12 == 0 or number+1 == len(queries):
-            print(dict(stage='label_collection', completed_queries=number+1, total_queries=len(queries),
-                       physical_steps=sum(e['observed_steps'] for e in entries), elapsed_seconds=time.monotonic()-start), flush=True)
-    if branch_fn._cache_size() or graph_fn._cache_size(): raise ValueError('Unexpected implicit runtime JIT')
-    write_json(root/'summary.json', dict(complete=True, compiled_signatures=2, implicit_jit_cache_entries=0,
-        compile_seconds=compile_seconds, execution_seconds=time.monotonic()-start, queries=len(entries), branches=16*len(entries),
-        parents=len({q['group_id'] for q in queries}), physical_steps=sum(e['observed_steps'] for e in entries)))
-
-
 def audit(directory, workers=12):
+    from .bicycle_data import audit_one
+    from .bicycle_data import targets
     from .bicycle_observed_audit import check_graph, check_route_progress
     root = Path(directory); m = read(root/'manifest.json')
     if m['schema'] != SCHEMA or m['horizon_steps'] != HORIZON or m['replicas'] != REPLICAS:
@@ -307,14 +217,3 @@ def audit(directory, workers=12):
         route_progress_rounding_checks=int(rounding), rows=results)
     write_json(root/'independent_replay.json', result)
     print({k: v for k, v in result.items() if k != 'rows'}, flush=True)
-
-
-if __name__ == '__main__':
-    p = argparse.ArgumentParser(); sub = p.add_subparsers(dest='command', required=True)
-    q = sub.add_parser('collect')
-    for k in ('visitation', 'review', 'output'): q.add_argument('--'+k, required=True)
-    for k, v in (('shard', 0), ('shards', 4), ('limit', 0)): q.add_argument('--'+k, type=int, default=v)
-    q.add_argument('--min-free-gib', type=float, default=150.35)
-    q.add_argument('--selection', choices=['sparse3','dense10'], default='sparse3')
-    q = sub.add_parser('audit'); q.add_argument('--directory', required=True); q.add_argument('--workers', type=int, default=12)
-    opts = vars(p.parse_args()); command = opts.pop('command'); dict(collect=collect, audit=audit)[command](**opts)

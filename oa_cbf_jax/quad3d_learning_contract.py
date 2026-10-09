@@ -1,26 +1,37 @@
-"""Quad3D-only training/inference lineage, split and censoring contracts."""
+"""Shared quad3d learning contract implementation."""
+
 from pathlib import Path
+
 import json
+
 import numpy as np
-from .dataset import sha256
-from .quad3d_candidate_data import SCHEMA,REPLICAS,HORIZON,QUERY_TICKS,TARGETS,EVENTS,OBSERVER_SCHEMA,OBSERVER_QUERY_TICKS,WIDE_SCHEMA,WIDE_QUERY_TICKS,candidate_bank,candidate_domain
-from .quad3d_features import SCHEMA as GRAPH_SCHEMA,FEATURES,OBSERVER_SCHEMA as OBSERVER_GRAPH,OBSERVER_FEATURES,BIAS_INDICES,BIAS_SCALE
+
+from .io import sha256
+
+from .quad3d_features import SCHEMA as GRAPH_SCHEMA, FEATURES, OBSERVER_SCHEMA as OBSERVER_GRAPH, OBSERVER_FEATURES, BIAS_INDICES, BIAS_SCALE
+
 from .quad3d_observation import SCHEMA as SENSOR_SCHEMA
 
 CONTRACT_FIELDS=('config','sensor_schema','graph_schema','horizon_steps','capacity','snapshot_ticks','replicas','gain_bank','branch_contract','censoring')
 
-
 def read(path):return json.loads(Path(path).read_text())
 
-
 def registered(schema):
+    from .quad3d_data import OBSERVER_QUERY_TICKS
+    from .quad3d_data import OBSERVER_SCHEMA
+    from .quad3d_data import QUERY_TICKS
+    from .quad3d_data import SCHEMA
+    from .quad3d_data import WIDE_QUERY_TICKS
+    from .quad3d_data import WIDE_SCHEMA
     if schema==SCHEMA:return GRAPH_SCHEMA,FEATURES,QUERY_TICKS,'none'
     if schema==OBSERVER_SCHEMA:return OBSERVER_GRAPH,OBSERVER_FEATURES,OBSERVER_QUERY_TICKS,'innovation_ema_v97'
     if schema==WIDE_SCHEMA:return OBSERVER_GRAPH,OBSERVER_FEATURES,WIDE_QUERY_TICKS,'innovation_ema_v97'
     raise ValueError('Unregistered Quad3D dataset schema')
 
-
 def validate_arrays(d,manifest):
+    from .quad3d_data import HORIZON
+    from .quad3d_data import REPLICAS
+    from .quad3d_data import candidate_bank
     graph,features,ticks,observer=registered(manifest['schema'])
     bank=candidate_bank(manifest['schema']);n=len(d['group_id']);capacity=manifest['capacity'];branches=len(bank)*REPLICAS
     shapes=dict(features=(n,capacity+2,features),node_mask=(n,capacity+2),gains=(n,branches,4),
@@ -49,8 +60,16 @@ def validate_arrays(d,manifest):
     if not np.array_equal(d['target'][...,0],expected):raise ValueError('Risk target disagrees with audited clearance')
     if np.any(d['steps']<0) or np.any(d['recorded_physical_steps']>HORIZON) or np.any(d['steps']>d['recorded_physical_steps']):raise ValueError('Invalid physical prefix lengths')
 
-
 def validate_training_dataset(directory):
+    from .quad3d_data import EVENTS
+    from .quad3d_data import HORIZON
+    from .quad3d_data import OBSERVER_SCHEMA
+    from .quad3d_data import REPLICAS
+    from .quad3d_data import SCHEMA
+    from .quad3d_data import TARGETS
+    from .quad3d_data import WIDE_SCHEMA
+    from .quad3d_data import candidate_bank
+    from .quad3d_data import candidate_domain
     root=Path(directory);m=read(root/'manifest.json');audit=read(root/'independent_replay.json')
     if (root/'INVALIDATED.json').exists():raise ValueError('Invalidated Quad3D dataset')
     if m.get('weight_fit_authorized') is not True or m.get('schema') not in (SCHEMA,OBSERVER_SCHEMA,WIDE_SCHEMA):raise ValueError('Authorized Quad3D learning data required')
@@ -84,8 +103,12 @@ def validate_training_dataset(directory):
     if seen!=set(reservation) or branches!=audit['branches'] or steps!=audit['physical_steps']:raise ValueError('Missing physical parents or labels')
     return m
 
-
 def validate_model(metadata,manifest=None):
+    from .quad3d_data import HORIZON
+    from .quad3d_data import REPLICAS
+    from .quad3d_data import WIDE_SCHEMA
+    from .quad3d_data import candidate_bank
+    from .quad3d_data import candidate_domain
     graph,features,ticks,observer=registered(metadata.get('dataset_schema'))
     if metadata.get('gain_dimension')!=4 or metadata.get('graph_features')!=features:raise ValueError('Full-state four-gain Quad3D model required')
     arch=metadata['architecture'];contract=metadata.get('quad3d_contract',{})

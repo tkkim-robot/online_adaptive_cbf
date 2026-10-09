@@ -1,14 +1,16 @@
-"""Independent NumPy audit of every applied local adaptive-control step."""
+"""Shared local unicycle audit implementation."""
+
 import numpy as np
-from .local_unicycle_collection import ROBOT,K
 
 def audit_trajectory(initial,world,goal,errors,result,trace,filtered_observation=False,observer_memory=None):
     """NumPy geometry and independent exact-held-input quadrature at every tick."""
+    from .unicycle_data import K
+    from .unicycle_data import ROBOT
     x=np.asarray(trace['before'],float);y=np.asarray(trace['state'],float);u=np.asarray(trace['control'],float)
     active=np.asarray(trace['active'],bool);o=np.asarray(world,float);obs=x.copy();obs[:,:2]+=errors[:,0]
     observer_audit={}
     if filtered_observation:
-        from .local_unicycle_observer import audit_observations
+        from .unicycle_policy import audit_observations
         observer_audit=audit_observations(world,errors,trace,observer_memory)
     else:
         np.testing.assert_allclose(obs,trace['observed'],atol=2e-6,rtol=0)

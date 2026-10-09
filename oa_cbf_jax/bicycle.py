@@ -1,16 +1,14 @@
-"""Physical core for the repository's affine-slip kinematic bicycle.
+"""Shared bicycle implementation."""
 
-State [x,y,heading,speed], input [acceleration,slip_angle]. This is the
-linearized-slip flow in safe_control/robots/kinematic_bicycle2D.py, not the
-nonlinear steering bicycle. No state clipping or angle wrapping. Controllers,
-labels and calibrated bicycle models are not provided by this numerical core.
-"""
 from dataclasses import dataclass
-import math
-import numpy as np
-import jax
-import jax.numpy as jnp
 
+import math
+
+import numpy as np
+
+import jax
+
+import jax.numpy as jnp
 
 @dataclass(frozen=True)
 class BicycleConfig:
@@ -36,20 +34,8 @@ class BicycleConfig:
     def slip_max(self):
         return math.atan(self.rear_axle_distance/self.wheel_base*math.tan(self.steering_max))
 
-
 def steering_to_slip(steering, config=BicycleConfig()):
     return jnp.arctan(config.rear_axle_distance/config.wheel_base*jnp.tan(steering))
-
-
-def slip_to_steering(slip, config=BicycleConfig()):
-    return jnp.arctan(config.wheel_base/config.rear_axle_distance*jnp.tan(slip))
-
-
-def bicycle_flow(state, control, config=BicycleConfig()):
-    heading,speed=state[2],state[3];acceleration,slip=control
-    return jnp.stack((speed*(jnp.cos(heading)-slip*jnp.sin(heading)),
-        speed*(jnp.sin(heading)+slip*jnp.cos(heading)),speed*slip/config.rear_axle_distance,acceleration))
-
 
 def held_bicycle_state(state, control, duration, config=BicycleConfig()):
     """Exact held-input flow, including straight motion and speed reversals.
@@ -68,16 +54,10 @@ def held_bicycle_state(state, control, duration, config=BicycleConfig()):
     offset=length*jnp.stack((jnp.cos(mid)-slip*jnp.sin(mid),jnp.sin(mid)+slip*jnp.cos(mid)))
     return jnp.concatenate((state[:2]+offset,jnp.stack((state[2]+angle,state[3]+acceleration*duration))))
 
-
 def integrate_bicycle(state, control, config=BicycleConfig()):
     times=jnp.arange(1,config.integration_substeps+1,dtype=state.dtype)*jnp.asarray(np.asarray(config.dt/config.integration_substeps,np.float64),state.dtype)
     substeps=jax.vmap(lambda t:held_bicycle_state(state,control,t,config))(times)
     return substeps[-1],substeps
 
-
 def bicycle_state_violation(state, config=BicycleConfig()):
     return jnp.maximum(config.speed_min-state[3],state[3]-config.speed_max)
-
-
-def bicycle_input_violation(control, config=BicycleConfig()):
-    return jnp.maximum(jnp.abs(control[0])-config.acceleration_max,jnp.abs(control[1])-config.slip_max)

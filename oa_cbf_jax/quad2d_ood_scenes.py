@@ -1,12 +1,9 @@
-"""Prespecified V57 forward OOD topology/motion families; no outcome filtering."""
-
+"""Shared quad2d ood scenes implementation."""
 
 import numpy as np
 
-
 FAMILIES=('alternating_gates','zigzag_channel','offset_rooms','nested_open_boxes',
           'crossing_streams','counterflow_lanes','closing_gate','large_disks')
-
 
 def geometry(seed,family):
     if family not in FAMILIES:

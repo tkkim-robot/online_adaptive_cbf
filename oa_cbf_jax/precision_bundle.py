@@ -1,18 +1,16 @@
-"""Lossless, explicitly derived numerical inference of authentic trained GATs.
+"""Shared precision bundle implementation."""
 
-The source weight bytes and full training manifest stay intact. A precision port
-is neither a new training run nor permission to reuse the source calibration.
-"""
-import argparse
 import copy
+
 import json
+
 from pathlib import Path
-from .dataset import sha256
-from .io import write_json
+
+from .io import sha256
 
 SCHEMA='oa_cbf_graph_network64_raw32_derivation_v75'
-FLIGHT_SCHEMA='oa_cbf_flight_network64_raw32_derivation_v1'
 
+FLIGHT_SCHEMA='oa_cbf_flight_network64_raw32_derivation_v1'
 
 def derivation_schema(trained):
     architecture=trained['architecture']
@@ -29,7 +27,6 @@ def derivation_schema(trained):
     if architecture['encoder'] not in ('gat','matched_fc','nearest_fc') or trained.get('graph_features')!=(39 if motion else 35) or trained.get('gain_dimension')!=1:
         raise ValueError('Only observed bicycle or static guided flight derivations are supported')
     return SCHEMA
-
 
 def validate_derivation(root,metadata):
     root=Path(root);proof=metadata.get('numerical_derivation',{})
@@ -53,36 +50,6 @@ def validate_derivation(root,metadata):
         validate_metadata(trained)
     motion=trained['architecture'].get('bicycle_motion_history',False)
     if motion:
-        from .bicycle_motion_runtime import validate_metadata
+        from .bicycle_policy import validate_metadata
         validate_metadata(trained)
     return proof
-
-
-def derive(source,output):
-    source=Path(source);root=Path(output)
-    from .inference import ResearchPredictor
-    predictor=ResearchPredictor(source,allow_uncalibrated=True)
-    trained=predictor.metadata
-    schema=derivation_schema(trained)
-    if predictor.model.config.compute_dtype!='float32' or trained.get('numerical_derivation'):
-        raise ValueError('Source must be an original FP32-trained bundle')
-    import jax
-    import numpy as np
-    if any(np.asarray(v).dtype!=np.float32 or not np.isfinite(np.asarray(v)).all() for v in jax.tree.leaves(predictor.params)):
-        raise ValueError('Expected finite genuine FP32 parameter leaves')
-    root.mkdir(parents=True,exist_ok=False)
-    (root/'weights.msgpack').write_bytes((source/'weights.msgpack').read_bytes())
-    (root/'trained_manifest.json').write_bytes((source/'manifest.json').read_bytes())
-    metadata=copy.deepcopy(trained);metadata['architecture']['compute_dtype']='float64'
-    metadata.update(numerical_derivation=dict(schema=schema,source=str(source.resolve()),source_manifest_sha256=sha256(source/'manifest.json'),
-        source_weights_sha256=sha256(source/'weights.msgpack'),new_training=False,
-        arithmetic='Observed graph geometry and weight arithmetic FP64; gain-bank/log basis FP32; raw neural outputs rounded FP32 before original calibration/selection.',
-        observed_inputs_only=True,global_jax_x64_enabled=False),production_eligible=False,calibration=None,
-        limitation='Derived numerical inference of unchanged FP32-trained weights. Requires its own prediction fit, trajectory gate and physical validation. No new training or final promotion.')
-    validate_derivation(root,metadata);write_json(root/'manifest.json',metadata)
-    print(json.dumps(dict(stage='precision_bundle_derived',bundle=str(root),weights_sha256=metadata['weights_sha256'],new_training=False)),flush=True)
-    return root
-
-
-if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--source',required=True);p.add_argument('--output',required=True);derive(**vars(p.parse_args()))

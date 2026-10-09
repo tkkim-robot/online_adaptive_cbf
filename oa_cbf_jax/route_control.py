@@ -1,24 +1,26 @@
-"""Route-aware hard CBF-QP and genuine fixed-gain branch rollouts.
-
-Initial HOCBF admissibility is an explicit controller condition, in addition to
-joint QP feasibility. The event is not labelled physical impossibility. These
-sampled checks alone do not establish an intersample safety theorem.
-"""
+"""Shared route control implementation."""
 
 from functools import partial
+
 import jax
+
 import jax.numpy as jnp
 
 from .config import UnicycleConfig
+
 from .controllers import unicycle_cbf_qp, solve_qp2
+
 from .dynamics import integrate_unicycle, signed_clearance, swept_disk_clearance
+
 from .routing import route_nominal
+
 from .guidance import preview_guidance
-from .route_preview import route_preview_reference
+
+from .guidance import route_preview_reference
+
 from .simulation import Summary, RUNNING, GOAL, COLLISION, INFEASIBLE, TIMEOUT
 
 INADMISSIBLE = 5
-
 
 def route_problem(x, goal, obstacles, mask, alpha, points, route_mask, progress, config=UnicycleConfig(), speed_uncertainty=0., clearance_uncertainty=0.,margin_guidance=False,shared_clearance_budget=False):
     """Shared nominal command, joint constraints and route update before solving."""
@@ -51,7 +53,6 @@ def route_problem(x, goal, obstacles, mask, alpha, points, route_mask, progress,
     b=b.at[-3].set(jnp.minimum(b[-3],possible_low/config.dt))
     return reference, a, b, h, psi, updated, remaining, target
 
-
 def route_control(x, goal, obstacles, mask, alpha, points, route_mask, progress, config=UnicycleConfig(), speed_uncertainty=0., clearance_uncertainty=0.,margin_guidance=False,shared_clearance_budget=False):
     reference, a, b, h, psi, updated, remaining, target = route_problem(
         x, goal, obstacles, mask, alpha, points, route_mask, progress, config, speed_uncertainty, clearance_uncertainty,margin_guidance,shared_clearance_budget)
@@ -59,7 +60,6 @@ def route_control(x, goal, obstacles, mask, alpha, points, route_mask, progress,
     min_h = jnp.min(jnp.where(mask, h, jnp.inf))
     min_psi = jnp.min(jnp.where(mask, psi, jnp.inf))
     return qp, min_h, min_psi, updated, remaining, target
-
 
 @partial(jax.jit, static_argnames=('config', 'steps', 'require_admissible','margin_guidance','shared_clearance_budget'))
 def rollout_route(x0, goal, obstacles, mask, alpha, points, route_mask,

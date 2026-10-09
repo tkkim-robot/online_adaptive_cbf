@@ -1,33 +1,40 @@
-"""Learned online gain selection, with explicit development calibration limits.
-
-All neural proposals pass an actual fixed-budget CBF-QP branch check. A common
-nonlearned backup has its own source code in the decision log. Nothing here
-certifies trajectory-level calibration or converts a rejected solve to success.
-"""
+"""Adaptive functions and shared contracts."""
 
 from dataclasses import dataclass
+
 from typing import NamedTuple
+
 import json
+
 import math
+
 from pathlib import Path
+
 import time
+
 import jax
+
 import jax.numpy as jnp
+
 import numpy as np
 
 from .config import UnicycleConfig
-from .dataset import sha256
+
 from .inference import ResearchPredictor
-from .models import route_graph,predict_ensemble
-from .route_control import route_control,rollout_route
+
+from .models import route_graph, predict_ensemble
+
+from .route_control import route_control, rollout_route
+
 from .routing import physical_route_coordinate
-from .simulation import GOAL,TIMEOUT
-from .uncertainty import cs_disagreement,worst_member_cvar
-from .sensor_margin import clearance_inflation,controller_contract,require_matching_controller
+
+from .simulation import GOAL, TIMEOUT
+
+from .uncertainty import cs_disagreement, worst_member_cvar
+
+from .guidance import clearance_inflation, controller_contract, require_matching_controller
 
 LEARNED,BACKUP,SEARCH,FIXED,REJECTED,UNGATED=range(6)
-SOURCE_NAMES={LEARNED:'learned',BACKUP:'common_backup',SEARCH:'nonlearned_search',FIXED:'fixed',REJECTED:'rejected',UNGATED:'ungated_learned'}
-
 
 @dataclass(frozen=True)
 class PolicyConfig:
@@ -59,7 +66,6 @@ class PolicyConfig:
         if any(len(g)!=2 or any(not math.isfinite(v) or v<=0 for v in g) for g in (self.fixed_gain,*self.backup_gains)):
             raise ValueError('Backup and fixed gains must be positive finite pairs')
 
-
 class Decision(NamedTuple):
     gains:jax.Array
     accepted:jax.Array
@@ -70,7 +76,6 @@ class Decision(NamedTuple):
     risk:jax.Array
     disagreement:jax.Array
     event_probability:jax.Array
-
 
 def make_selector(model,normalization,robot,config):
     if config.mode in ('learned','ungated'):
@@ -153,7 +158,6 @@ def make_selector(model,normalization,robot,config):
                         selected_risk,selected_cs,selected_event)
     return select
 
-
 class NonlearnedPolicy:
     """Same selection/backup interface without a neural bundle dependency."""
     def __init__(self,config,robot):
@@ -163,7 +167,6 @@ class NonlearnedPolicy:
         self.selector=make_selector(None,None,robot,config)
         self.metadata={'interpretation':'Nonlearned policy; no model or neural calibration used.'}
 
-
 class DevelopmentPolicy:
     """Strict warmed single-observation interface for the development policy."""
     def __init__(self,bundle,calibration,config=PolicyConfig(),robot=None,allow_development=False,device=None):
@@ -171,7 +174,7 @@ class DevelopmentPolicy:
         predictor=ResearchPredictor(bundle,allow_uncalibrated=True,device=device)
         info=json.loads(Path(calibration).read_text())
         if predictor.model.config.encoder=='nearest_fc':
-            from .nearest_fc_qualification import validate_fit
+            from .nearest_fc import validate_fit
             validate_fit(info,bundle)
         require_matching_controller(predictor.metadata,info,config.sensor_margin_scale,config.margin_guidance,config.shared_clearance_budget,config.motion_observer_window,config.filter_obstacle_position)
         if info['schema']!='oa_cbf_development_calibration_v1' or info['weights_sha256']!=predictor.metadata['weights_sha256']:
@@ -234,3 +237,36 @@ class DevelopmentPolicy:
         if np.any(values[2][values[3],2]<0) or values[6].sum()<2 or np.any(np.diff(values[6].astype(int))>0):
             raise ValueError('Invalid obstacle radius or padded route mask')
         return self.compiled[key](self.params,self.calibration,*(jax.device_put(a,self.device) for a in values))
+
+
+CANDIDATES = np.array([[.3,.3],[.5,.5],[.75,.75],[1.,1.],[1.5,1.5],[2.,2.],
+                       [3.,3.],[4.,4.],[.5,2.],[2.,.5],[1.,3.],[3.,1.]], np.float32)
+
+
+from scipy.stats import qmc
+
+def candidate_pool(queries,upper=4.,design='legacy'):
+    if design=='wide':
+        if queries<32 or upper<=16:raise ValueError('Wide proposal design requires >=32queries and upper>16')
+        from .route_dataset import wide_pairs
+        gains=candidate_pool(queries,upper)
+        gains[:16]=candidate_pool(16,16.)
+        gains[16:24]=wide_pairs(upper)
+        return gains
+    if design!='legacy':raise ValueError('Unknown candidate design')
+    if not np.isfinite(upper) or upper<4.:raise ValueError('Candidate upper bound must be finite and at least four')
+    if queries==3:
+        if upper!=4.:raise ValueError('The original three-query comparator has a fixed gain domain')
+        return np.array([[.5,.5],[1.,1.],[3.,3.]],np.float32)
+    if queries<4:raise ValueError('Use three baseline queries or at least four queries')
+    values=qmc.Sobol(2,scramble=True,seed=88421).random_base2(int(np.ceil(np.log2(queries))))[:queries]
+    gains=np.exp(np.log(.3)+values*np.log(upper/.3)).astype(np.float32)
+    count=min(queries,len(CANDIDATES));gains[:count]=CANDIDATES[:count]
+    if upper>4.:
+        if queries<16:raise ValueError('Expanded-domain probes require at least sixteen candidates')
+        extra=np.geomspace(4.,upper,5)[1:]
+        gains[count:count+4]=extra[:,None]
+    return gains
+
+
+PREDICTIVE_REJECTED = 6

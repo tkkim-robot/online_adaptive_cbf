@@ -1,25 +1,42 @@
-"""Observed Quad3D GAT/FC candidate scoring; no physical rollout gain search."""
-from dataclasses import dataclass,asdict
+"""Shared quad3d policy implementation."""
+
+from dataclasses import dataclass, asdict
+
 from pathlib import Path
+
 from statistics import NormalDist
+
 import math
+
 import numpy as np
+
 import jax
+
 import jax.numpy as jnp
+
 from .quad3d_features import history_graph
-from .quad3d_candidate_data import candidate_bank,WIDE_SCHEMA
-from .quad3d_learning_contract import validate_model,read
-from .quad3d_control import control_config,envelope_rows
+
+from .quad3d_data import candidate_bank, WIDE_SCHEMA
+
+from .quad3d_learning_contract import validate_model, read
+
+from .quad3d_control import control_config, envelope_rows
+
 from .quad3d import cylinder_hocbf
+
 from .quad3d_observation import controller_obstacles
+
 from .quad3d_predictive_calibration import SCHEMA as FIT_SCHEMA
+
 from .inference import ResearchPredictor
+
 from .models import predict_ensemble
+
 from .uncertainty import cs_disagreement
-from .dataset import sha256
+
+from .io import sha256
 
 GATE_SCHEMA='oa_cbf_quad3d_trajectory_gate_v96'
-
 
 @dataclass(frozen=True)
 class Quad3DPolicyConfig:
@@ -34,7 +51,6 @@ class Quad3DPolicyConfig:
         if type(self.query_every_ticks) is not int or self.query_every_ticks<1:raise ValueError('Positive integer query cadence required')
         if not all(math.isfinite(v) for v in asdict(self).values()) or not 0<self.tail_mass<1 or not 0<self.adverse_probability_limit<1 or self.gain_switch_penalty<0 or self.initial_gain not in (2.,4.,6.,8.):raise ValueError('Invalid Quad3D policy configuration')
 
-
 def admissibility(x,obstacles,mask,noise,bank,c):
     o=controller_obstacles(obstacles,mask,noise)
     def value(g):
@@ -42,7 +58,6 @@ def admissibility(x,obstacles,mask,noise,bank,c):
         return jnp.min(jnp.where(mask[:,None],psi,jnp.inf))
     psi=jax.vmap(value)(bank.astype(x.dtype));_,_,envelope=envelope_rows(x,c)
     return psi,jnp.min(envelope)
-
 
 def select(means,variances,logits,previous,bank,temperature,bias,threshold,psi,domain,c,p):
     # E,K,D -> K,E,1. Predictions are FP32; physical admission remains FP64.
@@ -63,14 +78,13 @@ def select(means,variances,logits,previous,bank,temperature,bias,threshold,psi,d
         cs_score=cs,finite_member_cvar=risk,adverse_probability=adverse,predicted_progress=progress,ranking_score=score,
         candidate_psi=psi,candidate_domain=domain)
 
-
 class Quad3DSelector:
     def __init__(self,bundle,prediction_fit,gate=None,reference=False,config=Quad3DPolicyConfig()):
         self.predictor=ResearchPredictor(bundle,allow_uncalibrated=True);self.metadata=self.predictor.metadata;validate_model(self.metadata)
         self.fit=read(prediction_fit);self.config=config;self.reference=reference
         fit=self.fit
         if self.predictor.model.config.encoder=='nearest_fc':
-            from .nearest_fc_qualification import validate_fit
+            from .nearest_fc import validate_fit
             validate_fit(fit,bundle)
         if fit['schema']!=FIT_SCHEMA or fit['weights_sha256']!=self.metadata['weights_sha256'] or fit['bundle_manifest_sha256']!=sha256(Path(bundle)/'manifest.json'):raise ValueError('Quad3D prediction lineage mismatch')
         for field in ('quad3d_contract','controller','targets','events','gain_domain'):

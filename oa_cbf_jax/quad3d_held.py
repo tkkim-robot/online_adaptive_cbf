@@ -11,22 +11,23 @@ exact constant-velocity observation model, psi3 >= 0 preserves lower stages on
 the interval. This does not certify unknown sensor/plant errors, future recursive
 feasibility, or nonlinear flight. Numerical tolerances remain explicit.
 """
-import math
-import numpy as np
-import jax.numpy as jnp
-from .quad3d import matrices
 
+import math
+
+import numpy as np
+
+import jax.numpy as jnp
+
+from .quad3d import matrices
 
 def power_to_bernstein(degree, duration):
     return np.array([[math.comb(i,k)/math.comb(degree,k)*duration**k if k<=i else 0.
                       for k in range(degree+1)] for i in range(degree+1)],np.float64)
 
-
 def derivative_matrix(degree):
     d=np.zeros((degree+1,degree+1),np.float64)
     for k in range(degree):d[k,k+1]=k+1
     return d
-
 
 def obstacle_hold_rows(x,reference,obstacles,mask,gains,config):
     r=config.robot;dtype=x.dtype
@@ -59,7 +60,6 @@ def obstacle_hold_rows(x,reference,obstacles,mask,gains,config):
     aa=jnp.where(mask[:,None,None],aa,0.);bb=jnp.where(mask[:,None],bb,1.)
     return aa.reshape(-1,4),bb.ravel()
 
-
 def envelope_hold_rows(x,config):
     c=config;r=c.robot;dtype=x.dtype;a,b=matrices(r)
     # Exact affine coefficients of the full state trajectory.
@@ -79,7 +79,6 @@ def envelope_hold_rows(x,config):
         grad=-sign*cu[:,idx,:];transform=bern@ops[order-1]
         aa.append(-(transform@grad)[1:]);bb.append((transform@constant)[1:])
     return jnp.concatenate(aa),jnp.concatenate(bb)
-
 
 def hold_rows(x,reference,obstacles,mask,gains,config):
     a,b=obstacle_hold_rows(x,reference,obstacles,mask,gains,config)

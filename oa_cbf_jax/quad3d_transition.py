@@ -1,23 +1,20 @@
-"""Affine sufficient next-observation obstacle-domain constraints.
+"""Shared quad3d transition implementation."""
 
-The sensor has a constant bias plus bounded independent innovations. Predicting
-the current measurement with the exact held-input plant does not predict the
-next measurement exactly. Bound this discrepancy and protect ALL four lower
-CBF cascades at the next query. This does not assert recursive QP feasibility.
-"""
 import math
-import numpy as np
-import jax
-import jax.numpy as jnp
-from .quad3d import matrices, held_quad3d_state, cylinder_hocbf
 
+import numpy as np
+
+import jax
+
+import jax.numpy as jnp
+
+from .quad3d import matrices, held_quad3d_state, cylinder_hocbf
 
 def flow_matrices(config):
     a,b=matrices(config.robot);dt=config.robot.dt
     f=sum(np.linalg.matrix_power(a,k)*dt**k/math.factorial(k) for k in range(4))
     g=sum(np.linalg.matrix_power(a,k)@b*dt**(k+1)/math.factorial(k+1) for k in range(4))
     return f,g
-
 
 def discrepancy_bounds(noise,config):
     """Component bounds for next raw measurement minus propagated current one.
@@ -33,7 +30,6 @@ def discrepancy_bounds(noise,config):
     op=jnp.asarray(np.asarray(dt,np.float64),dtype)*noise[5]
     op+=jnp.asarray(np.asarray(.15,np.float64),dtype)*(2*noise[4]+jnp.asarray(np.asarray(dt,np.float64),dtype)*noise[5])
     return dx,op,jnp.asarray(np.asarray(.3,np.float64),dtype)*noise[5],jnp.asarray(np.asarray(.3,np.float64),dtype)*noise[6]
-
 
 def cascade_error_bound(x,obstacles,noise,gains,config):
     """Uniform bound on changes of psi0..3 for ANY box-bounded command.
@@ -66,13 +62,11 @@ def cascade_error_bound(x,obstacles,noise,gains,config):
     return jnp.stack((dh,2*drv+k1*dh,2*dvv+2*dra+2*(k1+k2)*drv+k1*k2*dh,
         6*dva+2*drj+2*(k1+k2+k3)*(dvv+dra)+2*(k1*k2+k1*k3+k2*k3)*drv+k1*k2*k3*dh),axis=-1)
 
-
 def endpoint_cascades(x,u,obstacles,mask,gains,config):
     dt=jnp.asarray(np.asarray(config.robot.dt,np.float64),x.dtype)
     endpoint=held_quad3d_state(x,u,dt,config.robot)
     future=obstacles.at[:,:2].add(dt*obstacles[:,3:5])
     return cylinder_hocbf(endpoint,future,mask,gains,config.robot,config.clearance_buffer)[2]
-
 
 def transition_rows(x,reference,obstacles,mask,gains,noise,config):
     # For a held input, each r/v/a/j control contribution is a positive scalar
@@ -84,7 +78,6 @@ def transition_rows(x,reference,obstacles,mask,gains,noise,config):
     rhs=psi-jnp.einsum('nki,i->nk',jac,reference)-error
     aa=jnp.where(mask[:,None,None],-jac,0.);bb=jnp.where(mask[:,None],rhs,1.)
     return aa.reshape(-1,4),bb.ravel()
-
 
 def numpy_transition_certificate(x,u,obstacles,mask,gains,noise,config):
     """Independent NumPy endpoint/cascade-error check for actual applied u."""
