@@ -22,7 +22,7 @@ This repository contains the implementation of an online adaptive framework for 
 - Implementation of the Probabilistic Ensemble Neural Network ([PENN](https://github.com/tkkim-robot/online_adaptive_cbf/tree/main/nn_model/penn)) which offers parallelized inference without an outer for loop. The predicted output can be interpreted as a Gaussian Mixture Model (GMM). (see [Kim et al.](https://arxiv.org/abs/2305.12240))
 - Measurement of [closed-form epistemic uncertainty](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/nn_model/penn/divergence/utility.py) from the PENN model's predictions. (see [Kim et al.](https://arxiv.org/abs/2305.12240))
 - Integration with the [`safe_control`](https://github.com/tkkim-robot/safe_control) repository for simulating robotic navigation, offering various robot dynamics, controllers, and RGB-D type sensor simulation.
-- Implementation of the Online Adaptive ICCBF, adapting ICCBF parameters online based on the robot's current state and nearby environment.
+- JAX Implementation of the Online Adaptive CBF, adapting CBF parameters online based on the robot's current state and nearby environment with graph neural network encoding.
 
 
 ## Installation
@@ -67,8 +67,9 @@ python online_adaptive_cbf.py
 
 The default example runs the Quad2D navigation scenario using GAT to adapt the CBF parameters online with a CBF-QP controller.
 
-You can also test with compared methods using `--method`:
+Select a method using `--method`:
 
+- `ours_gat`: Online adaptation using the graph attention encoder (default).
 - `ours_fc`: Online adaptation using the nearest-obstacle fully connected encoder.
 - `fixed_low` and `fixed_high`: Fixed conservative and aggressive CBF parameters.
 - `optimal_decay`: Optimal Decay MPC-CBF for unicycle and quadrotors ([reference](https://ieeexplore.ieee.org/document/9683174)), or Optimal Decay CBF-QP for bicycle.
@@ -76,11 +77,12 @@ You can also test with compared methods using `--method`:
 - `barriernet`: BarrierNet.
 
 ```bash
+python online_adaptive_cbf.py --dynamics quad2d --method ours_gat
 python online_adaptive_cbf.py --dynamics quad2d --method ours_fc
 python online_adaptive_cbf.py --dynamics quad2d --method fixed_low
 ```
 
-Example navigation results:
+Example navigation results from the earlier dynamic-unicycle setup:
 
 |     MPC-CBF w/ low parameters            |       MPC-CBF w/ high parameters     |
 | :------------------: | :--------------------------: |
@@ -91,7 +93,7 @@ Example navigation results:
 |  <img src="https://github.com/user-attachments/assets/e43f72bc-475a-403d-bac8-41a077acdaf1"  height="170px"> | <img src="https://github.com/user-attachments/assets/ae2ecb58-254b-4334-84d6-8c52508c9973"  height="170px"> |
 
 
-|     Ours (Online Adaptive MPC-ICCBF)      |
+|     Ours (OA-CBF)      |
 | :-------------------------------: |
 |  <img src="https://github.com/user-attachments/assets/5d5806c1-31a9-42fb-806f-04ece91d54ba"  height="170px"> |
 
@@ -187,11 +189,11 @@ If you find this repository useful, please consider citing our paper:
 
 Our paper with more theoretical analysis:
 ```
-@inproceedings{kim2025learning, 
-    author    = {Kim, Taekyung and Kee, Robin Inho and Panagou, Dimitra},
-    title     = {Learning to Refine Input Constrained Control Barrier Functions via Uncertainty-Aware Online Parameter Adaptation}, 
-    booktitle = {IEEE International Conference on Robotics and Automation (ICRA)},
-    shorttitle = {Online-Adaptive-CBF},
+@inproceedings{kim2025how,
+    author    = {Kim, Taekyung and Beard, Randal W. and Panagou, Dimitra},
+    title     = {How to Adapt Control Barrier Functions? A Learning-Based Approach with Applications to a VTOL Quadplane},
+    booktitle = {IEEE Conference on Decision and Control (CDC)},
+    shorttitle = {How to Adapt Control Barrier Functions},
     year      = {2025}
 }
 ```
