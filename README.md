@@ -36,20 +36,22 @@ To install this project, follow these steps:
 
    If you've already cloned the repository without the --recursive flag, you can initialize and update the submodules with:
    ```bash
-   submodule update --init --recursive
+   git submodule update --init --recursive
    ```
 
 2. (Optional) Create and activate a virtual environment
 
-3. Install the package and its dependencies:
+3. Install the dependencies:
    ```bash
-   python -m pip install -e .
+   python -m pip install -r requirements-cpu.lock
    ```
-   BarrierNet dependencies are optional:
+   For CUDA, use `requirements-jax.lock` instead and run the examples with `--device gpu`. Use CPU for bicycle.
+
+4. Download the trained weights and calibration files:
    ```bash
-   python -m pip install -e ".[barriernet]"
+   python -m oa_cbf_jax.model_release
    ```
-   Or, install packages manually (see [`setup.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/setup.py)).
+   This downloads the [model release](https://github.com/tkkim-robot/online_adaptive_cbf/releases/tag/oa-cbf-models-2026-10) into `models/paper/`. Training datasets are not required to run the examples.
 
 
 ## Getting Started
@@ -63,48 +65,22 @@ You can run our test example by:
 python online_adaptive_cbf.py
 ```
 
-The MPC-CBF framework is implemented in our [`safe_control`](https://github.com/tkkim-robot/safe_control) repository. It imports `LocalTrackingController` class and uses the `mpc_cbf` implementation:
-```python
-from safe_control.tracking import LocalTrackingController
-controller = LocalTrackingController(x_init, robot_spec,
-                                control_type='mpc_cbf')
+The default example runs the Quad2D navigation scenario using GAT to adapt the CBF parameters online with a CBF-QP controller.
+
+You can also test with compared methods using `--method`:
+
+- `ours_fc`: Online adaptation using the nearest-obstacle fully connected encoder.
+- `fixed_low` and `fixed_high`: Fixed conservative and aggressive CBF parameters.
+- `optimal_decay`: Optimal Decay MPC-CBF for unicycle and quadrotors ([reference](https://ieeexplore.ieee.org/document/9683174)), or Optimal Decay CBF-QP for bicycle.
+- `optimal_decay_qp`: Optimal Decay CBF-QP for unicycle and Quad2D ([reference](https://ieeexplore.ieee.org/document/9482626)).
+- `barriernet`: BarrierNet.
+
+```bash
+python online_adaptive_cbf.py --dynamics quad2d --method ours_fc
+python online_adaptive_cbf.py --dynamics quad2d --method fixed_low
 ```
 
-Then, it uses `OnlineCBFAdapter` to adapt the CBF parameters online.
-
-```python
-online_cbf_adapter = OnlineCBFAdapter(nn_model, scaler)
-
-for _ in range(int(tf / self.dt)):
-   ret = controller.control_step()
-   controller.draw_plot()
-
-   best_gamma0, best_gamma1 = online_cbf_adapter.cbf_param_adaptation(controller)
-   controller.pos_controller.cbf_param['alpha1'] = best_gamma0
-   controller.pos_controller.cbf_param['alpha2'] = best_gamma1    
-```
-
-You can also test with compared methods:
-
-- Fixed CBF parameters:
-   - `mpc_cbf` with conservatie fixed parameters: Set lower values to CBF parameters. (* MPC-CBF: An MPC controller using discrete-time CBF, ref: [[1]](https://ieeexplore.ieee.org/document/9483029))
-      ```python
-         controller.pos_controller.cbf_param['alpha1'] = {low value}
-         controller.pos_controller.cbf_param['alpha2'] = {low value}
-      ```
-   - `mpc_cbf` with aggressive fixed parameters: Similarly, set higher values to CBF parameters.
-- Adaptive parameter methods:
-   - `optimal_decay_cbf_qp`: A modified CBF-QP for point-wise feasibility guarantee (ref: [[2]](https://ieeexplore.ieee.org/document/9482626))
-      ```python
-      controller = LocalTrackingController(..., control_type='optimal_decay_cbf_qp')
-      ```
-   - `optimal_decay_mpc_cbf`: The same technique applied to MPC-CBF (ref: [[3]](https://ieeexplore.ieee.org/document/9683174))
-      ```python
-      controller = LocalTrackingController(..., control_type='optimal_decay_mpc_cbf')
-      ```
-
-
-The sample results from the basic example:
+Example navigation results:
 
 |     MPC-CBF w/ low parameters            |       MPC-CBF w/ high parameters     |
 | :------------------: | :--------------------------: |
@@ -123,32 +99,27 @@ The green point is the goal location, and the gray circles are the obstacles tha
 
 ### Live Simulation Preview
 
-Use [`examples/run_simulation.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/examples/run_simulation.py) to interactively preview the scenarios with the `safe_control` renderer:
+Use [`examples/run_simulation.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/examples/run_simulation.py) to preview the navigation scenarios:
 
 ```bash
 python examples/run_simulation.py --list
-python examples/run_simulation.py --case narrow --dynamics quad2d --method ours_gat --backend MacOSX
-python examples/run_simulation.py --case wide --dynamics dynamic_unicycle --method ours_gat --hold
+python examples/run_simulation.py --dynamics quad2d --method ours_gat
+python examples/run_simulation.py --dynamics dynamic_unicycle --method ours_fc --hold
 ```
 
-Useful flags are `--case narrow|wide`, `--dynamics`, `--method`, `--max-t`, `--backend`, `--pause`, and `--hold`.
+Available dynamics are `unicycle`, `quad2d`, `quad3d`, and `bicycle`. Use `--list` to show the methods supported by each dynamics.
 
 ### Paper Media
 
 > Warning: This feature requires a lot of computation time. For interactive visualization, use [`examples/run_simulation.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/examples/run_simulation.py)
 
 
-Paper figures and videos are generated with [`plot/generate_paper_media.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/plot/generate_paper_media.py):
+Generate videos with [`examples/run_simulation.py`](https://github.com/tkkim-robot/online_adaptive_cbf/blob/main/examples/run_simulation.py) (requires `ffmpeg`):
 
 ```bash
-python plot/generate_paper_media.py --case narrow --format svg
-python plot/generate_paper_media.py --case wide --format svg
-python plot/generate_paper_media.py --case narrow --format mp4 --media individual
-python plot/generate_paper_media.py --case wide --format mp4 --media all
+python examples/run_simulation.py --dynamics quad2d --method ours_gat --video paper_media/quad2d_gat.mp4 --headless
+python examples/run_simulation.py --dynamics bicycle --method ours_fc --video paper_media/bicycle_fc.mp4 --headless
 ```
-
-Use `--dynamics quad2d` or `--dynamics dynamic_unicycle,quad3d` to generate a subset. Outputs are written under `paper_media/`.
-For final videos, do not pass `--max-frames`; that option is only for quick smoke tests and compresses playback.
 
 ## Module Breakdown
 

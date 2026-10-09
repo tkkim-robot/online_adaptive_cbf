@@ -5,10 +5,6 @@ sys.path.append(os.path.join(project_root, 'safe_control'))
 
 import numpy as np
 import matplotlib.pyplot as plt
-from safe_control.utils import plotting, env
-from safe_control.tracking import LocalTrackingController, InfeasibleError
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 
 class SafetyLossFunction:
@@ -21,7 +17,7 @@ class SafetyLossFunction:
 
     def compute_lambda_j(self, psi_j):
         '''Compute the alpha component based on the control barrier function constraint value (psi_j)'''
-        return self.lambda_1 * np.exp(-self.lambda_2 * psi_j)
+        return self.lambda_1 * np.exp(np.clip(-self.lambda_2 * psi_j, -700.0, 700.0))
 
     def compute_beta_j(self, delta_theta):
         '''Compute the beta component based on the change in angle (delta_theta)'''
@@ -34,6 +30,12 @@ class SafetyLossFunction:
         '''
         lambda_j = self.compute_lambda_j(cbf_constraint_value)
         beta_j = self.compute_beta_j(delta_theta)
+        robot_pos = np.asarray(robot_pos, dtype=float).reshape(-1)
+        obs_pos = np.asarray(obs_pos, dtype=float).reshape(-1)
+        if robot_pos.shape != obs_pos.shape or robot_pos.size not in (2, 3):
+            raise ValueError("Robot and obstacle positions must have matching 2D/3D coordinates")
+        # This historical proxy is not a collision indicator; audit signed
+        # physical clearance independently (squaring loses the overlap sign).
         Phi = lambda_j / (beta_j * (np.linalg.norm(robot_pos - obs_pos) - robot_rad - obs_rad)** 2 + 1)
         return Phi
 
@@ -42,6 +44,8 @@ def plot_safety_loss_function_grid(tracking_controller, safety_metric):
     Plot the safety loss function grid for different lambda_1 and delta_theta values
     We assume a zero control input in this plot
     '''
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
     lambda_1_values = [0.6, 0.4, 0.2]
     delta_theta_values = [-0.1, -1.5, -2.9]
     
@@ -110,6 +114,8 @@ def safety_loss_function_example():
     '''
     Example function to visualize the safety loss function grid of lambda_1 and delta_theta
     '''
+    from safe_control.utils import plotting, env
+    from safe_control.tracking import LocalTrackingController, InfeasibleError
     dt = 0.05
 
     # Define waypoints for the robot to follow
@@ -186,6 +192,8 @@ def dead_lock_example(deadlock_threshold=0.2, max_sim_time=15):
     '''
     Example function to simulate a scenario and check for deadlocks
     '''
+    from safe_control.utils import plotting, env
+    from safe_control.tracking import LocalTrackingController, InfeasibleError
     try:
         dt = 0.05
 

@@ -1,0 +1,24 @@
+# Resolve with uv pip compile; requirements-jax.lock records tested versions.
+jax[cuda12]==0.8.2
+flax==0.12.2
+optax==0.2.6
+orbax-checkpoint==0.11.31
+numpy
+scipy
+matplotlib
+pyyaml
+pytest
+osqp
+proxsuite
+clarabel==0.11.1
+qpax
+casadi==3.7.2
+do-mpc
+cvxpy
+gurobipy
+shapely
+pandas
+scikit-fmm
+scikit-learn
+plotly
+tqdm

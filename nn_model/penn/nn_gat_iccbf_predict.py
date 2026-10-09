@@ -228,11 +228,9 @@ class ProbabilisticEnsembleGAT(nn.Module):
             keys = list(checkpoint.keys())
             has_full_gat_state = any(k.startswith(("gat_model.", "gat_network.")) for k in keys)
             if has_full_gat_state:
-                self.load_state_dict(checkpoint, strict=False)
+                self.load_state_dict(checkpoint, strict=True)
             else:
-                if keys and keys[0].startswith("model."):
-                    checkpoint = {k.replace("model.", "", 1): v for k, v in checkpoint.items()}
-                self.model.load_state_dict(checkpoint, strict=False)
+                raise ValueError("Checkpoint lacks the trained GAT encoder; refusing partial learned inference")
             
         else:
-            print("Model path does not exist. Check the provided path.")
+            raise FileNotFoundError(f"Learned inference requires a trained checkpoint: {model_path}")

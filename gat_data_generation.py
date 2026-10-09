@@ -150,7 +150,7 @@ def single_agent_simulation_gat(
         max_sim_time=30.0,
         deadlock_threshold=0.2,
         show_animation=False,
-        retry_limit=10,
+        retry_limit=0,
         _attempt=0,
         save_cccp_traj=False,
     ):
@@ -161,6 +161,10 @@ def single_agent_simulation_gat(
     Args:
         save_cccp_traj: If True, also stores per-time-step graphs for CCCP calibration.
     """
+    if isinstance(max_sim_time, (bool, np.bool_)) or max_sim_time <= 0:
+        raise ValueError("max_sim_time must be a positive duration, not a boolean flag")
+    if retry_limit != 0:
+        raise ValueError("Scene-resampling retries are disabled: retain failures instead")
     if robot_model not in ["KinematicBicycle2D_DPCBF", "Quad3D"] and gamma1 is None:
         raise ValueError("Selected model needs gamma1.")
     
@@ -232,6 +236,9 @@ def single_agent_simulation_gat(
                 valid = False
                 break
         
+        if not valid:
+            attempts += 1
+            continue
         # For tracking, obstacles should follow 7-field format:
         # [x, y, r, vx, vy, y_min_or_theta, flag] where flag=0 for circles
         # Use zeros for velocities and extra field for static circular obstacles
@@ -488,7 +495,7 @@ def single_agent_simulation_gat(
 
 def worker(params):
     with SuppressPrints():  
-        result = single_agent_simulation_gat(*params)
+        result = single_agent_simulation_gat(**params)
 
     # Ensure all necessary PyG fields are included
     graph_data = result["graph_data"]
@@ -515,7 +522,7 @@ def worker(params):
                 "x": step_graph.x.cpu().numpy(),
                 "edge_index": step_graph.edge_index.cpu().numpy(),
                 "edge_attr": step_graph.edge_attr.cpu().numpy(),
-                "gamma": step_graph.gamma.cpu().numpy() if hasattr(step_graph, 'gamma') else None,
+                "gamma": np.asarray(step_graph.gamma.cpu() if hasattr(step_graph.gamma, 'cpu') else step_graph.gamma) if hasattr(step_graph, 'gamma') else None,
             }
             # Include y if present (though CCCP will ignore it)
             if hasattr(step_graph, 'y') and step_graph.y is not None:
@@ -555,7 +562,9 @@ def generate_data_for_model_gat(
             gamma1 = np.random.uniform(g1_min, g1_max)        
         theta = np.random.uniform(th_min, th_max)
         n_obs  = np.random.randint(obstacles_range[0], obstacles_range[1] + 1)
-        parameter_space.append((robot_model, controller_name, gamma0, gamma1, theta, n_obs, save_cccp_traj))
+        parameter_space.append(dict(robot_model=robot_model, controller_name=controller_name,
+                                    gamma0=gamma0, gamma1=gamma1, theta=theta,
+                                    num_obstacles=n_obs, save_cccp_traj=save_cccp_traj))
 
     # Use a multiprocessing pool
     pool = Pool(processes=num_processes)
@@ -654,7 +663,7 @@ if __name__ == "__main__":
         # single_simulation_example(robot_model, controller_name,
         #                           gamma0=0.01, gamma1=0.01, theta=0.01)
         
-        
+
         
 
     else: 
@@ -670,5 +679,3 @@ if __name__ == "__main__":
             save_cccp_traj=save_cccp_traj
         ) 
         print("Data generation complete!")
-        
-        
