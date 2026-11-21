@@ -67,6 +67,8 @@ python online_adaptive_cbf.py
 
 The default example runs the Quad2D navigation scenario using GAT to adapt the CBF parameters online with a CBF-QP controller.
 
+To run the full navigation benchmark on CPU and write the trial and summary tables to `output/benchmark/`, use `python -m oa_cbf_jax.benchmark`.
+
 Select a method using `--method`:
 
 - `ours_gat`: Online adaptation using the graph attention encoder (default).
